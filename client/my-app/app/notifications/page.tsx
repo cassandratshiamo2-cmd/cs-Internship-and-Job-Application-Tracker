@@ -1,14 +1,36 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { AppShell, SectionTitle } from "@/components/app-shell";
-import { mockNotifications } from "@/lib/mock-data";
+import { getInterviewNotifications, getStoredApplications } from "@/lib/mock-data";
+import type { NotificationItem } from "@/lib/types";
 
 export default function NotificationsPage() {
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [deliveryNotice, setDeliveryNotice] = useState("");
+
+  useEffect(() => {
+    setNotifications(getInterviewNotifications(getStoredApplications()));
+    const notice = window.sessionStorage.getItem("applyflow_delivery_notice");
+    if (notice) {
+      setDeliveryNotice(notice);
+      window.sessionStorage.removeItem("applyflow_delivery_notice");
+    }
+  }, []);
+
   return (
     <AppShell title="Notifications">
       <div className="space-y-6">
         <SectionTitle title="Your notifications" />
 
+        {deliveryNotice ? (
+          <div className="rounded-2xl border border-[#bfe8df] bg-[#effcf9] px-4 py-3 text-sm text-[#166b67]">
+            {deliveryNotice}
+          </div>
+        ) : null}
+
         <div className="space-y-3">
-          {mockNotifications.map((notification) => (
+          {notifications.length ? notifications.map((notification) => (
             <div
               key={notification.id}
               className={`rounded-[24px] border p-4 shadow-[0_8px_24px_rgba(203,213,225,0.18)] ${
@@ -31,7 +53,11 @@ export default function NotificationsPage() {
                 <p className="text-xs font-medium uppercase tracking-[0.14em] text-slate-400">{notification.date}</p>
               </div>
             </div>
-          ))}
+          )) : (
+            <div className="rounded-[24px] border border-dashed border-[#e7d6dd] bg-white/70 p-8 text-center text-slate-500">
+              No upcoming interview reminders.
+            </div>
+          )}
         </div>
       </div>
     </AppShell>

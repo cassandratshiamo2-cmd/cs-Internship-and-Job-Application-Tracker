@@ -83,6 +83,30 @@ export function saveApplications(applications: Application[]) {
   window.localStorage.setItem(APPLICATIONS_KEY, JSON.stringify(applications));
 }
 
+export function getInterviewNotifications(applications: Application[]): NotificationItem[] {
+  const now = Date.now();
+
+  return applications
+    .filter((application) => application.status === "Interview" && application.interviewDate && application.interviewTime)
+    .map((application) => {
+      const interviewAt = new Date(`${application.interviewDate}T${application.interviewTime}`).getTime();
+      const channels = application.notificationChannels?.length
+        ? application.notificationChannels
+        : ["In-app"];
+
+      return {
+        id: `interview-${application.id}`,
+        title: `Interview coming up at ${application.company}`,
+        type: "Interview Reminder" as const,
+        message: `${application.position} is scheduled for ${application.interviewDate} at ${application.interviewTime}. Notifications: ${channels.join(", ")}.`,
+        date: application.interviewDate,
+        read: interviewAt < now,
+      };
+    })
+    .filter((notification) => !notification.read)
+    .sort((first, second) => first.date.localeCompare(second.date));
+}
+
 export const mockApplications: Application[] = [];
 export const mockInterviews: Interview[] = [];
 export const mockNotifications: NotificationItem[] = [];

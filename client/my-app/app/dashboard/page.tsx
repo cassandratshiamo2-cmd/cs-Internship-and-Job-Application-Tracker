@@ -18,7 +18,7 @@ export default function DashboardPage() {
 
   const totalApplications = applications.length;
   const appliedCount = applications.filter((item) => item.status === "Applied").length;
-  const interviewCount = 0;
+  const interviewCount = applications.filter((item) => item.status === "Interview" && item.interviewDate && item.interviewTime).length;
   const offersCount = applications.filter((item) => item.status === "Offer").length;
 
   return (

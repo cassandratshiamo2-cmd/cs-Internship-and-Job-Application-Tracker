@@ -13,6 +13,7 @@ export type WorkArrangement = "Remote" | "Hybrid" | "Onsite";
 export type InterviewType = "Phone" | "Video" | "In-person" | "Technical" | "Panel" | "Other";
 export type InterviewStatus = "Upcoming" | "Completed" | "Cancelled";
 export type NotificationType = "Interview Reminder" | "Follow-up Reminder" | "Status Update" | "General";
+export type NotificationChannel = "In-app" | "Email" | "Phone";
 
 export interface Application {
   id: string;
@@ -23,6 +24,11 @@ export interface Application {
   status: ApplicationStatus;
   arrangement: WorkArrangement;
   notes: string;
+  interviewDate?: string;
+  interviewTime?: string;
+  notificationChannels?: NotificationChannel[];
+  interviewEmail?: string;
+  interviewPhone?: string;
 }
 
 export interface Interview {

@@ -63,6 +63,107 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+function isValidEmail(value) {
+  return typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function isValidPhone(value) {
+  return typeof value === 'string' && /^\+[1-9]\d{7,14}$/.test(value);
+}
+
+async function sendInterviewEmail({ email, company, position, interviewDate, interviewTime }) {
+  if (!process.env.RESEND_API_KEY || !process.env.NOTIFICATION_FROM_EMAIL) {
+    return { channel: 'Email', sent: false, reason: 'Email provider is not configured.' };
+  }
+
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: process.env.NOTIFICATION_FROM_EMAIL,
+      to: [email],
+      subject: `Interview reminder: ${company}`,
+      text: `Your ${position} interview at ${company} is scheduled for ${interviewDate} at ${interviewTime}.`,
+    }),
+  });
+
+  if (!response.ok) {
+    return { channel: 'Email', sent: false, reason: 'Email provider rejected the message.' };
+  }
+
+  return { channel: 'Email', sent: true };
+}
+
+async function sendInterviewSms({ phone, company, position, interviewDate, interviewTime }) {
+  const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER } = process.env;
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) {
+    return { channel: 'Phone', sent: false, reason: 'Phone provider is not configured.' };
+  }
+
+  const body = new URLSearchParams({
+    From: TWILIO_FROM_NUMBER,
+    To: phone,
+    Body: `Interview reminder: ${position} at ${company} on ${interviewDate} at ${interviewTime}.`,
+  });
+  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  });
+
+  if (!response.ok) {
+    return { channel: 'Phone', sent: false, reason: 'Phone provider rejected the message.' };
+  }
+
+  return { channel: 'Phone', sent: true };
+}
+
+app.post('/api/notifications/interview', async (req, res) => {
+  const {
+    company,
+    position,
+    interviewDate,
+    interviewTime,
+    notificationChannels = [],
+    email,
+    phone,
+  } = req.body || {};
+  const channels = Array.isArray(notificationChannels) ? notificationChannels : [];
+
+  if (!company || !position || !interviewDate || !interviewTime || !channels.some((channel) => channel === 'Email' || channel === 'Phone')) {
+    return res.status(400).json({ message: 'Interview details and at least one external notification channel are required.' });
+  }
+
+  if (channels.includes('Email') && !isValidEmail(email)) {
+    return res.status(400).json({ message: 'A valid email address is required for email reminders.' });
+  }
+
+  if (channels.includes('Phone') && !isValidPhone(phone)) {
+    return res.status(400).json({ message: 'Use an international phone number such as +27123456789 for phone reminders.' });
+  }
+
+  try {
+    const results = [];
+    if (channels.includes('Email')) {
+      results.push(await sendInterviewEmail({ email, company, position, interviewDate, interviewTime }));
+    }
+    if (channels.includes('Phone')) {
+      results.push(await sendInterviewSms({ phone, company, position, interviewDate, interviewTime }));
+    }
+
+    return res.status(200).json({ results });
+  } catch (error) {
+    console.error('Interview notification delivery failed:', error.message);
+    return res.status(502).json({ message: 'The notification provider could not be reached.' });
+  }
+});
+
 app.post('/api/register', async (req, res) => {
   try {
     const { fullName, email, password } = req.body || {};

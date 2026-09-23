@@ -31,13 +31,13 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#fff8fb,_#fff6ef_30%,_#f7f7ff_100%)] text-slate-800">
       <header className="border-b border-white/60 bg-white/75 backdrop-blur-sm">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8">
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-[#ffb5c8] via-[#ffb36c] to-[#3ec5c1] text-lg font-bold text-white shadow-sm">
               A
             </div>
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#0f766e]">ApplyFlow</p>
-              <h1 className="text-base font-semibold text-slate-800">{title}</h1>
+              <h1 className="truncate text-base font-semibold text-slate-800">{title}</h1>
             </div>
           </div>
 
@@ -59,7 +59,7 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
           </div>
 
           <div className="flex items-center gap-3">
-            <button className="rounded-full border border-[#f3d5df] bg-[#fff8fb] px-3 py-2 text-sm font-medium text-slate-700">
+            <button className="hidden rounded-full border border-[#f3d5df] bg-[#fff8fb] px-3 py-2 text-sm font-medium text-slate-700 sm:block">
               {userName}
             </button>
             <button
@@ -71,9 +71,23 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
             </button>
           </div>
         </div>
+        <nav className="mx-auto flex max-w-7xl gap-2 overflow-x-auto px-4 pb-3 md:hidden sm:px-6 lg:px-8" aria-label="Primary navigation">
+          {navItems.map((item) => {
+            const active = pathname.startsWith(item.href);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`shrink-0 rounded-full px-3 py-2 text-sm font-medium ${active ? "bg-[#2ec4c0] text-white" : "bg-white/80 text-slate-600"}`}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
       </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</main>
+      <main className="mx-auto min-w-0 max-w-7xl overflow-hidden px-4 py-6 sm:px-6 lg:px-8">{children}</main>
     </div>
   );
 }

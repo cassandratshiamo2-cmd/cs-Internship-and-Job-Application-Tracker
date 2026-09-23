@@ -10,11 +10,23 @@ import type { Application } from "@/lib/types";
 export default function ApplicationDetailPage() {
   const params = useParams<{ id: string }>();
   const [application, setApplication] = useState<Application | null>(null);
+  const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
     const foundApplication = getStoredApplications().find((item) => item.id === params.id);
     setApplication(foundApplication ?? null);
+    setIsLoaded(true);
   }, [params.id]);
+
+  if (!isLoaded) {
+    return (
+      <AppShell title="Application Details">
+        <div className="rounded-[28px] border border-white/60 bg-white/80 p-8 text-center text-slate-500">
+          Loading application...
+        </div>
+      </AppShell>
+    );
+  }
 
   if (!application) {
     return notFound();
@@ -38,6 +50,13 @@ export default function ApplicationDetailPage() {
           <InfoRow label="Application Status" value={application.status} />
           <InfoRow label="Work Arrangement" value={application.arrangement} />
           <InfoRow label="Notes" value={application.notes} />
+          {application.status === "Interview" ? (
+            <>
+              <InfoRow label="Interview Date" value={application.interviewDate || "Not scheduled"} />
+              <InfoRow label="Interview Time" value={application.interviewTime || "Not scheduled"} />
+              <InfoRow label="Reminders" value={application.notificationChannels?.join(", ") || "In-app"} />
+            </>
+          ) : null}
         </div>
 
         <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:justify-end">

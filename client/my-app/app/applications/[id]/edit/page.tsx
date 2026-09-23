@@ -5,24 +5,47 @@ import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getStoredApplications, saveApplications } from "@/lib/mock-data";
-import type { Application } from "@/lib/types";
+import type { Application, NotificationChannel } from "@/lib/types";
+import { sendExternalInterviewNotifications } from "@/lib/notification-api";
 
 export default function EditApplicationPage() {
   const params = useParams<{ id: string }>();
   const [application, setApplication] = useState<Application | null>(null);
+  const [status, setStatus] = useState<Application["status"] | "Saved">("Saved");
 
   useEffect(() => {
     const foundApplication = getStoredApplications().find((item) => item.id === params.id);
     setApplication(foundApplication ?? null);
+    setStatus(foundApplication?.status ?? "Saved");
   }, [params.id]);
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!application) {
       return;
     }
 
     const form = new FormData(event.currentTarget);
+    const nextStatus = String(form.get("status") || application.status) as Application["status"];
+    const interviewDate = String(form.get("interviewDate") || "").trim();
+    const interviewTime = String(form.get("interviewTime") || "").trim();
+    const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
+    const savedChannels: NotificationChannel[] = notificationChannels.length ? notificationChannels : ["In-app"];
+    const interviewEmail = String(form.get("interviewEmail") || "").trim();
+    const interviewPhone = String(form.get("interviewPhone") || "").trim();
+
+    if (nextStatus === "Interview" && (!interviewDate || !interviewTime)) {
+      return;
+    }
+
+    if (nextStatus === "Interview" && savedChannels.includes("Email") && !interviewEmail) {
+      return;
+    }
+
+    if (nextStatus === "Interview" && savedChannels.includes("Phone") && !interviewPhone) {
+      return;
+    }
+
     const updatedApplications = getStoredApplications().map((item) => {
       if (item.id !== application.id) {
         return item;
@@ -34,13 +57,18 @@ export default function EditApplicationPage() {
         position: String(form.get("position") || item.position).trim(),
         date: String(form.get("date") || item.date),
         type: String(form.get("type") || item.type) as Application["type"],
-        status: String(form.get("status") || item.status) as Application["status"],
+        status: nextStatus,
         arrangement: String(form.get("arrangement") || item.arrangement) as Application["arrangement"],
         notes: String(form.get("notes") || item.notes).trim(),
+        ...(nextStatus === "Interview" ? { interviewDate, interviewTime, notificationChannels: savedChannels, interviewEmail, interviewPhone } : { interviewDate: undefined, interviewTime: undefined, notificationChannels: undefined, interviewEmail: undefined, interviewPhone: undefined }),
       };
     });
 
     saveApplications(updatedApplications);
+    if (nextStatus === "Interview") {
+      const delivery = await sendExternalInterviewNotifications({ company: String(form.get("company") || application.company).trim(), position: String(form.get("position") || application.position).trim(), interviewDate, interviewTime, notificationChannels: savedChannels, email: interviewEmail, phone: interviewPhone });
+      window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
+    }
     window.location.href = `/applications/${application.id}`;
   };
 
@@ -89,7 +117,7 @@ export default function EditApplicationPage() {
             </div>
             <div>
               <label className="mb-2 block text-sm font-medium text-slate-700">Application Status</label>
-              <select name="status" defaultValue={application.status} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
+              <select name="status" value={status} onChange={(event) => setStatus(event.target.value as Application["status"])} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
                 <option>Saved</option>
                 <option>Applied</option>
                 <option>Assessment</option>
@@ -109,6 +137,41 @@ export default function EditApplicationPage() {
               </select>
             </div>
           </div>
+
+          {status === "Interview" ? (
+            <fieldset className="rounded-2xl border border-[#d9d3ff] bg-[#faf8ff] p-4">
+              <legend className="px-1 text-sm font-semibold text-[#5d4b9f]">Interview schedule and reminders</legend>
+              <div className="grid gap-5 sm:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">Interview date</label>
+                  <input required type="date" name="interviewDate" defaultValue={application.interviewDate} className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">Interview time</label>
+                  <input required type="time" name="interviewTime" defaultValue={application.interviewTime} className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+                </div>
+              </div>
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">Reminder email</label>
+                  <input type="email" name="interviewEmail" defaultValue={application.interviewEmail} placeholder="you@example.com" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-slate-700">Reminder phone</label>
+                  <input type="tel" name="interviewPhone" defaultValue={application.interviewPhone} placeholder="+27123456789" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+                </div>
+              </div>
+              <p className="mt-4 text-sm text-slate-500">Email and phone reminders are sent when the server provider is configured. Use an international phone number.</p>
+              <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
+                {(["In-app", "Email", "Phone"] as NotificationChannel[]).map((channel) => (
+                  <label key={channel} className="flex items-center gap-2">
+                    <input type="checkbox" name="notificationChannel" value={channel} defaultChecked={(application.notificationChannels || ["In-app"]).includes(channel)} />
+                    {channel}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ) : null}
 
           <div>
             <label className="mb-2 block text-sm font-medium text-slate-700">Notes</label>

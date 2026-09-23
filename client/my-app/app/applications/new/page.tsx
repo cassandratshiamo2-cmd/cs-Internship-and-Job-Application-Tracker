@@ -4,11 +4,14 @@ import Link from "next/link";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getStoredApplications, saveApplications } from "@/lib/mock-data";
+import type { NotificationChannel } from "@/lib/types";
+import { sendExternalInterviewNotifications } from "@/lib/notification-api";
 
 export default function AddApplicationPage() {
   const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
 
@@ -19,9 +22,29 @@ export default function AddApplicationPage() {
     const status = String(form.get("status") || "");
     const arrangement = String(form.get("arrangement") || "");
     const notes = String(form.get("notes") || "").trim();
+    const interviewDate = String(form.get("interviewDate") || "").trim();
+    const interviewTime = String(form.get("interviewTime") || "").trim();
+    const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
+    const interviewEmail = String(form.get("interviewEmail") || "").trim();
+    const interviewPhone = String(form.get("interviewPhone") || "").trim();
 
     if (!company || !position || !date || !type || !status || !arrangement || !notes) {
       setError("Please complete all required fields.");
+      return;
+    }
+
+    if (status === "Interview" && (!interviewDate || !interviewTime)) {
+      setError("Add the interview date and time before saving an interview application.");
+      return;
+    }
+
+    if (status === "Interview" && notificationChannels.includes("Email") && !interviewEmail) {
+      setError("Add an email address for email reminders.");
+      return;
+    }
+
+    if (status === "Interview" && notificationChannels.includes("Phone") && !interviewPhone) {
+      setError("Add a phone number for phone reminders.");
       return;
     }
 
@@ -35,10 +58,15 @@ export default function AddApplicationPage() {
       status: status as "Saved" | "Applied" | "Assessment" | "Shortlisted" | "Interview" | "Offer" | "Rejected" | "Withdrawn",
       arrangement: arrangement as "Remote" | "Hybrid" | "Onsite",
       notes,
+      ...(status === "Interview" ? { interviewDate, interviewTime, notificationChannels: notificationChannels.length ? notificationChannels : ["In-app"], interviewEmail, interviewPhone } : {}),
     });
 
     saveApplications(applications);
     setError("");
+    if (status === "Interview") {
+      const delivery = await sendExternalInterviewNotifications({ company, position, interviewDate, interviewTime, notificationChannels, email: interviewEmail, phone: interviewPhone });
+      window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
+    }
     window.location.href = "/applications";
   };
 
@@ -78,7 +106,7 @@ export default function AddApplicationPage() {
             </div>
             <div>
               <label className="mb-2 block text-sm font-medium text-slate-700">Application Status</label>
-              <select name="status" className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
+              <select name="status" value={status} onChange={(event) => setStatus(event.target.value)} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
                 <option value="">Select</option>
                 <option>Saved</option>
                 <option>Applied</option>
@@ -100,6 +128,8 @@ export default function AddApplicationPage() {
               </select>
             </div>
           </div>
+
+          {status === "Interview" ? <InterviewFields /> : null}
 
           <div>
             <label className="mb-2 block text-sm font-medium text-slate-700">Notes</label>
@@ -123,5 +153,42 @@ export default function AddApplicationPage() {
         </form>
       </div>
     </AppShell>
+  );
+}
+
+function InterviewFields() {
+  return (
+    <fieldset className="rounded-2xl border border-[#d9d3ff] bg-[#faf8ff] p-4">
+      <legend className="px-1 text-sm font-semibold text-[#5d4b9f]">Interview schedule and reminders</legend>
+      <div className="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label className="mb-2 block text-sm font-medium text-slate-700">Interview date</label>
+          <input required type="date" name="interviewDate" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+        </div>
+        <div>
+          <label className="mb-2 block text-sm font-medium text-slate-700">Interview time</label>
+          <input required type="time" name="interviewTime" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+        </div>
+      </div>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <div>
+          <label className="mb-2 block text-sm font-medium text-slate-700">Reminder email</label>
+          <input type="email" name="interviewEmail" placeholder="you@example.com" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+        </div>
+        <div>
+          <label className="mb-2 block text-sm font-medium text-slate-700">Reminder phone</label>
+          <input type="tel" name="interviewPhone" placeholder="+27123456789" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+        </div>
+      </div>
+      <p className="mt-4 text-sm text-slate-500">Email and phone reminders are sent when the server provider is configured. Use an international phone number.</p>
+      <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
+        {(["In-app", "Email", "Phone"] as NotificationChannel[]).map((channel) => (
+          <label key={channel} className="flex items-center gap-2">
+            <input type="checkbox" name="notificationChannel" value={channel} defaultChecked={channel === "In-app"} />
+            {channel}
+          </label>
+        ))}
+      </div>
+    </fieldset>
   );
 }
