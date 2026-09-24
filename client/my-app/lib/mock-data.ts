@@ -7,7 +7,13 @@ import type {
 const APPLICATIONS_KEY = "applyflow_applications";
 const USER_KEY = "applyflow_user";
 
-const legacyApplicationIds = new Set(["app-101", "app-102", "app-103", "app-104", "app-105"]);
+const legacyApplicationIds = new Set([
+  "app-101",
+  "app-102",
+  "app-103",
+  "app-104",
+  "app-105",
+]);
 
 export function getCurrentUser() {
   if (typeof window === "undefined") {
@@ -15,12 +21,14 @@ export function getCurrentUser() {
   }
 
   const rawUser = window.localStorage.getItem(USER_KEY);
+
   if (!rawUser) {
     return null;
   }
 
   try {
     const parsedUser = JSON.parse(rawUser);
+
     if (!parsedUser || typeof parsedUser !== "object") {
       window.localStorage.removeItem(USER_KEY);
       return null;
@@ -33,7 +41,13 @@ export function getCurrentUser() {
   }
 }
 
-export function setCurrentUser(user: { fullName?: string; email?: string; id?: number | string } | null) {
+export function setCurrentUser(
+  user: {
+    fullName?: string;
+    email?: string;
+    id?: number | string;
+  } | null
+) {
   if (typeof window === "undefined") {
     return;
   }
@@ -51,19 +65,26 @@ export function getStoredApplications(): Application[] {
     return [];
   }
 
-  const rawApplications = window.localStorage.getItem(APPLICATIONS_KEY);
+  const rawApplications =
+    window.localStorage.getItem(APPLICATIONS_KEY);
+
   if (!rawApplications) {
     return [];
   }
 
   try {
     const parsedApplications = JSON.parse(rawApplications);
+
     if (!Array.isArray(parsedApplications)) {
       window.localStorage.removeItem(APPLICATIONS_KEY);
       return [];
     }
 
-    if (parsedApplications.some((item) => item && legacyApplicationIds.has(item.id))) {
+    if (
+      parsedApplications.some(
+        (item) => item && legacyApplicationIds.has(item.id)
+      )
+    ) {
       window.localStorage.removeItem(APPLICATIONS_KEY);
       return [];
     }
@@ -80,33 +101,54 @@ export function saveApplications(applications: Application[]) {
     return;
   }
 
-  window.localStorage.setItem(APPLICATIONS_KEY, JSON.stringify(applications));
+  window.localStorage.setItem(
+    APPLICATIONS_KEY,
+    JSON.stringify(applications)
+  );
 }
 
-export function getInterviewNotifications(applications: Application[]): NotificationItem[] {
+export function getInterviewNotifications(
+  applications: Application[]
+): NotificationItem[] {
   const now = Date.now();
 
   return applications
-    .filter((application) => application.status === "Interview" && application.interviewDate && application.interviewTime)
-    .map((application) => {
-      const interviewAt = new Date(`${application.interviewDate}T${application.interviewTime}`).getTime();
-      const channels = application.notificationChannels?.length
-        ? application.notificationChannels
-        : ["In-app"];
+    .filter(
+      (application) =>
+        application.status === "Interview" &&
+        application.interviewDate &&
+        application.interviewTime
+    )
+    .map((application): NotificationItem => {
+      const interviewDate: string = application.interviewDate!;
+      const interviewTime: string = application.interviewTime!;
+
+      const interviewAt = new Date(
+        `${interviewDate}T${interviewTime}`
+      ).getTime();
+
+      const channels =
+        application.notificationChannels?.length
+          ? application.notificationChannels
+          : ["In-app"];
 
       return {
         id: `interview-${application.id}`,
         title: `Interview coming up at ${application.company}`,
-        type: "Interview Reminder" as const,
-        message: `${application.position} is scheduled for ${application.interviewDate} at ${application.interviewTime}. Notifications: ${channels.join(", ")}.`,
-        date: application.interviewDate,
+        type: "Interview Reminder",
+        message: `${application.position} is scheduled for ${interviewDate} at ${interviewTime}. Notifications: ${channels.join(", ")}.`,
+        date: interviewDate,
         read: interviewAt < now,
       };
     })
     .filter((notification) => !notification.read)
-    .sort((first, second) => first.date.localeCompare(second.date));
+    .sort((first, second) =>
+      first.date.localeCompare(second.date)
+    );
 }
 
 export const mockApplications: Application[] = [];
+
 export const mockInterviews: Interview[] = [];
+
 export const mockNotifications: NotificationItem[] = [];
