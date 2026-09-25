@@ -49,6 +49,7 @@ export default function ApplicationDetailPage() {
           <InfoRow label="Application Type" value={application.type} />
           <InfoRow label="Application Status" value={application.status} />
           <InfoRow label="Work Arrangement" value={application.arrangement} />
+          {application.applicationLink ? <InfoRow label="Job Post" value={application.applicationLink} link={application.applicationLink} /> : null}
           <InfoRow label="Notes" value={application.notes} />
           {application.status === "Interview" ? (
             <>
@@ -75,11 +76,15 @@ export default function ApplicationDetailPage() {
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: string }) {
+function InfoRow({ label, value, link }: { label: string; value: string; link?: string }) {
   return (
     <div className="rounded-2xl border border-[#f0e7ef] bg-[#fffafc] p-4">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</p>
-      <p className="mt-2 text-base font-medium text-slate-700">{value}</p>
+      {link ? (
+        <a href={link} target="_blank" rel="noreferrer" className="mt-2 block break-all text-base font-medium text-[#0f766e] underline">
+          {value}
+        </a>
+      ) : <p className="mt-2 text-base font-medium text-slate-700">{value}</p>}
     </div>
   );
 }

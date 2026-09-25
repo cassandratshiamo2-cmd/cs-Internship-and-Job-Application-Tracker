@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getStoredApplications, saveApplications } from "@/lib/mock-data";
+import { cancelExternalInterviewNotifications } from "@/lib/notification-api";
 import type { Application } from "@/lib/types";
 
 export default function DeleteApplicationPage() {
@@ -16,11 +17,12 @@ export default function DeleteApplicationPage() {
     setApplication(foundApplication ?? null);
   }, [params.id]);
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!application) {
       return;
     }
 
+    await cancelExternalInterviewNotifications(application.id);
     const filteredApplications = getStoredApplications().filter((item) => item.id !== application.id);
     saveApplications(filteredApplications);
     window.location.href = "/applications";

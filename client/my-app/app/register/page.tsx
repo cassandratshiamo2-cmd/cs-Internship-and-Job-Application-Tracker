@@ -17,6 +17,7 @@ export default function RegisterPage() {
     const form = new FormData(event.currentTarget);
     const fullName = String(form.get("fullName") || "").trim();
     const email = String(form.get("email") || "").trim();
+    const phoneNumber = String(form.get("phoneNumber") || "").trim();
     const password = String(form.get("password") || "");
     const confirmPassword = String(form.get("confirmPassword") || "");
 
@@ -27,6 +28,11 @@ export default function RegisterPage() {
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       setError("Please enter a valid email address.");
+      return;
+    }
+
+    if (phoneNumber && !/^\+[1-9]\d{7,14}$/.test(phoneNumber)) {
+      setError("Use an international phone number in E.164 format, such as +27123456789.");
       return;
     }
 
@@ -53,6 +59,7 @@ export default function RegisterPage() {
           fullName,
           email,
           password,
+          phoneNumber: phoneNumber || null,
         }),
       });
 
@@ -107,6 +114,18 @@ export default function RegisterPage() {
               className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none transition focus:border-[#38b7b9] focus:bg-white"
               placeholder="name@example.com"
             />
+          </div>
+
+          <div>
+            <label htmlFor="phoneNumber" className="mb-2 block text-sm font-medium text-slate-700">Phone number (optional)</label>
+            <input
+              id="phoneNumber"
+              name="phoneNumber"
+              type="tel"
+              className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none transition focus:border-[#38b7b9] focus:bg-white"
+              placeholder="+27123456789"
+            />
+            <p className="mt-2 text-xs text-slate-500">Required only if you want SMS interview reminders.</p>
           </div>
 
           <div>

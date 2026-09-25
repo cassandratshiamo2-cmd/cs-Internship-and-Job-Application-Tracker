@@ -22,6 +22,7 @@ export default function AddApplicationPage() {
     const status = String(form.get("status") || "");
     const arrangement = String(form.get("arrangement") || "");
     const notes = String(form.get("notes") || "").trim();
+    const applicationLink = String(form.get("applicationLink") || "").trim();
     const interviewDate = String(form.get("interviewDate") || "").trim();
     const interviewTime = String(form.get("interviewTime") || "").trim();
     const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
@@ -30,6 +31,11 @@ export default function AddApplicationPage() {
 
     if (!company || !position || !date || !type || !status || !arrangement || !notes) {
       setError("Please complete all required fields.");
+      return;
+    }
+
+    if (applicationLink && !/^https?:\/\//i.test(applicationLink)) {
+      setError("The application link must start with http:// or https://.");
       return;
     }
 
@@ -43,14 +49,20 @@ export default function AddApplicationPage() {
       return;
     }
 
-    if (status === "Interview" && notificationChannels.includes("Phone") && !interviewPhone) {
-      setError("Add a phone number for phone reminders.");
+    if (status === "Interview" && (notificationChannels.includes("SMS") || notificationChannels.includes("Phone")) && !interviewPhone) {
+      setError("Add your account phone number for SMS reminders.");
+      return;
+    }
+
+    if (status === "Interview" && (notificationChannels.includes("SMS") || notificationChannels.includes("Phone")) && !/^\+[1-9]\d{7,14}$/.test(interviewPhone)) {
+      setError("Use an international phone number in E.164 format, such as +27123456789.");
       return;
     }
 
     const applications = getStoredApplications();
+    const applicationId = `app-${Date.now()}`;
     applications.push({
-      id: `app-${Date.now()}`,
+      id: applicationId,
       company,
       position,
       date,
@@ -58,13 +70,14 @@ export default function AddApplicationPage() {
       status: status as "Saved" | "Applied" | "Assessment" | "Shortlisted" | "Interview" | "Offer" | "Rejected" | "Withdrawn",
       arrangement: arrangement as "Remote" | "Hybrid" | "Onsite",
       notes,
+      ...(applicationLink ? { applicationLink } : {}),
       ...(status === "Interview" ? { interviewDate, interviewTime, notificationChannels: notificationChannels.length ? notificationChannels : ["In-app"], interviewEmail, interviewPhone } : {}),
     });
 
     saveApplications(applications);
     setError("");
     if (status === "Interview") {
-      const delivery = await sendExternalInterviewNotifications({ company, position, interviewDate, interviewTime, notificationChannels, email: interviewEmail, phone: interviewPhone });
+      const delivery = await sendExternalInterviewNotifications({ applicationId, company, position, interviewDate, interviewTime, scheduledAt: new Date(`${interviewDate}T${interviewTime}`).toISOString(), applicationLink, notificationChannels, email: interviewEmail, phoneNumber: interviewPhone });
       window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
     }
     window.location.href = "/applications";
@@ -85,6 +98,10 @@ export default function AddApplicationPage() {
             <div>
               <label className="mb-2 block text-sm font-medium text-slate-700">Company Name</label>
               <input name="company" className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+            </div>
+            <div className="md:col-span-2">
+              <label className="mb-2 block text-sm font-medium text-slate-700">Job post link (optional)</label>
+              <input type="url" name="applicationLink" placeholder="https://company.com/jobs/role" className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
             </div>
             <div>
               <label className="mb-2 block text-sm font-medium text-slate-700">Position / Job Title</label>
@@ -176,13 +193,13 @@ function InterviewFields() {
           <input type="email" name="interviewEmail" placeholder="you@example.com" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
         </div>
         <div>
-          <label className="mb-2 block text-sm font-medium text-slate-700">Reminder phone</label>
+          <label className="mb-2 block text-sm font-medium text-slate-700">Account phone for SMS reminders</label>
           <input type="tel" name="interviewPhone" placeholder="+27123456789" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
         </div>
       </div>
-      <p className="mt-4 text-sm text-slate-500">Email and phone reminders are sent when the server provider is configured. Use an international phone number.</p>
+      <p className="mt-4 text-sm text-slate-500">Email reminders use the address above. SMS reminders use the phone number stored on your account.</p>
       <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
-        {(["In-app", "Email", "Phone"] as NotificationChannel[]).map((channel) => (
+        {(["In-app", "Email", "SMS"] as NotificationChannel[]).map((channel) => (
           <label key={channel} className="flex items-center gap-2">
             <input type="checkbox" name="notificationChannel" value={channel} defaultChecked={channel === "In-app"} />
             {channel}
