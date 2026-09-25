@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getStoredApplications, saveApplications } from "@/lib/mock-data";
@@ -8,6 +9,7 @@ import type { NotificationChannel } from "@/lib/types";
 import { sendExternalInterviewNotifications } from "@/lib/notification-api";
 
 export default function AddApplicationPage() {
+  const router = useRouter();
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
 
@@ -66,7 +68,7 @@ export default function AddApplicationPage() {
       company,
       position,
       date,
-      type: type as "Internship" | "WIL" | "Graduate Job" | "Full-Time Job",
+      type: type as "Internship" | "WIL" | "Graduate Job" | "Full-Time Job" | "Job",
       status: status as "Saved" | "Applied" | "Assessment" | "Shortlisted" | "Interview" | "Offer" | "Rejected" | "Withdrawn",
       arrangement: arrangement as "Remote" | "Hybrid" | "Onsite",
       notes,
@@ -80,7 +82,7 @@ export default function AddApplicationPage() {
       const delivery = await sendExternalInterviewNotifications({ applicationId, company, position, interviewDate, interviewTime, scheduledAt: new Date(`${interviewDate}T${interviewTime}`).toISOString(), applicationLink, notificationChannels, email: interviewEmail, phoneNumber: interviewPhone });
       window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
     }
-    window.location.href = "/applications";
+    router.push("/applications");
   };
 
   return (
@@ -119,6 +121,7 @@ export default function AddApplicationPage() {
                 <option>WIL</option>
                 <option>Graduate Job</option>
                 <option>Full-Time Job</option>
+                <option>Job</option>
               </select>
             </div>
             <div>

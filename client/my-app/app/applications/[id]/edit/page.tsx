@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getStoredApplications, saveApplications } from "@/lib/mock-data";
@@ -10,13 +10,18 @@ import { cancelExternalInterviewNotifications, sendExternalInterviewNotification
 
 export default function EditApplicationPage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const [application, setApplication] = useState<Application | null>(null);
   const [status, setStatus] = useState<Application["status"] | "Saved">("Saved");
 
   useEffect(() => {
     const foundApplication = getStoredApplications().find((item) => item.id === params.id);
-    setApplication(foundApplication ?? null);
-    setStatus(foundApplication?.status ?? "Saved");
+    const syncApplication = window.setTimeout(() => {
+      setApplication(foundApplication ?? null);
+      setStatus(foundApplication?.status ?? "Saved");
+    }, 0);
+
+    return () => window.clearTimeout(syncApplication);
   }, [params.id]);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -87,7 +92,7 @@ export default function EditApplicationPage() {
     } else {
       await cancelExternalInterviewNotifications(application.id);
     }
-    window.location.href = `/applications/${application.id}`;
+    router.push(`/applications/${application.id}`);
   };
 
   if (!application) {
@@ -135,6 +140,7 @@ export default function EditApplicationPage() {
                 <option>WIL</option>
                 <option>Graduate Job</option>
                 <option>Full-Time Job</option>
+                <option>Job</option>
               </select>
             </div>
             <div>

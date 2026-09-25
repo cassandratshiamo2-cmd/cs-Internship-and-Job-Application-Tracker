@@ -1,4 +1,4 @@
-export type ApplicationType = "Internship" | "WIL" | "Graduate Job" | "Full-Time Job";
+export type ApplicationType = "Internship" | "WIL" | "Graduate Job" | "Full-Time Job" | "Job";
 export type ApplicationStatus =
   | "Saved"
   | "Applied"

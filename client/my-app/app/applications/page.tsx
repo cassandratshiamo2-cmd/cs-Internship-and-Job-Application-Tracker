@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { AppShell, SectionTitle, StatusBadge } from "@/components/app-shell";
 import { getStoredApplications } from "@/lib/mock-data";
 import type { Application, ApplicationStatus, ApplicationType, WorkArrangement } from "@/lib/types";
@@ -24,20 +24,17 @@ const typeOptions: Array<ApplicationType | "All"> = [
   "WIL",
   "Graduate Job",
   "Full-Time Job",
+  "Job",
 ];
 
 const arrangementOptions: Array<WorkArrangement | "All"> = ["All", "Remote", "Hybrid", "Onsite"];
 
 export default function ApplicationsPage() {
-  const [applications, setApplications] = useState<Application[]>([]);
+  const [applications] = useState<Application[]>(() => getStoredApplications());
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<ApplicationStatus | "All">("All");
   const [type, setType] = useState<ApplicationType | "All">("All");
   const [arrangement, setArrangement] = useState<WorkArrangement | "All">("All");
-
-  useEffect(() => {
-    setApplications(getStoredApplications());
-  }, []);
 
   const filteredApplications = useMemo(() => {
     return applications.filter((application) => {
