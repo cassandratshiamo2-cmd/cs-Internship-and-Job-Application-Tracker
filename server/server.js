@@ -5,7 +5,6 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
-const twilio = require('twilio');
 
 const app = express();
 
@@ -82,12 +81,38 @@ async function ensureDatabase() {
   );
 
   await pool.query(
+    'CREATE TABLE IF NOT EXISTS applications (' +
+      'id SERIAL PRIMARY KEY, ' +
+      'user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ' +
+      'company VARCHAR(255) NOT NULL, ' +
+      'position VARCHAR(255) NOT NULL, ' +
+      'application_date DATE NOT NULL, ' +
+      'type VARCHAR(32) NOT NULL CHECK (type IN (\'Internship\', \'WIL\', \'Graduate Job\', \'Full-Time Job\', \'Job\')), ' +
+      'status VARCHAR(32) NOT NULL DEFAULT \'Saved\' CHECK (status IN (\'Saved\', \'Applied\', \'Assessment\', \'Shortlisted\', \'Interview\', \'Offer\', \'Rejected\', \'Withdrawn\')), ' +
+      'arrangement VARCHAR(16) NOT NULL CHECK (arrangement IN (\'Remote\', \'Hybrid\', \'Onsite\')), ' +
+      'notes TEXT NOT NULL DEFAULT \'\', ' +
+      'application_link TEXT, ' +
+      'interview_date DATE, ' +
+      'interview_time TIME, ' +
+      'notification_channels TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[], ' +
+      'interview_email VARCHAR(255), ' +
+      'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
+      'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
+      ')'
+  );
+
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS applications_user_idx ' +
+      'ON applications (user_id, application_date DESC, created_at DESC)'
+  );
+
+  await pool.query(
     'CREATE TABLE IF NOT EXISTS notification_jobs (' +
       'id BIGSERIAL PRIMARY KEY, ' +
       'user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ' +
       'application_id VARCHAR(255) NOT NULL, ' +
       'notification_type VARCHAR(64) NOT NULL, ' +
-      "channel VARCHAR(16) NOT NULL CHECK (channel IN ('Email', 'SMS', 'In-app')), " +
+      "channel VARCHAR(16) NOT NULL CHECK (channel IN ('Email', 'In-app')), " +
       'recipient_email VARCHAR(255), ' +
       'recipient_phone VARCHAR(16), ' +
       'company VARCHAR(255) NOT NULL, ' +
@@ -115,6 +140,10 @@ async function ensureDatabase() {
   );
 
   await pool.query(
+    "UPDATE notification_jobs SET status = 'cancelled', processed_at = NOW(), updated_at = NOW(), last_error = 'Legacy SMS notifications are no longer supported.' WHERE channel IN ('SMS', 'Phone') AND status IN ('pending', 'processing')"
+  );
+
+  await pool.query(
     'ALTER TABLE notification_jobs ' +
       'DROP CONSTRAINT IF EXISTS notification_jobs_channel_check'
   );
@@ -122,7 +151,7 @@ async function ensureDatabase() {
   await pool.query(
     'ALTER TABLE notification_jobs ' +
       'ADD CONSTRAINT notification_jobs_channel_check ' +
-      "CHECK (channel IN ('Email', 'SMS', 'In-app'))"
+      "CHECK (channel IN ('Email', 'In-app'))"
   );
 
   await pool.query(
@@ -171,17 +200,6 @@ function isValidEmail(value) {
     typeof value === 'string' &&
     /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
   );
-}
-
-function isValidPhone(value) {
-  return (
-    typeof value === 'string' &&
-    /^\+[1-9]\d{7,14}$/.test(value)
-  );
-}
-
-function isSmsChannel(channel) {
-  return channel === 'SMS' || channel === 'Phone';
 }
 
 function formatInterviewDate(value) {
@@ -271,61 +289,6 @@ async function sendInterviewEmail(data) {
   };
 }
 
-async function sendInterviewSms(data) {
-  const phone = data.phone;
-  const company = data.company;
-  const position = data.position;
-  const interviewDate = data.interviewDate;
-  const interviewTime = data.interviewTime;
-  const applicationLink = data.applicationLink;
-
-  const TWILIO_ACCOUNT_SID =
-    process.env.TWILIO_ACCOUNT_SID;
-
-  const TWILIO_AUTH_TOKEN =
-    process.env.TWILIO_AUTH_TOKEN;
-
-  const TWILIO_FROM_NUMBER =
-    process.env.TWILIO_FROM_NUMBER;
-
-  if (
-    !TWILIO_ACCOUNT_SID ||
-    !TWILIO_AUTH_TOKEN ||
-    !TWILIO_FROM_NUMBER
-  ) {
-    return {
-      channel: 'SMS',
-      sent: false,
-      reason: 'SMS provider is not configured.',
-    };
-  }
-
-  if (!phone) {
-    return {
-      channel: 'SMS',
-      sent: false,
-      reason:
-        'No phone number is available for this notification.',
-    };
-  }
-
-  const twilioClient = twilio(
-    TWILIO_ACCOUNT_SID,
-    TWILIO_AUTH_TOKEN
-  );
-
-  await twilioClient.messages.create({
-    from: TWILIO_FROM_NUMBER,
-    to: phone,
-    body: `Interview reminder: ${position} at ${company} on ${formatInterviewDate(interviewDate)} at ${formatInterviewTime(interviewTime)}.${applicationLink ? ` Job post: ${applicationLink}` : ''}`,
-  });
-
-  return {
-    channel: 'SMS',
-    sent: true,
-  };
-}
-
 async function sendInterviewInApp() {
   return {
     channel: 'In-app',
@@ -342,10 +305,6 @@ function normalizeNotificationChannels(channels) {
 
   if (channels.includes('Email')) {
     normalized.push('Email');
-  }
-
-  if (channels.some(isSmsChannel)) {
-    normalized.push('SMS');
   }
 
   return normalized;
@@ -447,9 +406,7 @@ async function replaceInterviewNotificationJobs(data) {
           channel === 'Email'
             ? data.email
             : null,
-          channel === 'SMS'
-            ? data.phone
-            : null,
+          null,
           data.company,
           data.position,
           data.interviewDate,
@@ -654,16 +611,7 @@ async function processNotificationJob(job) {
   try {
     let result;
 
-    if (job.channel === 'SMS') {
-      result = await sendInterviewSms({
-        phone: job.recipient_phone,
-        company: job.company,
-        position: job.position,
-        interviewDate: job.interview_date,
-        interviewTime: job.interview_time,
-        applicationLink: job.application_link,
-      });
-    } else if (job.channel === 'Email') {
+    if (job.channel === 'Email') {
       result = await sendInterviewEmail({
         email: job.recipient_email,
         company: job.company,
@@ -755,15 +703,11 @@ app.post(
       body.notificationChannels || [];
 
     const email = body.email;
-    const phoneNumber = body.phoneNumber;
 
     const channels =
       Array.isArray(notificationChannels)
         ? notificationChannels
         : [];
-
-    const wantsSms =
-      channels.some(isSmsChannel);
 
     const wantsInApp =
       channels.includes('In-app');
@@ -778,11 +722,7 @@ app.post(
       !interviewDate ||
       !interviewTime ||
       !channels.some(function (channel) {
-        return (
-          channel === 'In-app' ||
-          channel === 'Email' ||
-          isSmsChannel(channel)
-        );
+        return channel === 'In-app' || channel === 'Email';
       })
     ) {
       return res.status(400).json({
@@ -828,7 +768,7 @@ app.post(
     try {
       const userResult =
         await pool.query(
-          'SELECT email, phone_number ' +
+          'SELECT email ' +
             'FROM users ' +
             'WHERE id = $1',
           [req.user.id]
@@ -843,50 +783,6 @@ app.post(
 
       const user =
         userResult.rows[0];
-
-      if (
-        wantsSms &&
-        phoneNumber
-      ) {
-        const normalizedPhone =
-          String(phoneNumber).trim();
-
-        if (
-          !isValidPhone(
-            normalizedPhone
-          )
-        ) {
-          return res.status(400).json({
-            message:
-              'Use an international phone number such as +27123456789 for SMS reminders.',
-          });
-        }
-
-        await pool.query(
-          'UPDATE users ' +
-            'SET phone_number = $1 ' +
-            'WHERE id = $2',
-          [
-            normalizedPhone,
-            req.user.id,
-          ]
-        );
-
-        user.phone_number =
-          normalizedPhone;
-      }
-
-      if (
-        wantsSms &&
-        !isValidPhone(
-          user.phone_number
-        )
-      ) {
-        return res.status(400).json({
-          message:
-            'Add a valid international phone number to your account before selecting SMS reminders.',
-        });
-      }
 
       const jobs =
         await replaceInterviewNotificationJobs({
@@ -919,23 +815,14 @@ app.post(
                 job.scheduled_for
               ).toISOString(),
             providerConfigured:
-              job.channel === 'SMS'
+              job.channel === 'Email'
                 ? Boolean(
                     process.env
-                      .TWILIO_ACCOUNT_SID &&
+                      .RESEND_API_KEY &&
                     process.env
-                      .TWILIO_AUTH_TOKEN &&
-                    process.env
-                      .TWILIO_FROM_NUMBER
+                      .NOTIFICATION_FROM_EMAIL
                   )
-                : job.channel === 'Email'
-                  ? Boolean(
-                      process.env
-                        .RESEND_API_KEY &&
-                      process.env
-                        .NOTIFICATION_FROM_EMAIL
-                    )
-                  : true,
+                : true,
           };
         });
 
@@ -1136,6 +1023,60 @@ app.delete(
   }
 );
 
+app.get(
+  '/api/applications',
+  authenticateRequest,
+  async function (req, res) {
+    try {
+      const result = await pool.query(
+        'SELECT ' +
+          'id, ' +
+          'company, ' +
+          'position, ' +
+          'application_date AS date, ' +
+          'type, ' +
+          'status, ' +
+          'arrangement, ' +
+          'notes, ' +
+          'application_link AS "applicationLink", ' +
+          'interview_date AS "interviewDate", ' +
+          'interview_time AS "interviewTime", ' +
+          'notification_channels AS "notificationChannels", ' +
+          'interview_email AS "interviewEmail" ' +
+        'FROM applications ' +
+        'WHERE user_id = $1 ' +
+        'ORDER BY application_date DESC, created_at DESC',
+        [req.user.id]
+      );
+
+      const applications = result.rows.map(function (application) {
+        return {
+          id: String(application.id),
+          company: application.company,
+          position: application.position,
+          date: application.date ? application.date.toISOString().slice(0, 10) : '',
+          type: application.type,
+          status: application.status,
+          arrangement: application.arrangement,
+          notes: application.notes || '',
+          applicationLink: application.applicationLink || undefined,
+          interviewDate: application.interviewDate ? application.interviewDate.toISOString().slice(0, 10) : undefined,
+          interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
+          notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
+          interviewEmail: application.interviewEmail || undefined,
+        };
+      });
+
+      return res.status(200).json({ applications: applications });
+    } catch (error) {
+      console.error('Loading applications failed:', error.message);
+      return res.status(500).json({
+        message: 'Unable to load applications.',
+      });
+    }
+  }
+);
+
 app.post(
   '/api/register',
   async function (req, res) {
@@ -1145,8 +1086,6 @@ app.post(
       const fullName = body.fullName;
       const email = body.email;
       const password = body.password;
-      const phoneNumber =
-        body.phoneNumber;
 
       if (
         !fullName ||
@@ -1170,23 +1109,6 @@ app.post(
         return res.status(400).json({
           message:
             'Password must be at least 8 characters long.',
-        });
-      }
-
-      const normalizedPhone =
-        phoneNumber
-          ? String(phoneNumber).trim()
-          : null;
-
-      if (
-        normalizedPhone &&
-        !isValidPhone(
-          normalizedPhone
-        )
-      ) {
-        return res.status(400).json({
-          message:
-            'Use an international phone number such as +27123456789.',
         });
       }
 
@@ -1223,22 +1145,19 @@ app.post(
           'INSERT INTO users (' +
             'full_name, ' +
             'email, ' +
-            'password_hash, ' +
-            'phone_number' +
+            'password_hash' +
           ') ' +
-          'VALUES ($1, $2, $3, $4) ' +
+          'VALUES ($1, $2, $3) ' +
           'RETURNING ' +
             'id, ' +
             'full_name AS "fullName", ' +
-            'email, ' +
-            'phone_number AS "phoneNumber"',
+            'email',
           [
             String(
               fullName
             ).trim(),
             normalizedEmail,
             passwordHash,
-            normalizedPhone,
           ]
         );
 
@@ -1342,8 +1261,6 @@ app.post(
             user.full_name,
           email:
             user.email,
-          phoneNumber:
-            user.phone_number,
         },
       });
     } catch (error) {

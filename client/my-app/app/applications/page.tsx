@@ -1,10 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell, SectionTitle, StatusBadge } from "@/components/app-shell";
 import { getStoredApplications } from "@/lib/mock-data";
 import type { Application, ApplicationStatus, ApplicationType, WorkArrangement } from "@/lib/types";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
 const statusOptions: Array<ApplicationStatus | "All"> = [
   "All",
@@ -30,11 +32,68 @@ const typeOptions: Array<ApplicationType | "All"> = [
 const arrangementOptions: Array<WorkArrangement | "All"> = ["All", "Remote", "Hybrid", "Onsite"];
 
 export default function ApplicationsPage() {
-  const [applications] = useState<Application[]>(() => getStoredApplications());
+  const [applications, setApplications] = useState<Application[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<ApplicationStatus | "All">("All");
   const [type, setType] = useState<ApplicationType | "All">("All");
   const [arrangement, setArrangement] = useState<WorkArrangement | "All">("All");
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadApplications() {
+      const token = window.localStorage.getItem("applyflow_token");
+
+      if (!token) {
+        if (isMounted) {
+          setApplications(getStoredApplications());
+          setError("");
+          setIsLoading(false);
+        }
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_URL}/api/applications`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const payload = (await response.json().catch(() => ({ applications: [] }))) as {
+          applications?: Application[];
+          message?: string;
+        };
+
+        if (!response.ok) {
+          if (isMounted) {
+            setApplications(getStoredApplications());
+            setError(payload.message || "Unable to load your applications.");
+            setIsLoading(false);
+          }
+          return;
+        }
+
+        if (isMounted) {
+          setApplications(payload.applications || getStoredApplications());
+          setError("");
+          setIsLoading(false);
+        }
+      } catch {
+        if (isMounted) {
+          setApplications(getStoredApplications());
+          setError("Unable to connect to the server. Showing saved local applications.");
+          setIsLoading(false);
+        }
+      }
+    }
+
+    loadApplications();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const filteredApplications = useMemo(() => {
     return applications.filter((application) => {
@@ -101,8 +160,18 @@ export default function ApplicationsPage() {
           </select>
         </div>
 
+        {error ? (
+          <div className="rounded-2xl border border-[#f8c8d5] bg-[#fff4f7] px-4 py-3 text-sm text-[#b3506e]">
+            {error}
+          </div>
+        ) : null}
+
         <div className="space-y-3">
-          {filteredApplications.length > 0 ? (
+          {isLoading ? (
+            <div className="rounded-[28px] border border-dashed border-[#e7d6dd] bg-white/70 p-10 text-center text-slate-500">
+              Loading applications...
+            </div>
+          ) : filteredApplications.length > 0 ? (
             filteredApplications.map((application) => (
               <div key={application.id} className="rounded-[28px] border border-white/60 bg-white/80 p-4 shadow-[0_10px_30px_rgba(203,213,225,0.26)]">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">

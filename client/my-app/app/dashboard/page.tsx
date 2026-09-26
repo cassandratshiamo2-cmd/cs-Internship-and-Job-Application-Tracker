@@ -6,6 +6,8 @@ import { AppShell, SectionTitle, StatCard, StatusBadge } from "@/components/app-
 import { getCurrentUser, getStoredApplications } from "@/lib/mock-data";
 import type { Application } from "@/lib/types";
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
+
 export default function DashboardPage() {
   const [applications, setApplications] = useState<Application[]>([]);
   const [userName, setUserName] = useState("Your profile");
@@ -13,7 +15,36 @@ export default function DashboardPage() {
   useEffect(() => {
     const user = getCurrentUser();
     setUserName(user?.fullName || "Your profile");
-    setApplications(getStoredApplications());
+
+    async function loadApplications() {
+      const token = window.localStorage.getItem("applyflow_token");
+
+      if (!token) {
+        setApplications(getStoredApplications());
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_URL}/api/applications`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (!response.ok) {
+          setApplications(getStoredApplications());
+          return;
+        }
+
+        const payload = (await response.json().catch(() => ({ applications: [] }))) as {
+          applications?: Application[];
+        };
+
+        setApplications(payload.applications || getStoredApplications());
+      } catch {
+        setApplications(getStoredApplications());
+      }
+    }
+
+    loadApplications();
   }, []);
 
   const totalApplications = applications.length;

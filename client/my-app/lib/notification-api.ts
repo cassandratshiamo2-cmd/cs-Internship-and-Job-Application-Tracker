@@ -4,7 +4,7 @@ const API_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:5000";
 
 type DeliveryResult = {
-  channel: "In-app" | "Email" | "SMS" | "Phone";
+  channel: "In-app" | "Email";
   sent: boolean;
   scheduled?: boolean;
   scheduledFor?: string;
@@ -77,16 +77,10 @@ export async function sendExternalInterviewNotifications(details: {
   applicationLink?: string;
   notificationChannels: NotificationChannel[];
   email?: string;
-  phoneNumber?: string;
 }) {
-  const selectedChannels =
-    details.notificationChannels.filter(
-      (channel) =>
-        channel === "In-app" ||
-        channel === "Email" ||
-        channel === "SMS" ||
-        channel === "Phone"
-    );
+  const selectedChannels = details.notificationChannels.filter(
+    (channel) => channel === "In-app" || channel === "Email"
+  );
 
   if (selectedChannels.length === 0) {
     return {

@@ -104,7 +104,7 @@ export default function InterviewsPage() {
             })
           ) : (
             <div className="rounded-[28px] border border-dashed border-[#e7d6dd] bg-white/70 p-8 text-center text-slate-500">
-              No interviews scheduled yet. Set an application status to
+              No interviews scheduled yet. Set an application status tojb
               Interview to add one.
             </div>
           )}

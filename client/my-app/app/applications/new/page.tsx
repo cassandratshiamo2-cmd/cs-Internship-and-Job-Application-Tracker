@@ -29,7 +29,6 @@ export default function AddApplicationPage() {
     const interviewTime = String(form.get("interviewTime") || "").trim();
     const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
     const interviewEmail = String(form.get("interviewEmail") || "").trim();
-    const interviewPhone = String(form.get("interviewPhone") || "").trim();
 
     if (!company || !position || !date || !type || !status || !arrangement || !notes) {
       setError("Please complete all required fields.");
@@ -51,15 +50,6 @@ export default function AddApplicationPage() {
       return;
     }
 
-    if (status === "Interview" && (notificationChannels.includes("SMS") || notificationChannels.includes("Phone")) && !interviewPhone) {
-      setError("Add your account phone number for SMS reminders.");
-      return;
-    }
-
-    if (status === "Interview" && (notificationChannels.includes("SMS") || notificationChannels.includes("Phone")) && !/^\+[1-9]\d{7,14}$/.test(interviewPhone)) {
-      setError("Use an international phone number in E.164 format, such as +27123456789.");
-      return;
-    }
 
     const applications = getStoredApplications();
     const applicationId = `app-${Date.now()}`;
@@ -73,13 +63,13 @@ export default function AddApplicationPage() {
       arrangement: arrangement as "Remote" | "Hybrid" | "Onsite",
       notes,
       ...(applicationLink ? { applicationLink } : {}),
-      ...(status === "Interview" ? { interviewDate, interviewTime, notificationChannels: notificationChannels.length ? notificationChannels : ["In-app"], interviewEmail, interviewPhone } : {}),
+      ...(status === "Interview" ? { interviewDate, interviewTime, notificationChannels: notificationChannels.length ? notificationChannels : ["In-app"], interviewEmail } : {}),
     });
 
     saveApplications(applications);
     setError("");
     if (status === "Interview") {
-      const delivery = await sendExternalInterviewNotifications({ applicationId, company, position, interviewDate, interviewTime, scheduledAt: new Date(`${interviewDate}T${interviewTime}`).toISOString(), applicationLink, notificationChannels, email: interviewEmail, phoneNumber: interviewPhone });
+      const delivery = await sendExternalInterviewNotifications({ applicationId, company, position, interviewDate, interviewTime, scheduledAt: new Date(`${interviewDate}T${interviewTime}`).toISOString(), applicationLink, notificationChannels, email: interviewEmail });
       window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
     }
     router.push("/applications");
@@ -195,14 +185,10 @@ function InterviewFields() {
           <label className="mb-2 block text-sm font-medium text-slate-700">Reminder email</label>
           <input type="email" name="interviewEmail" placeholder="you@example.com" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
         </div>
-        <div>
-          <label className="mb-2 block text-sm font-medium text-slate-700">Account phone for SMS reminders</label>
-          <input type="tel" name="interviewPhone" placeholder="+27123456789" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
-        </div>
       </div>
-      <p className="mt-4 text-sm text-slate-500">Email reminders use the address above. SMS reminders use the phone number stored on your account.</p>
+      <p className="mt-4 text-sm text-slate-500">Email reminders use the address above. In-app reminders appear in ApplyFlow.</p>
       <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
-        {(["In-app", "Email", "SMS"] as NotificationChannel[]).map((channel) => (
+        {(["In-app", "Email"] as NotificationChannel[]).map((channel) => (
           <label key={channel} className="flex items-center gap-2">
             <input type="checkbox" name="notificationChannel" value={channel} defaultChecked={channel === "In-app"} />
             {channel}

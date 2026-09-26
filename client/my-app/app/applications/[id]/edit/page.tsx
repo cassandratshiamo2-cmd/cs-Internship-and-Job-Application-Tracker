@@ -38,7 +38,6 @@ export default function EditApplicationPage() {
     const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
     const savedChannels: NotificationChannel[] = notificationChannels.length ? notificationChannels : ["In-app"];
     const interviewEmail = String(form.get("interviewEmail") || "").trim();
-    const interviewPhone = String(form.get("interviewPhone") || "").trim();
 
     if (nextStatus === "Interview" && (!interviewDate || !interviewTime)) {
       return;
@@ -48,15 +47,7 @@ export default function EditApplicationPage() {
       return;
     }
 
-    if (nextStatus === "Interview" && (savedChannels.includes("SMS") || savedChannels.includes("Phone")) && !interviewPhone) {
-      return;
-    }
-
     if (applicationLink && !/^https?:\/\//i.test(applicationLink)) {
-      return;
-    }
-
-    if (nextStatus === "Interview" && (savedChannels.includes("SMS") || savedChannels.includes("Phone")) && !/^\+[1-9]\d{7,14}$/.test(interviewPhone)) {
       return;
     }
 
@@ -75,15 +66,15 @@ export default function EditApplicationPage() {
         arrangement: String(form.get("arrangement") || item.arrangement) as Application["arrangement"],
         notes: String(form.get("notes") || item.notes).trim(),
         applicationLink: applicationLink || undefined,
-        ...(nextStatus === "Interview" ? { interviewDate, interviewTime, notificationChannels: savedChannels, interviewEmail, interviewPhone } : { interviewDate: undefined, interviewTime: undefined, notificationChannels: undefined, interviewEmail: undefined, interviewPhone: undefined }),
+        ...(nextStatus === "Interview" ? { interviewDate, interviewTime, notificationChannels: savedChannels, interviewEmail } : { interviewDate: undefined, interviewTime: undefined, notificationChannels: undefined, interviewEmail: undefined }),
       };
     });
 
     saveApplications(updatedApplications);
     if (nextStatus === "Interview") {
-      const hasExternalChannel = savedChannels.some((channel) => channel === "Email" || channel === "SMS" || channel === "Phone");
+      const hasExternalChannel = savedChannels.includes("Email");
       if (hasExternalChannel) {
-        const delivery = await sendExternalInterviewNotifications({ applicationId: application.id, company: String(form.get("company") || application.company).trim(), position: String(form.get("position") || application.position).trim(), interviewDate, interviewTime, scheduledAt: new Date(`${interviewDate}T${interviewTime}`).toISOString(), applicationLink, notificationChannels: savedChannels, email: interviewEmail, phoneNumber: interviewPhone });
+        const delivery = await sendExternalInterviewNotifications({ applicationId: application.id, company: String(form.get("company") || application.company).trim(), position: String(form.get("position") || application.position).trim(), interviewDate, interviewTime, scheduledAt: new Date(`${interviewDate}T${interviewTime}`).toISOString(), applicationLink, notificationChannels: savedChannels, email: interviewEmail });
         window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
       } else {
         await cancelExternalInterviewNotifications(application.id);
@@ -184,14 +175,10 @@ export default function EditApplicationPage() {
                   <label className="mb-2 block text-sm font-medium text-slate-700">Reminder email</label>
                   <input type="email" name="interviewEmail" defaultValue={application.interviewEmail} placeholder="you@example.com" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
                 </div>
-                <div>
-                  <label className="mb-2 block text-sm font-medium text-slate-700">Account phone for SMS reminders</label>
-                  <input type="tel" name="interviewPhone" defaultValue={application.interviewPhone} placeholder="+27123456789" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
-                </div>
               </div>
-              <p className="mt-4 text-sm text-slate-500">Email reminders use the address above. SMS reminders use the phone number stored on your account.</p>
+              <p className="mt-4 text-sm text-slate-500">Email reminders use the address above. In-app reminders appear in ApplyFlow.</p>
               <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
-                {(["In-app", "Email", "SMS"] as NotificationChannel[]).map((channel) => (
+                {(["In-app", "Email"] as NotificationChannel[]).map((channel) => (
                   <label key={channel} className="flex items-center gap-2">
                     <input type="checkbox" name="notificationChannel" value={channel} defaultChecked={(application.notificationChannels || ["In-app"]).includes(channel)} />
                     {channel}

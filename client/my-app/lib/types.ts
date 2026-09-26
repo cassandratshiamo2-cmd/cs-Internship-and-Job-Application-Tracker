@@ -13,7 +13,7 @@ export type WorkArrangement = "Remote" | "Hybrid" | "Onsite";
 export type InterviewType = "Phone" | "Video" | "In-person" | "Technical" | "Panel" | "Other";
 export type InterviewStatus = "Upcoming" | "Completed" | "Cancelled";
 export type NotificationType = "Interview Reminder" | "Follow-up Reminder" | "Status Update" | "General";
-export type NotificationChannel = "In-app" | "Email" | "SMS" | "Phone";
+export type NotificationChannel = "In-app" | "Email";
 
 export interface Application {
   id: string;
@@ -29,7 +29,6 @@ export interface Application {
   interviewTime?: string;
   notificationChannels?: NotificationChannel[];
   interviewEmail?: string;
-  interviewPhone?: string;
 }
 
 export interface Interview {
