@@ -1,4 +1,4 @@
-import type { NotificationChannel } from "@/lib/types";
+import type { NotificationChannel, NotificationItem } from "@/lib/types";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:5000";
@@ -11,6 +11,61 @@ type DeliveryResult = {
   providerConfigured?: boolean;
   reason?: string;
 };
+
+type NotificationFetchResult = {
+  notifications: NotificationItem[];
+  message?: string;
+  unauthorized?: boolean;
+};
+
+export async function getUserNotifications(): Promise<NotificationFetchResult> {
+  const token = window.localStorage.getItem("applyflow_token");
+
+  if (!token) {
+    return {
+      notifications: [],
+      message: "Please log in to view your notifications.",
+      unauthorized: true,
+    };
+  }
+
+  try {
+    const response = await fetch(`${API_URL}/api/notifications`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const payload = (await response.json()) as {
+      notifications?: Array<{
+        id: string;
+        title: string;
+        type: string;
+        message: string;
+        date: string;
+        read: boolean;
+      }>;
+      message?: string;
+    };
+
+    if (!response.ok) {
+      return {
+        notifications: [],
+        message: payload.message || "Unable to load notifications.",
+        unauthorized: response.status === 401,
+      };
+    }
+
+    return {
+      notifications: (payload.notifications || []).map((notification) => ({
+        ...notification,
+        type: notification.type as NotificationItem["type"],
+      })),
+    };
+  } catch {
+    return {
+      notifications: [],
+      message: "Unable to connect to the notification server.",
+    };
+  }
+}
 
 export async function sendExternalInterviewNotifications(details: {
   applicationId: string;

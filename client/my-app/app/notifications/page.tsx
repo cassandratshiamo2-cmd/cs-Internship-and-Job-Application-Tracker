@@ -2,20 +2,41 @@
 
 import { useEffect, useState } from "react";
 import { AppShell, SectionTitle } from "@/components/app-shell";
-import { getInterviewNotifications, getStoredApplications } from "@/lib/mock-data";
+import { getUserNotifications } from "@/lib/notification-api";
 import type { NotificationItem } from "@/lib/types";
 
 export default function NotificationsPage() {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [deliveryNotice, setDeliveryNotice] = useState("");
+  const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    setNotifications(getInterviewNotifications(getStoredApplications()));
-    const notice = window.sessionStorage.getItem("applyflow_delivery_notice");
-    if (notice) {
-      setDeliveryNotice(notice);
-      window.sessionStorage.removeItem("applyflow_delivery_notice");
+    let isActive = true;
+
+    async function loadNotifications() {
+      const result = await getUserNotifications();
+      const notice = window.sessionStorage.getItem("applyflow_delivery_notice");
+
+      if (!isActive) {
+        return;
+      }
+
+      setNotifications(result.notifications);
+      setError(result.message || "");
+      setIsLoading(false);
+
+      if (notice) {
+        setDeliveryNotice(notice);
+        window.sessionStorage.removeItem("applyflow_delivery_notice");
+      }
     }
+
+    void loadNotifications();
+
+    return () => {
+      isActive = false;
+    };
   }, []);
 
   return (
@@ -29,8 +50,18 @@ export default function NotificationsPage() {
           </div>
         ) : null}
 
+        {error ? (
+          <div className="rounded-2xl border border-[#f8c8d5] bg-[#fff4f7] px-4 py-3 text-sm text-[#b3506e]">
+            {error}
+          </div>
+        ) : null}
+
         <div className="space-y-3">
-          {notifications.length ? notifications.map((notification) => (
+          {isLoading ? (
+            <div className="rounded-[24px] border border-white/60 bg-white/70 p-8 text-center text-slate-500">
+              Loading notifications...
+            </div>
+          ) : notifications.length ? notifications.map((notification) => (
             <div
               key={notification.id}
               className={`rounded-[24px] border p-4 shadow-[0_8px_24px_rgba(203,213,225,0.18)] ${
