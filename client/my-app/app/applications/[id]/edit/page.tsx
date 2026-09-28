@@ -15,18 +15,25 @@ export default function EditApplicationPage() {
   const router = useRouter();
   const [application, setApplication] = useState<Application | null>(null);
   const [status, setStatus] = useState<Application["status"] | "Saved">("Saved");
+  const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
     const fallbackApplication = getApplicationById(params?.id);
 
     async function loadApplication() {
+      setIsLoading(true);
+      setErrorMessage(null);
+
       const token = window.localStorage.getItem("applyflow_token");
 
       if (!token) {
         if (isMounted) {
           setApplication(fallbackApplication ?? null);
           setStatus(fallbackApplication?.status ?? "Saved");
+          setErrorMessage(null);
+          setIsLoading(false);
         }
         return;
       }
@@ -45,20 +52,32 @@ export default function EditApplicationPage() {
 
         if (!response.ok) {
           if (isMounted) {
-            setApplication(fallbackApplication ?? null);
-            setStatus(fallbackApplication?.status ?? "Saved");
+            setApplication(null);
+            setStatus("Saved");
+            setErrorMessage(
+              response.status === 404
+                ? "Application not found."
+                : payload.message || "Unable to load application."
+            );
           }
           return;
         }
 
         if (isMounted) {
-          setApplication(payload.application ?? fallbackApplication ?? null);
-          setStatus(payload.application?.status ?? fallbackApplication?.status ?? "Saved");
+          const loadedApplication = payload.application ?? fallbackApplication ?? null;
+          setApplication(loadedApplication);
+          setStatus(loadedApplication?.status ?? "Saved");
+          setErrorMessage(null);
         }
       } catch {
         if (isMounted) {
-          setApplication(fallbackApplication ?? null);
-          setStatus(fallbackApplication?.status ?? "Saved");
+          setApplication(null);
+          setStatus("Saved");
+          setErrorMessage("Unable to connect to the server. Please try again.");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
         }
       }
     }
@@ -183,6 +202,26 @@ export default function EditApplicationPage() {
     }
     router.push(`/applications/${application.id}`);
   };
+
+  if (isLoading) {
+    return (
+      <AppShell title="Edit Application">
+        <div className="rounded-[28px] border border-dashed border-[#e7d6dd] bg-white/70 p-10 text-center text-slate-500">
+          Loading application...
+        </div>
+      </AppShell>
+    );
+  }
+
+  if (errorMessage) {
+    return (
+      <AppShell title="Edit Application">
+        <div className="rounded-[28px] border border-dashed border-[#e7d6dd] bg-white/70 p-10 text-center text-slate-500">
+          {errorMessage}
+        </div>
+      </AppShell>
+    );
+  }
 
   if (!application) {
     return (

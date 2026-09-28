@@ -12,17 +12,24 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:5000";
 export default function ApplicationDetailPage() {
   const params = useParams<{ id: string }>();
   const [application, setApplication] = useState<Application | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
 
     async function loadApplication() {
+      setIsLoading(true);
+      setErrorMessage(null);
+
       const token = window.localStorage.getItem("applyflow_token");
       const fallbackApplication = getApplicationById(params?.id);
 
       if (!token) {
         if (isMounted) {
           setApplication(fallbackApplication ?? null);
+          setErrorMessage(null);
+          setIsLoading(false);
         }
         return;
       }
@@ -41,17 +48,28 @@ export default function ApplicationDetailPage() {
 
         if (!response.ok) {
           if (isMounted) {
-            setApplication(fallbackApplication ?? null);
+            setApplication(null);
+            setErrorMessage(
+              response.status === 404
+                ? "Application not found."
+                : payload.message || "Unable to load application."
+            );
           }
           return;
         }
 
         if (isMounted) {
           setApplication(payload.application ?? fallbackApplication ?? null);
+          setErrorMessage(null);
         }
       } catch {
         if (isMounted) {
-          setApplication(fallbackApplication ?? null);
+          setApplication(null);
+          setErrorMessage("Unable to connect to the server. Please try again.");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
         }
       }
     }
@@ -62,6 +80,39 @@ export default function ApplicationDetailPage() {
       isMounted = false;
     };
   }, [params?.id]);
+
+  if (isLoading) {
+    return (
+      <AppShell title="Application Details">
+        <div className="mx-auto max-w-xl rounded-[28px] border border-white/60 bg-white/80 p-8 text-center shadow-[0_10px_30px_rgba(203,213,225,0.26)]">
+          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-[#0f766e]">Loading</p>
+          <h2 className="mt-3 text-2xl font-bold text-slate-800">Loading application details...</h2>
+        </div>
+      </AppShell>
+    );
+  }
+
+  if (errorMessage) {
+    return (
+      <AppShell title="Application Details">
+        <div className="mx-auto max-w-xl rounded-[28px] border border-white/60 bg-white/80 p-8 text-center shadow-[0_10px_30px_rgba(203,213,225,0.26)]">
+          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-[#b3506e]">
+            {errorMessage === "Application not found." ? "Application not found" : "Error"}
+          </p>
+          <h2 className="mt-3 text-2xl font-bold text-slate-800">
+            {errorMessage === "Application not found." ? "This application could not be found." : "Unable to load this application."}
+          </h2>
+          <p className="mt-3 text-slate-600">{errorMessage}</p>
+          <Link
+            href="/applications"
+            className="mt-6 inline-flex items-center justify-center rounded-full bg-[#2ec4c0] px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-[#1ca3a5]"
+          >
+            Back to applications
+          </Link>
+        </div>
+      </AppShell>
+    );
+  }
 
   if (!application) {
     return (
