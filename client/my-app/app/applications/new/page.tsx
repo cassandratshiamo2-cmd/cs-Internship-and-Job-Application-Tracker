@@ -23,7 +23,7 @@ export default function AddApplicationPage() {
     const position = String(form.get("position") || "").trim();
     const date = String(form.get("date") || "").trim();
     const type = String(form.get("type") || "");
-    const status = String(form.get("status") || "");
+    const applicationStatus = String(form.get("status") || "");
     const arrangement = String(form.get("arrangement") || "");
     const notes = String(form.get("notes") || "").trim();
     const applicationLink = String(form.get("applicationLink") || "").trim();
@@ -32,7 +32,7 @@ export default function AddApplicationPage() {
     const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
     const interviewEmail = String(form.get("interviewEmail") || "").trim();
 
-    if (!company || !position || !date || !type || !status || !arrangement || !notes) {
+    if (!company || !position || !date || !type || !applicationStatus || !arrangement || !notes) {
       setError("Please complete all required fields.");
       return;
     }
@@ -42,16 +42,15 @@ export default function AddApplicationPage() {
       return;
     }
 
-    if (status === "Interview" && (!interviewDate || !interviewTime)) {
+    if (applicationStatus === "Interview" && (!interviewDate || !interviewTime)) {
       setError("Add the interview date and time before saving an interview application.");
       return;
     }
 
-    if (status === "Interview" && notificationChannels.includes("Email") && !interviewEmail) {
+    if (applicationStatus === "Interview" && notificationChannels.includes("Email") && !interviewEmail) {
       setError("Add an email address for email reminders.");
       return;
     }
-
 
     const applications = getStoredApplications();
     const applicationId = `app-${Date.now()}`;
@@ -64,12 +63,12 @@ export default function AddApplicationPage() {
       company,
       position,
       date,
-      type: type as "Internship" | "WIL" | "Graduate Job" | "Full-Time Job" | "Job",
-      status: status as "Saved" | "Applied" | "Assessment" | "Shortlisted" | "Interview" | "Offer" | "Rejected" | "Withdrawn",
-      arrangement: arrangement as "Remote" | "Hybrid" | "Onsite",
+      type: type as Application["type"],
+      status: applicationStatus as Application["status"],
+      arrangement: arrangement as Application["arrangement"],
       notes,
       ...(applicationLink ? { applicationLink } : {}),
-      ...(status === "Interview"
+      ...(applicationStatus === "Interview"
         ? {
             interviewDate,
             interviewTime,
@@ -110,8 +109,18 @@ export default function AddApplicationPage() {
     }
 
     setError("");
-    if (status === "Interview") {
-      const delivery = await sendExternalInterviewNotifications({ applicationId, company, position, interviewDate, interviewTime, scheduledAt: new Date(`${interviewDate}T${interviewTime}`).toISOString(), applicationLink, notificationChannels, email: interviewEmail });
+    if (applicationStatus === "Interview") {
+      const delivery = await sendExternalInterviewNotifications({
+        applicationId,
+        company,
+        position,
+        interviewDate,
+        interviewTime,
+        scheduledAt: new Date(`${interviewDate}T${interviewTime}`).toISOString(),
+        applicationLink,
+        notificationChannels: selectedChannels.length ? selectedChannels : defaultInterviewChannels,
+        email: interviewEmail,
+      });
       window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
     }
     router.push("/applications");

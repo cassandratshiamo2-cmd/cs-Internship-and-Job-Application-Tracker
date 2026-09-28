@@ -26,7 +26,6 @@ if (!DATABASE_URL) {
 }
 
 const pool = new Pool({
-
   connectionString: DATABASE_URL,
 
   ssl: DATABASE_URL
@@ -34,7 +33,6 @@ const pool = new Pool({
     : false,
 
   family: 4,
-
 });
 
 pool.on('error', function (err) {

@@ -1,7 +1,6 @@
 import type { NotificationChannel, NotificationItem } from "@/lib/types";
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:5000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:5000";
 
 type DeliveryResult = {
   channel: "In-app" | "Email";
@@ -112,27 +111,19 @@ export async function sendExternalInterviewNotifications(details: {
   }
 
   try {
-    const token =
-      window.localStorage.getItem("applyflow_token");
+    const token = window.localStorage.getItem("applyflow_token");
 
-    const response = await fetch(
-      `${API_URL}/api/notifications/interview`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token
-            ? {
-                Authorization: `Bearer ${token}`,
-              }
-            : {}),
-        },
-        body: JSON.stringify({
-          ...details,
-          notificationChannels: selectedChannels,
-        }),
-      }
-    );
+    const response = await fetch(`${API_URL}/api/notifications/interview`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        ...details,
+        notificationChannels: selectedChannels,
+      }),
+    });
 
     const payload = (await response.json()) as {
       message?: string;
@@ -142,77 +133,54 @@ export async function sendExternalInterviewNotifications(details: {
     if (!response.ok) {
       return {
         results: [] as DeliveryResult[],
-        message:
-          payload.message ||
-          "Interview notification setup failed.",
+        message: payload.message || "Interview notification setup failed.",
       };
     }
 
     const results = payload.results || [];
-
-    const scheduledCount = results.filter(
-      (result) => result.scheduled
-    ).length;
-
-    const sentCount = results.filter(
-      (result) => result.sent
-    ).length;
+    const scheduledCount = results.filter((result) => result.scheduled).length;
+    const sentCount = results.filter((result) => result.sent).length;
 
     if (scheduledCount > 0) {
       return {
         results,
-        message:
-          "Interview saved. Your selected notifications are scheduled for the interview time.",
+        message: "Interview saved. Your selected notifications are scheduled for the interview time.",
       };
     }
 
-    if (
-      results.length > 0 &&
-      sentCount === results.length
-    ) {
+    if (results.length > 0 && sentCount === results.length) {
       return {
         results,
-        message:
-          "Interview notifications sent successfully.",
+        message: "Interview notifications sent successfully.",
       };
     }
 
     return {
       results,
-      message:
-        "Interview saved, but one or more notifications were not sent.",
+      message: "Interview saved, but one or more notifications were not sent.",
     };
   } catch {
     return {
       results: [] as DeliveryResult[],
-      message:
-        "Interview saved. The notification server is unavailable.",
+      message: "Interview saved. The notification server is unavailable.",
     };
   }
 }
 
-export async function cancelExternalInterviewNotifications(
-  applicationId: string
-) {
-  const token =
-    window.localStorage.getItem("applyflow_token");
+export async function cancelExternalInterviewNotifications(applicationId: string) {
+  const token = window.localStorage.getItem("applyflow_token");
 
   if (!token) {
     return;
   }
 
   try {
-    await fetch(
-      `${API_URL}/api/notifications/interview/${encodeURIComponent(
-        applicationId
-      )}`,
-      {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
+    await fetch(`${API_URL}/api/notifications/interview/${encodeURIComponent(applicationId)}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
   } catch {
     return;
   }
