@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { notFound, useParams } from "next/navigation";
+import { useParams } from "next/navigation";
 import { AppShell, StatusBadge } from "@/components/app-shell";
 import { getStoredApplications } from "@/lib/mock-data";
 import type { Application } from "@/lib/types";
@@ -17,7 +17,18 @@ export default function ApplicationDetailPage() {
   }, [params.id]);
 
   if (!application) {
-    return notFound();
+    return (
+      <AppShell title="Application Details">
+        <div className="mx-auto max-w-xl rounded-[28px] border border-dashed border-[#e7d6dd] bg-white/80 p-8 text-center shadow-[0_10px_30px_rgba(203,213,225,0.26)]">
+          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-[#0f766e]">Application</p>
+          <h2 className="mt-3 text-2xl font-bold text-slate-800">This application could not be found.</h2>
+          <p className="mt-2 text-slate-600">The item may have been removed or was never created in this mock list.</p>
+          <Link href="/applications" className="mt-6 inline-flex items-center justify-center rounded-full bg-[#2ec4c0] px-5 py-3 text-sm font-semibold text-white shadow-sm">
+            Back to applications
+          </Link>
+        </div>
+      </AppShell>
+    );
   }
 
   return (
