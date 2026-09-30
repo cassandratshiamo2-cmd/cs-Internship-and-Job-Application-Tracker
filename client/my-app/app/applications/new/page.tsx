@@ -1,45 +1,138 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getStoredApplications, saveApplications } from "@/lib/mock-data";
+import type { Application, InterviewType, NotificationChannel } from "@/lib/types";
+import { sendExternalInterviewNotifications } from "@/lib/notification-api";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
 export default function AddApplicationPage() {
+  const router = useRouter();
   const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
 
-  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget as HTMLFormElement);
+    const form = new FormData(event.currentTarget);
 
     const company = String(form.get("company") || "").trim();
     const position = String(form.get("position") || "").trim();
     const date = String(form.get("date") || "").trim();
     const type = String(form.get("type") || "");
-    const status = String(form.get("status") || "");
+    const applicationStatus = String(form.get("status") || "");
     const arrangement = String(form.get("arrangement") || "");
     const notes = String(form.get("notes") || "").trim();
+    const applicationLink = String(form.get("applicationLink") || "").trim();
+    const interviewDate = String(form.get("interviewDate") || "").trim();
+    const interviewTime = String(form.get("interviewTime") || "").trim();
+    const interviewType = String(form.get("interviewType") || "").trim();
+    const normalizedInterviewType = interviewType as InterviewType;
+    const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
 
-    if (!company || !position || !date || !type || !status || !arrangement || !notes) {
+    if (!company || !position || !date || !type || !applicationStatus || !arrangement || !notes) {
       setError("Please complete all required fields.");
       return;
     }
 
+    if (applicationLink && !/^https?:\/\//i.test(applicationLink)) {
+      setError("The application link must start with http:// or https://.");
+      return;
+    }
+
+    if (applicationStatus === "Interview" && (!interviewDate || !interviewTime || !interviewType)) {
+      setError("Add the interview date, time, and type before saving an interview application.");
+      return;
+    }
+
     const applications = getStoredApplications();
-    applications.push({
-      id: `app-${Date.now()}`,
+    const applicationId = `app-${Date.now()}`;
+    const defaultInterviewChannels: NotificationChannel[] = ["In-app"];
+    const selectedChannels = notificationChannels.filter((channel) => channel === "In-app");
+    const payload: Application = {
+      id: applicationId,
       company,
       position,
       date,
-      type: type as "Internship" | "WIL" | "Graduate Job" | "Full-Time Job",
-      status: status as "Saved" | "Applied" | "Assessment" | "Shortlisted" | "Interview" | "Offer" | "Rejected" | "Withdrawn",
-      arrangement: arrangement as "Remote" | "Hybrid" | "Onsite",
+      type: type as Application["type"],
+      status: applicationStatus as Application["status"],
+      arrangement: arrangement as Application["arrangement"],
       notes,
-    });
+      ...(applicationLink ? { applicationLink } : {}),
+      ...(applicationStatus === "Interview"
+        ? {
+            interviewDate,
+            interviewTime,
+            interviewType: normalizedInterviewType,
+            notificationChannels: selectedChannels.length ? selectedChannels : defaultInterviewChannels,
+          }
+        : {}),
+    };
 
-    saveApplications(applications);
+    const token = window.localStorage.getItem("applyflow_token");
+    let notificationApplicationId = applicationId;
+    let notificationNotice = "";
+
+    if (token) {
+      try {
+        const response = await fetch(`${API_URL}/api/applications`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+
+        const data = (await response.json().catch(() => ({ message: "Unable to save application." }))) as {
+          message?: string;
+          application?: Pick<Application, "id">;
+          notificationSchedule?: { message?: string };
+        };
+
+        if (!response.ok) {
+          throw new Error(data.message || "Unable to save application.");
+        }
+
+        const savedApplication = data.application?.id
+          ? { ...payload, id: String(data.application.id) }
+          : payload;
+        notificationApplicationId = savedApplication.id;
+        notificationNotice = data.notificationSchedule?.message || "";
+        saveApplications([...applications, savedApplication]);
+      } catch (saveError) {
+        saveApplications([...applications, payload]);
+        setError(saveError instanceof Error ? saveError.message : "Unable to save application.");
+        return;
+      }
+    } else {
+      saveApplications([...applications, payload]);
+    }
+
     setError("");
-    window.location.href = "/applications";
+    if (applicationStatus === "Interview") {
+      if (token) {
+        if (notificationNotice) {
+          window.sessionStorage.setItem("applyflow_delivery_notice", notificationNotice);
+        }
+      } else {
+        const delivery = await sendExternalInterviewNotifications({
+          applicationId: notificationApplicationId,
+          company,
+          position,
+          interviewDate,
+          interviewTime,
+          interviewType: normalizedInterviewType,
+          applicationLink,
+          notificationChannels: selectedChannels.length ? selectedChannels : defaultInterviewChannels,
+        });
+        window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
+      }
+    }
+    router.push("/applications");
   };
 
   return (
@@ -58,6 +151,10 @@ export default function AddApplicationPage() {
               <label className="mb-2 block text-sm font-medium text-slate-700">Company Name</label>
               <input name="company" className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
             </div>
+            <div className="md:col-span-2">
+              <label className="mb-2 block text-sm font-medium text-slate-700">Job post link (optional)</label>
+              <input type="url" name="applicationLink" placeholder="https://company.com/jobs/role" className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+            </div>
             <div>
               <label className="mb-2 block text-sm font-medium text-slate-700">Position / Job Title</label>
               <input name="position" className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
@@ -74,11 +171,12 @@ export default function AddApplicationPage() {
                 <option>WIL</option>
                 <option>Graduate Job</option>
                 <option>Full-Time Job</option>
+                <option>Job</option>
               </select>
             </div>
             <div>
               <label className="mb-2 block text-sm font-medium text-slate-700">Application Status</label>
-              <select name="status" className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
+              <select name="status" value={status} onChange={(event) => setStatus(event.target.value)} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
                 <option value="">Select</option>
                 <option>Saved</option>
                 <option>Applied</option>
@@ -100,6 +198,8 @@ export default function AddApplicationPage() {
               </select>
             </div>
           </div>
+
+          {status === "Interview" ? <InterviewFields /> : null}
 
           <div>
             <label className="mb-2 block text-sm font-medium text-slate-700">Notes</label>
@@ -123,5 +223,42 @@ export default function AddApplicationPage() {
         </form>
       </div>
     </AppShell>
+  );
+}
+
+function InterviewFields() {
+  return (
+    <fieldset className="rounded-2xl border border-[#d9d3ff] bg-[#faf8ff] p-4">
+      <legend className="px-1 text-sm font-semibold text-[#5d4b9f]">Interview schedule and reminders</legend>
+      <div className="grid gap-5 sm:grid-cols-2">
+        <div>
+          <label className="mb-2 block text-sm font-medium text-slate-700">Interview date</label>
+          <input required type="date" name="interviewDate" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+        </div>
+        <div>
+          <label className="mb-2 block text-sm font-medium text-slate-700">Interview time</label>
+          <input required type="time" name="interviewTime" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+        </div>
+        <div className="sm:col-span-2">
+          <label className="mb-2 block text-sm font-medium text-slate-700">Type of interview</label>
+          <select required name="interviewType" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
+            <option value="">Select interview type</option>
+            <option>Phone</option>
+            <option>Video</option>
+            <option>In-person</option>
+            <option>Technical</option>
+            <option>Panel</option>
+            <option>Other</option>
+          </select>
+        </div>
+      </div>
+      <p className="mt-4 text-sm text-slate-500">In-app reminders appear in ApplyFlow.</p>
+      <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" name="notificationChannel" value="In-app" defaultChecked />
+          In-app
+        </label>
+      </div>
+    </fieldset>
   );
 }

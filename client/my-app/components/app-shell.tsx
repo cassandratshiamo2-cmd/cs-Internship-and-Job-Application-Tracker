@@ -1,10 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
-import { getCurrentUser, setCurrentUser } from "@/lib/mock-data";
-import type { ReactNode } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useSyncExternalStore, type ReactNode } from "react";
+import { getCurrentUserName, setCurrentUser, subscribeToUserChanges } from "@/lib/mock-data";
+import {
+  clearNotificationState,
+  getNotificationState,
+  getServerNotificationState,
+  refreshUserNotifications,
+  subscribeToNotifications,
+} from "@/lib/notification-api";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard" },
@@ -15,16 +21,48 @@ const navItems = [
 
 export function AppShell({ children, title }: { children: ReactNode; title: string }) {
   const pathname = usePathname();
-  const [userName, setUserName] = useState("Your profile");
+  const router = useRouter();
+  const userName = useSyncExternalStore(
+    subscribeToUserChanges,
+    getCurrentUserName,
+    () => "Your profile"
+  );
+  const notificationState = useSyncExternalStore(
+    subscribeToNotifications,
+    getNotificationState,
+    getServerNotificationState
+  );
+  const unreadCount = notificationState.notifications.filter(
+    (notification) => notification.status === "sent" && notification.read === false
+  ).length;
 
   useEffect(() => {
-    const user = getCurrentUser();
-    setUserName(user?.fullName || "Your profile");
-  }, [pathname]);
+    void refreshUserNotifications();
+
+    const refreshWhenFocused = () => {
+      if (document.visibilityState === "visible") {
+        void refreshUserNotifications();
+      }
+    };
+    const refreshInterval = window.setInterval(() => {
+      void refreshUserNotifications();
+    }, 30000);
+
+    window.addEventListener("focus", refreshWhenFocused);
+    document.addEventListener("visibilitychange", refreshWhenFocused);
+
+    return () => {
+      window.clearInterval(refreshInterval);
+      window.removeEventListener("focus", refreshWhenFocused);
+      document.removeEventListener("visibilitychange", refreshWhenFocused);
+    };
+  }, [pathname, userName]);
 
   const handleLogout = () => {
+    clearNotificationState();
     setCurrentUser(null);
-    window.location.href = "/";
+    window.localStorage.removeItem("applyflow_token");
+    router.push("/");
   };
 
   return (
@@ -48,11 +86,14 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
                 <Link
                   key={item.href}
                   href={item.href}
+                  aria-label={item.href === "/notifications" && unreadCount > 0
+                    ? `Notifications, ${unreadCount} unread`
+                    : item.label}
                   className={`rounded-full px-4 py-2 text-sm font-medium transition ${
                     active ? "bg-[#2ec4c0] text-white shadow-sm" : "text-slate-600 hover:bg-white"
                   }`}
                 >
-                  {item.label}
+                  <NotificationNavLabel item={item} unreadCount={unreadCount} />
                 </Link>
               );
             })}
@@ -71,10 +112,55 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
             </button>
           </div>
         </div>
+        <nav className="mx-auto flex max-w-7xl gap-2 overflow-x-auto px-4 pb-3 md:hidden sm:px-6 lg:px-8" aria-label="Primary navigation">
+          {navItems.map((item) => {
+            const active = pathname.startsWith(item.href);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-label={item.href === "/notifications" && unreadCount > 0
+                  ? `Notifications, ${unreadCount} unread`
+                  : item.label}
+                className={`shrink-0 rounded-full px-3 py-2 text-sm font-medium ${active ? "bg-[#2ec4c0] text-white" : "bg-white/80 text-slate-600"}`}
+              >
+                <NotificationNavLabel item={item} unreadCount={unreadCount} />
+              </Link>
+            );
+          })}
+        </nav>
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</main>
     </div>
+  );
+}
+
+function NotificationNavLabel({
+  item,
+  unreadCount,
+}: {
+  item: (typeof navItems)[number];
+  unreadCount: number;
+}) {
+  const isNotifications = item.href === "/notifications";
+  const badgeText = unreadCount > 99 ? "99+" : String(unreadCount);
+
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {isNotifications ? (
+        <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" className="h-4 w-4 fill-none stroke-current" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+          <path d="M10 21h4" />
+        </svg>
+      ) : null}
+      <span>{item.label}</span>
+      {isNotifications && unreadCount > 0 ? (
+        <span aria-hidden="true" className="inline-flex min-h-5 min-w-5 items-center justify-center rounded-full bg-[#d94255] px-1.5 text-[11px] font-bold leading-none text-white">
+          {badgeText}
+        </span>
+      ) : null}
+    </span>
   );
 }
 

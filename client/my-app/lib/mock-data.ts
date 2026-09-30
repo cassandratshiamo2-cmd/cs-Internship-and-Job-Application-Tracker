@@ -8,6 +8,7 @@ const APPLICATIONS_KEY = "applyflow_applications";
 const INTERVIEWS_KEY = "applyflow_interviews";
 const NOTIFICATIONS_KEY = "applyflow_notifications";
 const USER_KEY = "applyflow_user";
+const USER_CHANGE_EVENT = "applyflow-user-change";
 
 function addDaysToDate(days: number) {
   const date = new Date();
@@ -16,7 +17,47 @@ function addDaysToDate(days: number) {
   return date.toISOString().slice(0, 10);
 }
 
-const seedApplications: Application[] = [];
+export const defaultApplications: Application[] = [
+  {
+    id: "app-demo-1",
+    company: "Northwind Labs",
+    position: "Frontend Developer Intern",
+    date: "2026-09-12",
+    type: "Internship",
+    status: "Interview",
+    arrangement: "Remote",
+    notes: "Strong fit for product design and accessibility work.",
+    applicationLink: "https://example.com/jobs/frontend-intern",
+    interviewDate: "2026-09-30",
+    interviewTime: "14:00",
+    interviewType: "Video",
+    notificationChannels: ["In-app"],
+  },
+  {
+    id: "app-demo-2",
+    company: "Sunset Systems",
+    position: "Graduate Software Engineer",
+    date: "2026-09-08",
+    type: "Graduate Job",
+    status: "Applied",
+    arrangement: "Hybrid",
+    notes: "Follow up with recruiter in one week.",
+    applicationLink: "https://example.com/jobs/graduate-software-engineer",
+  },
+  {
+    id: "app-demo-3",
+    company: "Harbor Health",
+    position: "Product Analyst",
+    date: "2026-09-04",
+    type: "Full-Time Job",
+    status: "Shortlisted",
+    arrangement: "Onsite",
+    notes: "Portfolio review passed. Hiring manager call scheduled.",
+    applicationLink: "https://example.com/jobs/product-analyst",
+  },
+];
+
+const seedApplications: Application[] = defaultApplications;
 
 const seedInterviews: Interview[] = [
   {
@@ -102,10 +143,29 @@ export function setCurrentUser(user: { fullName?: string; email?: string; id?: n
 
   if (!user) {
     window.localStorage.removeItem(USER_KEY);
+    window.dispatchEvent(new Event(USER_CHANGE_EVENT));
     return;
   }
 
   window.localStorage.setItem(USER_KEY, JSON.stringify(user));
+  window.dispatchEvent(new Event(USER_CHANGE_EVENT));
+}
+
+export function getCurrentUserName() {
+  return getCurrentUser()?.fullName || "Your profile";
+}
+
+export function subscribeToUserChanges(listener: () => void) {
+  if (typeof window === "undefined") {
+    return () => {};
+  }
+
+  window.addEventListener(USER_CHANGE_EVENT, listener);
+  window.addEventListener("storage", listener);
+  return () => {
+    window.removeEventListener(USER_CHANGE_EVENT, listener);
+    window.removeEventListener("storage", listener);
+  };
 }
 
 function getOrCreateStorage<T>(key: string, fallback: T): T {
@@ -132,7 +192,25 @@ function getOrCreateStorage<T>(key: string, fallback: T): T {
 }
 
 export function getStoredApplications(): Application[] {
-  return getOrCreateStorage(APPLICATIONS_KEY, seedApplications);
+  const applications = getOrCreateStorage(APPLICATIONS_KEY, seedApplications);
+  const validApplications = applications.filter(
+    (application) => !["app-101", "app-102", "app-103", "app-104", "app-105"].includes(String(application.id))
+  );
+
+  if (validApplications.length !== applications.length) {
+    saveApplications(validApplications);
+  }
+
+  return validApplications;
+}
+
+export function getApplicationById(id: string | number | undefined): Application | null {
+  if (id === undefined || id === null || String(id).trim() === "") {
+    return null;
+  }
+
+  const normalizedId = String(id).trim();
+  return getStoredApplications().find((application) => String(application.id) === normalizedId) ?? null;
 }
 
 export function saveApplications(applications: Application[]) {

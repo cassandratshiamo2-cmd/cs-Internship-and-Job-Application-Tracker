@@ -6,6 +6,8 @@ import { AppShell, SectionTitle, StatusBadge } from "@/components/app-shell";
 import { getStoredApplications } from "@/lib/mock-data";
 import type { Application, ApplicationStatus, ApplicationType, WorkArrangement } from "@/lib/types";
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
+
 const statusOptions: Array<ApplicationStatus | "All"> = [
   "All",
   "Saved",
@@ -34,9 +36,54 @@ export default function ApplicationsPage() {
   const [status, setStatus] = useState<ApplicationStatus | "All">("All");
   const [type, setType] = useState<ApplicationType | "All">("All");
   const [arrangement, setArrangement] = useState<WorkArrangement | "All">("All");
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
-    setApplications(getStoredApplications());
+    let isMounted = true;
+
+    async function loadApplications() {
+      const token = window.localStorage.getItem("applyflow_token");
+
+      if (!token) {
+        if (isMounted) {
+          setApplications(getStoredApplications());
+          setIsLoading(false);
+        }
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_URL}/api/applications`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          applications?: Application[];
+          message?: string;
+        };
+
+        if (!response.ok) {
+          throw new Error(payload.message || "Unable to load applications.");
+        }
+
+        if (isMounted) {
+          setApplications(payload.applications || []);
+        }
+      } catch (error) {
+        if (isMounted) {
+          setLoadError(error instanceof Error ? error.message : "Unable to load applications.");
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    void loadApplications();
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const filteredApplications = useMemo(() => {
@@ -105,7 +152,15 @@ export default function ApplicationsPage() {
         </div>
 
         <div className="space-y-3">
-          {filteredApplications.length > 0 ? (
+          {isLoading ? (
+            <div className="rounded-[28px] border border-dashed border-[#e7d6dd] bg-white/70 p-10 text-center text-slate-500">
+              Loading applications...
+            </div>
+          ) : loadError ? (
+            <div role="alert" className="rounded-[28px] border border-[#f8c8d5] bg-[#fff4f7] p-6 text-sm text-[#b3506e]">
+              {loadError}
+            </div>
+          ) : filteredApplications.length > 0 ? (
             filteredApplications.map((application) => (
               <div key={application.id} className="rounded-[28px] border border-white/60 bg-white/80 p-4 shadow-[0_10px_30px_rgba(203,213,225,0.26)]">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
