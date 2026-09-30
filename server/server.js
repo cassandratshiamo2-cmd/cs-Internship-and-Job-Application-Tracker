@@ -1159,7 +1159,7 @@ app.get(
           arrangement: application.arrangement,
           notes: application.notes || '',
           applicationLink: application.applicationLink || undefined,
-          interviewDate: application.interviewDate ? application.interviewDate.toISOString().slice(0, 10) : undefined,
+          interviewDate: application.interviewDate ? serializeDateOnly(application.interviewDate) : undefined,
           interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
           interviewType: application.interviewType || undefined,
           notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
@@ -1177,6 +1177,13 @@ app.get(
   }
 );
 
+function serializeDateOnly(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function serializeApplication(application) {
   return {
     id: String(application.id),
@@ -1188,7 +1195,7 @@ function serializeApplication(application) {
     arrangement: application.arrangement,
     notes: application.notes || '',
     applicationLink: application.applicationLink || undefined,
-    interviewDate: application.interviewDate ? application.interviewDate.toISOString().slice(0, 10) : undefined,
+    interviewDate: application.interviewDate ? serializeDateOnly(application.interviewDate) : undefined,
     interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
     interviewType: application.interviewType || undefined,
     notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
@@ -1585,7 +1592,7 @@ app.post(
             arrangement: application.arrangement,
             notes: application.notes || '',
             applicationLink: application.applicationLink || undefined,
-            interviewDate: application.interviewDate ? application.interviewDate.toISOString().slice(0, 10) : undefined,
+            interviewDate: application.interviewDate ? serializeDateOnly(application.interviewDate) : undefined,
             interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
             interviewType: application.interviewType || undefined,
             notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
