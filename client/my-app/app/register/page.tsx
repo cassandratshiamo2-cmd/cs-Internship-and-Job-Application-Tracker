@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { registerLocalUser } from "@/lib/mock-data";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
@@ -62,21 +61,6 @@ export default function RegisterPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        const serverUnavailable = response.status >= 500 || (typeof data.message === "string" && /database|connect|server/i.test(data.message));
-
-        if (serverUnavailable) {
-          const localUser = await registerLocalUser({ fullName, email, password });
-
-          if (localUser) {
-            router.push("/login");
-            return;
-          }
-
-          setError(data.message || "Registration failed.");
-          setIsSubmitting(false);
-          return;
-        }
-
         setError(data.message || "Registration failed.");
         setIsSubmitting(false);
         return;
@@ -84,13 +68,6 @@ export default function RegisterPage() {
 
       router.push("/login");
     } catch {
-      const localUser = await registerLocalUser({ fullName, email, password });
-
-      if (localUser) {
-        router.push("/login");
-        return;
-      }
-
       setError("Unable to connect to the server. Please try again.");
       setIsSubmitting(false);
     }

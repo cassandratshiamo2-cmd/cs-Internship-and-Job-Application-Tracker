@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { loginLocalUser } from "@/lib/mock-data";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
@@ -56,21 +55,6 @@ export default function LoginPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        const serverUnavailable = response.status >= 500 || (typeof data.message === "string" && /database|connect|server/i.test(data.message));
-
-        if (serverUnavailable) {
-          const localUser = await loginLocalUser(email, password);
-
-          if (localUser) {
-            localStorage.setItem("applyflow_token", `local-demo-token-${localUser.id}`);
-            localStorage.setItem("applyflow_user", JSON.stringify(localUser));
-            setFailedAttempts(0);
-            setError("");
-            router.push("/dashboard");
-            return;
-          }
-        }
-
         const nextAttempts = failedAttempts + 1;
         setFailedAttempts(nextAttempts);
 
@@ -108,17 +92,6 @@ export default function LoginPage() {
       setError("");
       router.push("/dashboard");
     } catch {
-      const localUser = await loginLocalUser(email, password);
-
-      if (localUser) {
-        localStorage.setItem("applyflow_token", `local-demo-token-${localUser.id}`);
-        localStorage.setItem("applyflow_user", JSON.stringify(localUser));
-        setFailedAttempts(0);
-        setError("");
-        router.push("/dashboard");
-        return;
-      }
-
       setError("Unable to connect to the server. Please try again.");
       setIsSubmitting(false);
     }
