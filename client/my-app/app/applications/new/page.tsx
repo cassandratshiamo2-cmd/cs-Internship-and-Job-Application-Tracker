@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getStoredApplications, saveApplications } from "@/lib/mock-data";
-import type { Application, NotificationChannel } from "@/lib/types";
+import type { Application, InterviewType, NotificationChannel } from "@/lib/types";
 import { sendExternalInterviewNotifications } from "@/lib/notification-api";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
@@ -17,7 +17,7 @@ export default function AddApplicationPage() {
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget as HTMLFormElement);
+    const form = new FormData(event.currentTarget);
 
     const company = String(form.get("company") || "").trim();
     const position = String(form.get("position") || "").trim();
@@ -29,8 +29,9 @@ export default function AddApplicationPage() {
     const applicationLink = String(form.get("applicationLink") || "").trim();
     const interviewDate = String(form.get("interviewDate") || "").trim();
     const interviewTime = String(form.get("interviewTime") || "").trim();
+    const interviewType = String(form.get("interviewType") || "").trim();
+    const normalizedInterviewType = interviewType as InterviewType;
     const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
-    const interviewEmail = String(form.get("interviewEmail") || "").trim();
 
     if (!company || !position || !date || !type || !applicationStatus || !arrangement || !notes) {
       setError("Please complete all required fields.");
@@ -42,22 +43,15 @@ export default function AddApplicationPage() {
       return;
     }
 
-    if (applicationStatus === "Interview" && (!interviewDate || !interviewTime)) {
-      setError("Add the interview date and time before saving an interview application.");
-      return;
-    }
-
-    if (applicationStatus === "Interview" && notificationChannels.includes("Email") && !interviewEmail) {
-      setError("Add an email address for email reminders.");
+    if (applicationStatus === "Interview" && (!interviewDate || !interviewTime || !interviewType)) {
+      setError("Add the interview date, time, and type before saving an interview application.");
       return;
     }
 
     const applications = getStoredApplications();
     const applicationId = `app-${Date.now()}`;
     const defaultInterviewChannels: NotificationChannel[] = ["In-app"];
-    const selectedChannels: NotificationChannel[] = notificationChannels.filter(
-      (channel): channel is NotificationChannel => channel === "In-app" || channel === "Email"
-    );
+    const selectedChannels = notificationChannels.filter((channel) => channel === "In-app");
     const payload: Application = {
       id: applicationId,
       company,
@@ -72,14 +66,15 @@ export default function AddApplicationPage() {
         ? {
             interviewDate,
             interviewTime,
+            interviewType: normalizedInterviewType,
             notificationChannels: selectedChannels.length ? selectedChannels : defaultInterviewChannels,
-            interviewEmail,
           }
         : {}),
     };
 
     const token = window.localStorage.getItem("applyflow_token");
-    const updatedApplications = [...applications, payload];
+    let notificationApplicationId = applicationId;
+    let notificationNotice = "";
 
     if (token) {
       try {
@@ -92,36 +87,50 @@ export default function AddApplicationPage() {
           body: JSON.stringify(payload),
         });
 
-        const data = (await response.json().catch(() => ({ message: "Unable to save application." }))) as { message?: string };
+        const data = (await response.json().catch(() => ({ message: "Unable to save application." }))) as {
+          message?: string;
+          application?: Pick<Application, "id">;
+          notificationSchedule?: { message?: string };
+        };
 
         if (!response.ok) {
           throw new Error(data.message || "Unable to save application.");
         }
 
-        saveApplications(updatedApplications);
+        const savedApplication = data.application?.id
+          ? { ...payload, id: String(data.application.id) }
+          : payload;
+        notificationApplicationId = savedApplication.id;
+        notificationNotice = data.notificationSchedule?.message || "";
+        saveApplications([...applications, savedApplication]);
       } catch (saveError) {
-        saveApplications(updatedApplications);
+        saveApplications([...applications, payload]);
         setError(saveError instanceof Error ? saveError.message : "Unable to save application.");
         return;
       }
     } else {
-      saveApplications(updatedApplications);
+      saveApplications([...applications, payload]);
     }
 
     setError("");
     if (applicationStatus === "Interview") {
-      const delivery = await sendExternalInterviewNotifications({
-        applicationId,
-        company,
-        position,
-        interviewDate,
-        interviewTime,
-        scheduledAt: new Date(`${interviewDate}T${interviewTime}`).toISOString(),
-        applicationLink,
-        notificationChannels: selectedChannels.length ? selectedChannels : defaultInterviewChannels,
-        email: interviewEmail,
-      });
-      window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
+      if (token) {
+        if (notificationNotice) {
+          window.sessionStorage.setItem("applyflow_delivery_notice", notificationNotice);
+        }
+      } else {
+        const delivery = await sendExternalInterviewNotifications({
+          applicationId: notificationApplicationId,
+          company,
+          position,
+          interviewDate,
+          interviewTime,
+          interviewType: normalizedInterviewType,
+          applicationLink,
+          notificationChannels: selectedChannels.length ? selectedChannels : defaultInterviewChannels,
+        });
+        window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
+      }
     }
     router.push("/applications");
   };
@@ -230,21 +239,25 @@ function InterviewFields() {
           <label className="mb-2 block text-sm font-medium text-slate-700">Interview time</label>
           <input required type="time" name="interviewTime" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
         </div>
-      </div>
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <div>
-          <label className="mb-2 block text-sm font-medium text-slate-700">Reminder email</label>
-          <input type="email" name="interviewEmail" placeholder="you@example.com" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
+        <div className="sm:col-span-2">
+          <label className="mb-2 block text-sm font-medium text-slate-700">Type of interview</label>
+          <select required name="interviewType" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
+            <option value="">Select interview type</option>
+            <option>Phone</option>
+            <option>Video</option>
+            <option>In-person</option>
+            <option>Technical</option>
+            <option>Panel</option>
+            <option>Other</option>
+          </select>
         </div>
       </div>
-      <p className="mt-4 text-sm text-slate-500">Email reminders use the address above. In-app reminders appear in ApplyFlow.</p>
+      <p className="mt-4 text-sm text-slate-500">In-app reminders appear in ApplyFlow.</p>
       <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
-        {(["In-app", "Email"] as NotificationChannel[]).map((channel) => (
-          <label key={channel} className="flex items-center gap-2">
-            <input type="checkbox" name="notificationChannel" value={channel} defaultChecked={channel === "In-app"} />
-            {channel}
-          </label>
-        ))}
+        <label className="flex items-center gap-2">
+          <input type="checkbox" name="notificationChannel" value="In-app" defaultChecked />
+          In-app
+        </label>
       </div>
     </fieldset>
   );

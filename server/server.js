@@ -1,41 +1,34 @@
 require('dotenv').config();
-
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const {
+  calculateInterviewReminderSchedule,
+  interviewDateTimeToInstant,
+} = require('./interview-reminder-schedule');
 
 const app = express();
-
 const PORT = process.env.PORT || 5000;
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
 const DATABASE_URL = process.env.DATABASE_URL;
-
 const WORKER_INTERVAL_MS = 30000;
 const WORKER_BATCH_SIZE = 10;
 const MAX_NOTIFICATION_ATTEMPTS = 3;
 const WORKER_LEASE_MS = 5 * 60 * 1000;
-
 const workerId = String(process.pid);
 
 if (!DATABASE_URL) {
-  console.error(
-    'DATABASE_URL is missing. Set it in server/.env before starting the server.'
-  );
+  console.error('DATABASE_URL is missing. Set it in server/.env before starting the server.');
 }
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-
-  ssl: DATABASE_URL
-    ? { rejectUnauthorized: false }
-    : false,
-
-  family: 4,
+  ssl: DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
-pool.on('error', function (err) {
+pool.on('error', (err) => {
   console.error('Unexpected PostgreSQL client error:', err);
 });
 
@@ -46,19 +39,16 @@ const allowedOrigins = [
   'https://my-app-mu-ecru-96.vercel.app',
 ];
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    },
-    credentials: true,
-  })
-);
-
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -97,11 +87,17 @@ async function ensureDatabase() {
       'application_link TEXT, ' +
       'interview_date DATE, ' +
       'interview_time TIME, ' +
+      'interview_type VARCHAR(32) CHECK (interview_type IN (\'Phone\', \'Video\', \'In-person\', \'Technical\', \'Panel\', \'Other\')), ' +
       'notification_channels TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[], ' +
       'interview_email VARCHAR(255), ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
       'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
       ')'
+  );
+
+  await pool.query(
+    'ALTER TABLE applications ' +
+      'ADD COLUMN IF NOT EXISTS interview_type VARCHAR(32)'
   );
 
   await pool.query(
@@ -122,6 +118,7 @@ async function ensureDatabase() {
       'position VARCHAR(255) NOT NULL, ' +
       'interview_date DATE NOT NULL, ' +
       'interview_time TIME NOT NULL, ' +
+      'interview_at TIMESTAMPTZ, ' +
       'application_link TEXT, ' +
       'scheduled_for TIMESTAMPTZ NOT NULL, ' +
       "status VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK (" +
@@ -163,6 +160,11 @@ async function ensureDatabase() {
   );
 
   await pool.query(
+    'ALTER TABLE notification_jobs ' +
+      'ADD COLUMN IF NOT EXISTS interview_at TIMESTAMPTZ'
+  );
+
+  await pool.query(
     'CREATE INDEX IF NOT EXISTS notification_jobs_due_idx ' +
       'ON notification_jobs (status, scheduled_for, next_attempt_at)'
   );
@@ -179,7 +181,7 @@ app.get('/', function (req, res) {
   });
 });
 
-app.get('/api/health', async function (req, res) {
+app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
 
@@ -217,7 +219,6 @@ function formatInterviewTime(value) {
 
 function authenticateRequest(req, res, next) {
   const authorization = req.headers.authorization || '';
-
   const token = authorization.startsWith('Bearer ')
     ? authorization.slice(7)
     : '';
@@ -233,7 +234,6 @@ function authenticateRequest(req, res, next) {
       token,
       process.env.JWT_SECRET || 'applyflow-dev-secret'
     );
-
     return next();
   } catch (error) {
     return res.status(401).json({
@@ -249,10 +249,7 @@ async function sendInterviewEmail(data) {
   const interviewDate = data.interviewDate;
   const interviewTime = data.interviewTime;
 
-  if (
-    !process.env.RESEND_API_KEY ||
-    !process.env.NOTIFICATION_FROM_EMAIL
-  ) {
+  if (!process.env.RESEND_API_KEY || !process.env.NOTIFICATION_FROM_EMAIL) {
     return {
       channel: 'Email',
       sent: false,
@@ -260,23 +257,19 @@ async function sendInterviewEmail(data) {
     };
   }
 
-  const response = await fetch(
-    'https://api.resend.com/emails',
-    {
-      method: 'POST',
-      headers: {
-        Authorization:
-          'Bearer ' + process.env.RESEND_API_KEY,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: process.env.NOTIFICATION_FROM_EMAIL,
-        to: [email],
-        subject: 'Interview reminder: ' + company,
-        text: `Your ${position} interview at ${company} is scheduled for ${formatInterviewDate(interviewDate)} at ${formatInterviewTime(interviewTime)}.`,
-      }),
-    }
-  );
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer ' + process.env.RESEND_API_KEY,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: process.env.NOTIFICATION_FROM_EMAIL,
+      to: [email],
+      subject: 'Interview reminder: ' + company,
+      text: `Your ${position} interview at ${company} is scheduled for ${formatInterviewDate(interviewDate)} at ${formatInterviewTime(interviewTime)}.`,
+    }),
+  });
 
   if (!response.ok) {
     return {
@@ -306,10 +299,6 @@ function normalizeNotificationChannels(channels) {
     normalized.push('In-app');
   }
 
-  if (channels.includes('Email')) {
-    normalized.push('Email');
-  }
-
   return normalized;
 }
 
@@ -319,10 +308,13 @@ async function replaceInterviewNotificationJobs(data) {
       data.notificationChannels
     );
 
-  const client = await pool.connect();
+  const ownsTransaction = !data.client;
+  const client = data.client || await pool.connect();
 
   try {
-    await client.query('BEGIN');
+    if (ownsTransaction) {
+      await client.query('BEGIN');
+    }
 
     await client.query(
       'UPDATE notification_jobs ' +
@@ -343,6 +335,41 @@ async function replaceInterviewNotificationJobs(data) {
       ]
     );
 
+    const databaseClock = await client.query(
+      'SELECT clock_timestamp() AS now'
+    );
+    const reminderSchedule =
+      calculateInterviewReminderSchedule(
+        data.interviewAt,
+        databaseClock.rows[0].now
+      );
+
+    if (reminderSchedule.isPast) {
+      await client.query(
+        'UPDATE notification_jobs ' +
+          'SET ' +
+          "status = 'cancelled', " +
+          'processed_at = NOW(), ' +
+          'locked_at = NULL, ' +
+          'locked_by = NULL, ' +
+          'updated_at = NOW(), ' +
+          "last_error = 'Interview has already passed.' " +
+          'WHERE user_id = $1 ' +
+          'AND application_id = $2 ' +
+          "AND status IN ('pending', 'processing')",
+        [data.userId, data.applicationId]
+      );
+
+      if (ownsTransaction) {
+        await client.query('COMMIT');
+      }
+      return {
+        jobs: [],
+        isPast: true,
+        isCatchUp: false,
+      };
+    }
+
     const jobs = [];
 
     for (const channel of channels) {
@@ -358,12 +385,14 @@ async function replaceInterviewNotificationJobs(data) {
           'position, ' +
           'interview_date, ' +
           'interview_time, ' +
+          'interview_at, ' +
           'application_link, ' +
           'scheduled_for' +
         ') ' +
         'VALUES (' +
           "$1, $2, 'Interview Reminder', $3, " +
-          '$4, $5, $6, $7, $8, $9, $10, $11' +
+          '$4, $5, $6, $7, $8, $9, $10, $11, ' +
+          'GREATEST($12::timestamptz, clock_timestamp())' +
         ') ' +
         'ON CONFLICT (' +
           'user_id, application_id, notification_type, channel' +
@@ -375,30 +404,38 @@ async function replaceInterviewNotificationJobs(data) {
           'position = EXCLUDED.position, ' +
           'interview_date = EXCLUDED.interview_date, ' +
           'interview_time = EXCLUDED.interview_time, ' +
+          'interview_at = EXCLUDED.interview_at, ' +
           'application_link = EXCLUDED.application_link, ' +
-          'scheduled_for = EXCLUDED.scheduled_for, ' +
-          'read = FALSE, ' +
+          'scheduled_for = CASE ' +
+            "WHEN notification_jobs.status = 'sent' " +
+            'AND notification_jobs.interview_at = EXCLUDED.interview_at ' +
+            'THEN notification_jobs.scheduled_for ' +
+            'ELSE GREATEST(EXCLUDED.scheduled_for, clock_timestamp()) END, ' +
+          'read = CASE ' +
+            "WHEN notification_jobs.status = 'sent' " +
+            'AND notification_jobs.interview_at = EXCLUDED.interview_at ' +
+            'THEN notification_jobs.read ELSE FALSE END, ' +
           'status = CASE ' +
             "WHEN notification_jobs.status = 'sent' " +
-            'AND notification_jobs.scheduled_for = EXCLUDED.scheduled_for ' +
+            'AND notification_jobs.interview_at = EXCLUDED.interview_at ' +
             "THEN 'sent' ELSE 'pending' END, " +
           'attempts = CASE ' +
             "WHEN notification_jobs.status = 'sent' " +
-            'AND notification_jobs.scheduled_for = EXCLUDED.scheduled_for ' +
+            'AND notification_jobs.interview_at = EXCLUDED.interview_at ' +
             'THEN notification_jobs.attempts ELSE 0 END, ' +
           'next_attempt_at = CASE ' +
             "WHEN notification_jobs.status = 'sent' " +
-            'AND notification_jobs.scheduled_for = EXCLUDED.scheduled_for ' +
+            'AND notification_jobs.interview_at = EXCLUDED.interview_at ' +
             'THEN notification_jobs.next_attempt_at ELSE NULL END, ' +
           'locked_at = NULL, ' +
           'locked_by = NULL, ' +
           'processed_at = CASE ' +
             "WHEN notification_jobs.status = 'sent' " +
-            'AND notification_jobs.scheduled_for = EXCLUDED.scheduled_for ' +
+            'AND notification_jobs.interview_at = EXCLUDED.interview_at ' +
             'THEN notification_jobs.processed_at ELSE NULL END, ' +
           'last_error = CASE ' +
             "WHEN notification_jobs.status = 'sent' " +
-            'AND notification_jobs.scheduled_for = EXCLUDED.scheduled_for ' +
+            'AND notification_jobs.interview_at = EXCLUDED.interview_at ' +
             'THEN notification_jobs.last_error ELSE NULL END, ' +
           'updated_at = NOW() ' +
         'RETURNING id, channel, status, scheduled_for',
@@ -414,15 +451,18 @@ async function replaceInterviewNotificationJobs(data) {
           data.position,
           data.interviewDate,
           data.interviewTime,
+          data.interviewAt,
           data.applicationLink || null,
-          data.scheduledAt,
+          reminderSchedule.scheduledAt,
         ]
       );
 
       jobs.push(result.rows[0]);
     }
 
-    await client.query('COMMIT');
+    if (ownsTransaction) {
+      await client.query('COMMIT');
+    }
 
     jobs.forEach(function (job) {
       console.log(
@@ -434,13 +474,43 @@ async function replaceInterviewNotificationJobs(data) {
       );
     });
 
-    return jobs;
+    return {
+      jobs: jobs,
+      isPast: false,
+      isCatchUp: reminderSchedule.isCatchUp,
+    };
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (ownsTransaction) {
+      await client.query('ROLLBACK');
+    }
     throw error;
   } finally {
-    client.release();
+    if (ownsTransaction) {
+      client.release();
+    }
   }
+}
+
+function serializeInterviewNotificationSchedule(schedule) {
+  const alreadySent =
+    schedule.jobs.length > 0 &&
+    schedule.jobs.every(function (job) {
+      return job.status === 'sent';
+    });
+
+  return {
+    scheduled: !schedule.isPast,
+    isPast: schedule.isPast,
+    isCatchUp: schedule.isCatchUp,
+    alreadySent: alreadySent,
+    message: schedule.isPast
+      ? 'The interview has already passed. No reminder was scheduled.'
+      : alreadySent
+        ? 'The reminder was already sent for this interview.'
+        : schedule.isCatchUp
+          ? 'An interview reminder is scheduled for now.'
+          : 'Your interview reminder is scheduled for 24 hours before the interview.',
+  };
 }
 
 async function claimDueNotificationJobs() {
@@ -470,10 +540,7 @@ async function claimDueNotificationJobs() {
         ' ORDER BY scheduled_for ASC ' +
         'LIMIT $1 ' +
         'FOR UPDATE SKIP LOCKED',
-      [
-        WORKER_BATCH_SIZE,
-        WORKER_LEASE_MS,
-      ]
+      [WORKER_BATCH_SIZE, WORKER_LEASE_MS]
     );
 
     const jobs = [];
@@ -489,27 +556,13 @@ async function claimDueNotificationJobs() {
           'updated_at = NOW() ' +
           'WHERE id = $1 ' +
           'RETURNING *',
-        [
-          job.id,
-          workerId,
-        ]
+        [job.id, workerId]
       );
 
       jobs.push(claimed.rows[0]);
     }
 
     await client.query('COMMIT');
-
-    jobs.forEach(function (job) {
-      console.log(
-        'Notification job claimed: ' +
-          job.id +
-          ' (' +
-          job.channel +
-          ')'
-      );
-    });
-
     return jobs;
   } catch (error) {
     await client.query('ROLLBACK');
@@ -654,9 +707,11 @@ let workerRunning = false;
 async function pruneExpiredNotificationJobs() {
   await pool.query(
     'DELETE FROM notification_jobs ' +
-      'WHERE scheduled_for < NOW() ' +
-      "AND status IN ('pending', 'processing', 'sent', 'failed') " +
-      "AND status <> 'cancelled'"
+      "WHERE status IN ('pending', 'processing', 'sent', 'failed') " +
+      'AND (' +
+        '(interview_at IS NULL AND scheduled_for < NOW()) ' +
+        'OR interview_at <= NOW()' +
+      ')'
   );
 }
 
@@ -709,7 +764,6 @@ app.post(
     const position = body.position;
     const interviewDate = body.interviewDate;
     const interviewTime = body.interviewTime;
-    const scheduledAt = body.scheduledAt;
     const applicationId = body.applicationId;
     const applicationLink = body.applicationLink;
 
@@ -726,17 +780,15 @@ app.post(
     const wantsInApp =
       channels.includes('In-app');
 
-    const wantsEmail =
-      channels.includes('Email');
-
     if (
       !applicationId ||
       !company ||
       !position ||
       !interviewDate ||
       !interviewTime ||
-      !channels.some(function (channel) {
-        return channel === 'In-app' || channel === 'Email';
+      !channels.includes('In-app') ||
+      channels.some(function (channel) {
+        return channel !== 'In-app';
       })
     ) {
       return res.status(400).json({
@@ -745,15 +797,13 @@ app.post(
       });
     }
 
-    if (
-      !scheduledAt ||
-      Number.isNaN(
-        new Date(scheduledAt).getTime()
-      )
-    ) {
+    let interviewAt;
+    try {
+      interviewAt = interviewDateTimeToInstant(interviewDate, interviewTime);
+    } catch (error) {
       return res.status(400).json({
         message:
-          'A valid scheduled interview time is required.',
+          'A valid interview date and time are required.',
       });
     }
 
@@ -766,16 +816,6 @@ app.post(
       return res.status(400).json({
         message:
           'The application link must start with http:// or https://.',
-      });
-    }
-
-    if (
-      wantsEmail &&
-      !isValidEmail(email)
-    ) {
-      return res.status(400).json({
-        message:
-          'A valid email address is required for email reminders.',
       });
     }
 
@@ -798,7 +838,7 @@ app.post(
       const user =
         userResult.rows[0];
 
-      const jobs =
+      const schedule =
         await replaceInterviewNotificationJobs({
           userId: req.user.id,
           applicationId: applicationId,
@@ -806,8 +846,8 @@ app.post(
           position: position,
           interviewDate: interviewDate,
           interviewTime: interviewTime,
+          interviewAt: interviewAt,
           applicationLink: applicationLink,
-          scheduledAt: scheduledAt,
           email:
             email ||
             user.email,
@@ -817,13 +857,25 @@ app.post(
             channels,
         });
 
+      if (schedule.isPast) {
+        return res.status(200).json({
+          scheduled: false,
+          message:
+            'The interview has already passed. No reminder was scheduled.',
+          results: [],
+        });
+      }
+
+      const jobs = schedule.jobs;
+
       const results =
         jobs.map(function (job) {
           return {
             channel:
               job.channel,
-            sent: false,
-            scheduled: true,
+            sent: job.status === 'sent',
+            scheduled: job.status !== 'sent',
+            alreadySent: job.status === 'sent',
             scheduledFor:
               new Date(
                 job.scheduled_for
@@ -841,6 +893,11 @@ app.post(
         });
 
       return res.status(200).json({
+        scheduled: true,
+        isCatchUp: schedule.isCatchUp,
+        message: schedule.isCatchUp
+          ? 'An interview reminder is scheduled for now.'
+          : 'Your interview reminder is scheduled for 24 hours before the interview.',
         results: results,
       });
     } catch (error) {
@@ -867,7 +924,10 @@ app.get(
           'WHERE user_id = $1 ' +
           "AND channel = 'In-app' " +
           "AND status <> 'cancelled' " +
-          'AND scheduled_for < NOW()',
+          'AND (' +
+            '(interview_at IS NULL AND scheduled_for < NOW()) ' +
+            'OR interview_at <= NOW()' +
+          ')',
         [req.user.id]
       );
 
@@ -878,8 +938,9 @@ app.get(
             'notification_type, ' +
             'company, ' +
             'position, ' +
-            'interview_date, ' +
+            'interview_date::text AS interview_date, ' +
             'interview_time, ' +
+            'interview_at, ' +
             'application_id, ' +
             'application_link, ' +
             'scheduled_for, ' +
@@ -891,7 +952,16 @@ app.get(
             'user_id = $1 ' +
             "AND channel = 'In-app' " +
             "AND status <> 'cancelled' " +
-            'AND scheduled_for >= NOW() ' +
+            'AND (' +
+              'scheduled_for >= NOW() ' +
+              'OR (' +
+                'interview_at > NOW() ' +
+                'AND (' +
+                  "status IN ('pending', 'processing') " +
+                  "OR (status = 'sent' AND read = FALSE)" +
+                ')' +
+              ')' +
+            ') ' +
           'ORDER BY scheduled_for ASC, created_at DESC',
           [req.user.id]
         );
@@ -916,14 +986,18 @@ app.get(
               '.',
             date:
               notification.interview_date,
+            interviewTime:
+              String(notification.interview_time).slice(0, 5),
+            interviewAt:
+              notification.interview_at,
+            scheduledFor:
+              notification.scheduled_for,
             read:
               notification.read,
             applicationId:
               notification.application_id,
             applicationLink:
               notification.application_link,
-            scheduledFor:
-              notification.scheduled_for,
             status:
               notification.status,
           };
@@ -1065,6 +1139,7 @@ app.get(
           'application_link AS "applicationLink", ' +
           'interview_date AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
+          'interview_type AS "interviewType", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail" ' +
         'FROM applications ' +
@@ -1084,8 +1159,9 @@ app.get(
           arrangement: application.arrangement,
           notes: application.notes || '',
           applicationLink: application.applicationLink || undefined,
-          interviewDate: application.interviewDate ? application.interviewDate.toISOString().slice(0, 10) : undefined,
+          interviewDate: application.interviewDate ? serializeDateOnly(application.interviewDate) : undefined,
           interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
+          interviewType: application.interviewType || undefined,
           notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
           interviewEmail: application.interviewEmail || undefined,
         };
@@ -1101,6 +1177,13 @@ app.get(
   }
 );
 
+function serializeDateOnly(value) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function serializeApplication(application) {
   return {
     id: String(application.id),
@@ -1112,8 +1195,9 @@ function serializeApplication(application) {
     arrangement: application.arrangement,
     notes: application.notes || '',
     applicationLink: application.applicationLink || undefined,
-    interviewDate: application.interviewDate ? application.interviewDate.toISOString().slice(0, 10) : undefined,
+    interviewDate: application.interviewDate ? serializeDateOnly(application.interviewDate) : undefined,
     interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
+    interviewType: application.interviewType || undefined,
     notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
     interviewEmail: application.interviewEmail || undefined,
   };
@@ -1145,6 +1229,7 @@ app.get(
           'application_link AS "applicationLink", ' +
           'interview_date AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
+          'interview_type AS "interviewType", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail" ' +
         'FROM applications ' +
@@ -1194,6 +1279,7 @@ app.put(
       const applicationLink = String(body.applicationLink || '').trim();
       const interviewDate = String(body.interviewDate || '').trim();
       const interviewTime = String(body.interviewTime || '').trim();
+      const interviewType = String(body.interviewType || '').trim();
       const interviewEmail = String(body.interviewEmail || '').trim();
       const notificationChannels = Array.isArray(body.notificationChannels) ? body.notificationChannels : [];
       const normalizedChannels = normalizeNotificationChannels(notificationChannels);
@@ -1210,19 +1296,28 @@ app.put(
         });
       }
 
-      if (status === 'Interview' && (!interviewDate || !interviewTime)) {
+      if (status === 'Interview' && (!interviewDate || !interviewTime || !interviewType)) {
         return res.status(400).json({
-          message: 'Add the interview date and time before saving an interview application.',
+          message: 'Add the interview date, time, and type before saving an interview application.',
         });
       }
 
-      if (status === 'Interview' && normalizedChannels.includes('Email') && !isValidEmail(interviewEmail)) {
-        return res.status(400).json({
-          message: 'A valid email address is required for email reminders.',
-        });
+      let interviewAt;
+      if (status === 'Interview') {
+        try {
+          interviewAt = interviewDateTimeToInstant(interviewDate, interviewTime);
+        } catch (error) {
+          return res.status(400).json({
+            message: 'A valid interview date and time are required to schedule reminders.',
+          });
+        }
       }
 
-      const result = await pool.query(
+      const client = await pool.connect();
+
+      try {
+        await client.query('BEGIN');
+        const result = await client.query(
         'UPDATE applications ' +
           'SET ' +
           'company = $3, ' +
@@ -1235,8 +1330,9 @@ app.put(
           'application_link = $10, ' +
           'interview_date = $11::date, ' +
           'interview_time = $12::time, ' +
-          'notification_channels = $13::text[], ' +
-          'interview_email = $14, ' +
+          'interview_type = $13, ' +
+          'notification_channels = $14::text[], ' +
+          'interview_email = $15, ' +
           'updated_at = NOW() ' +
         'WHERE id = $1 AND user_id = $2 ' +
         'RETURNING ' +
@@ -1251,36 +1347,65 @@ app.put(
           'application_link AS "applicationLink", ' +
           'interview_date AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
+          'interview_type AS "interviewType", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail"',
-        [
-          applicationId,
-          req.user.id,
-          company,
-          position,
-          date,
-          type,
-          status,
-          arrangement,
-          notes,
-          applicationLink || null,
-          status === 'Interview' ? interviewDate : null,
-          status === 'Interview' ? interviewTime : null,
-          status === 'Interview' ? normalizedChannels : [],
-          status === 'Interview' ? interviewEmail || null : null,
-        ]
-      );
+          [
+            applicationId,
+            req.user.id,
+            company,
+            position,
+            date,
+            type,
+            status,
+            arrangement,
+            notes,
+            applicationLink || null,
+            status === 'Interview' ? interviewDate : null,
+            status === 'Interview' ? interviewTime : null,
+            status === 'Interview' ? interviewType || null : null,
+            status === 'Interview' ? normalizedChannels : [],
+            status === 'Interview' ? interviewEmail || null : null,
+          ]
+        );
 
-      if (result.rowCount === 0) {
-        return res.status(404).json({
-          message: 'Application not found.',
+        if (result.rowCount === 0) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({
+            message: 'Application not found.',
+          });
+        }
+
+        let notificationSchedule;
+        if (status === 'Interview') {
+          const schedule = await replaceInterviewNotificationJobs({
+            userId: req.user.id,
+            applicationId: String(result.rows[0].id),
+            company: company,
+            position: position,
+            interviewDate: interviewDate,
+            interviewTime: interviewTime,
+            interviewAt: interviewAt,
+            applicationLink: applicationLink,
+            email: interviewEmail,
+            notificationChannels: normalizedChannels,
+            client: client,
+          });
+          notificationSchedule = serializeInterviewNotificationSchedule(schedule);
+        }
+
+        await client.query('COMMIT');
+        return res.status(200).json({
+          message: 'Application updated successfully.',
+          application: serializeApplication(result.rows[0]),
+          notificationSchedule: notificationSchedule,
         });
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
       }
-
-      return res.status(200).json({
-        message: 'Application updated successfully.',
-        application: serializeApplication(result.rows[0]),
-      });
     } catch (error) {
       console.error('Updating application failed:', error.message);
       return res.status(500).json({
@@ -1346,6 +1471,7 @@ app.post(
       const applicationLink = String(body.applicationLink || '').trim();
       const interviewDate = String(body.interviewDate || '').trim();
       const interviewTime = String(body.interviewTime || '').trim();
+      const interviewType = String(body.interviewType || '').trim();
       const interviewEmail = String(body.interviewEmail || '').trim();
       const notificationChannels = Array.isArray(body.notificationChannels) ? body.notificationChannels : [];
       const normalizedChannels = normalizeNotificationChannels(notificationChannels);
@@ -1362,19 +1488,28 @@ app.post(
         });
       }
 
-      if (status === 'Interview' && (!interviewDate || !interviewTime)) {
+      if (status === 'Interview' && (!interviewDate || !interviewTime || !interviewType)) {
         return res.status(400).json({
-          message: 'Add the interview date and time before saving an interview application.',
+          message: 'Add the interview date, time, and type before saving an interview application.',
         });
       }
 
-      if (status === 'Interview' && normalizedChannels.includes('Email') && !isValidEmail(interviewEmail)) {
-        return res.status(400).json({
-          message: 'A valid email address is required for email reminders.',
-        });
+      let interviewAt;
+      if (status === 'Interview') {
+        try {
+          interviewAt = interviewDateTimeToInstant(interviewDate, interviewTime);
+        } catch (error) {
+          return res.status(400).json({
+            message: 'A valid interview date and time are required to schedule reminders.',
+          });
+        }
       }
 
-      const result = await pool.query(
+      const client = await pool.connect();
+
+      try {
+        await client.query('BEGIN');
+        const result = await client.query(
         'INSERT INTO applications (' +
           'user_id, ' +
           'company, ' +
@@ -1387,9 +1522,10 @@ app.post(
           'application_link, ' +
           'interview_date, ' +
           'interview_time, ' +
+          'interview_type, ' +
           'notification_channels, ' +
           'interview_email' +
-        ') VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10::date, $11::time, $12::text[], $13) ' +
+        ') VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10::date, $11::time, $12, $13::text[], $14) ' +
         'RETURNING ' +
           'id, ' +
           'company, ' +
@@ -1402,45 +1538,74 @@ app.post(
           'application_link AS "applicationLink", ' +
           'interview_date AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
+          'interview_type AS "interviewType", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail"',
-        [
-          req.user.id,
-          company,
-          position,
-          date,
-          type,
-          status,
-          arrangement,
-          notes,
-          applicationLink || null,
-          status === 'Interview' ? interviewDate : null,
-          status === 'Interview' ? interviewTime : null,
-          status === 'Interview' ? normalizedChannels : [],
-          status === 'Interview' ? interviewEmail || null : null,
-        ]
-      );
+          [
+            req.user.id,
+            company,
+            position,
+            date,
+            type,
+            status,
+            arrangement,
+            notes,
+            applicationLink || null,
+            status === 'Interview' ? interviewDate : null,
+            status === 'Interview' ? interviewTime : null,
+            status === 'Interview' ? interviewType || null : null,
+            status === 'Interview' ? normalizedChannels : [],
+            status === 'Interview' ? interviewEmail || null : null,
+          ]
+        );
 
-      const application = result.rows[0];
+        const application = result.rows[0];
+        let notificationSchedule;
 
-      return res.status(201).json({
-        message: 'Application saved successfully.',
-        application: {
-          id: String(application.id),
-          company: application.company,
-          position: application.position,
-          date: application.date ? application.date.toISOString().slice(0, 10) : '',
-          type: application.type,
-          status: application.status,
-          arrangement: application.arrangement,
-          notes: application.notes || '',
-          applicationLink: application.applicationLink || undefined,
-          interviewDate: application.interviewDate ? application.interviewDate.toISOString().slice(0, 10) : undefined,
-          interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
-          notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
-          interviewEmail: application.interviewEmail || undefined,
-        },
-      });
+        if (status === 'Interview') {
+          const schedule = await replaceInterviewNotificationJobs({
+            userId: req.user.id,
+            applicationId: String(application.id),
+            company: company,
+            position: position,
+            interviewDate: interviewDate,
+            interviewTime: interviewTime,
+            interviewAt: interviewAt,
+            applicationLink: applicationLink,
+            email: interviewEmail,
+            notificationChannels: normalizedChannels,
+            client: client,
+          });
+          notificationSchedule = serializeInterviewNotificationSchedule(schedule);
+        }
+
+        await client.query('COMMIT');
+        return res.status(201).json({
+          message: 'Application saved successfully.',
+          application: {
+            id: String(application.id),
+            company: application.company,
+            position: application.position,
+            date: application.date ? application.date.toISOString().slice(0, 10) : '',
+            type: application.type,
+            status: application.status,
+            arrangement: application.arrangement,
+            notes: application.notes || '',
+            applicationLink: application.applicationLink || undefined,
+            interviewDate: application.interviewDate ? serializeDateOnly(application.interviewDate) : undefined,
+            interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
+            interviewType: application.interviewType || undefined,
+            notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
+            interviewEmail: application.interviewEmail || undefined,
+          },
+          notificationSchedule: notificationSchedule,
+        });
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
     } catch (error) {
       console.error('Creating application failed:', error.message);
       return res.status(500).json({
@@ -1683,11 +1848,9 @@ ensureDatabase()
       }
     );
   })
-  .catch(function (error) {
-    console.error(
-      'Failed to initialize database:',
-      error
-    );
-
+  .catch((error) => {
+    console.error('Failed to initialize database:', error);
     process.exit(1);
   });
+
+

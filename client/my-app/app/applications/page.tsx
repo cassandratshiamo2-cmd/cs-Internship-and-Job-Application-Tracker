@@ -26,19 +26,18 @@ const typeOptions: Array<ApplicationType | "All"> = [
   "WIL",
   "Graduate Job",
   "Full-Time Job",
-  "Job",
 ];
 
 const arrangementOptions: Array<WorkArrangement | "All"> = ["All", "Remote", "Hybrid", "Onsite"];
 
 export default function ApplicationsPage() {
   const [applications, setApplications] = useState<Application[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<ApplicationStatus | "All">("All");
   const [type, setType] = useState<ApplicationType | "All">("All");
   const [arrangement, setArrangement] = useState<WorkArrangement | "All">("All");
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     let isMounted = true;
@@ -49,7 +48,6 @@ export default function ApplicationsPage() {
       if (!token) {
         if (isMounted) {
           setApplications(getStoredApplications());
-          setError("");
           setIsLoading(false);
         }
         return;
@@ -59,37 +57,30 @@ export default function ApplicationsPage() {
         const response = await fetch(`${API_URL}/api/applications`, {
           headers: { Authorization: `Bearer ${token}` },
         });
-
-        const payload = (await response.json().catch(() => ({ applications: [] }))) as {
+        const payload = (await response.json().catch(() => ({}))) as {
           applications?: Application[];
           message?: string;
         };
 
         if (!response.ok) {
-          if (isMounted) {
-            setApplications(getStoredApplications());
-            setError(payload.message || "Unable to load your applications.");
-            setIsLoading(false);
-          }
-          return;
+          throw new Error(payload.message || "Unable to load applications.");
         }
 
         if (isMounted) {
-          setApplications(payload.applications || getStoredApplications());
-          setError("");
-          setIsLoading(false);
+          setApplications(payload.applications || []);
         }
-      } catch {
+      } catch (error) {
         if (isMounted) {
-          setApplications(getStoredApplications());
-          setError("Unable to connect to the server. Showing saved local applications.");
+          setLoadError(error instanceof Error ? error.message : "Unable to load applications.");
+        }
+      } finally {
+        if (isMounted) {
           setIsLoading(false);
         }
       }
     }
 
-    loadApplications();
-
+    void loadApplications();
     return () => {
       isMounted = false;
     };
@@ -160,16 +151,14 @@ export default function ApplicationsPage() {
           </select>
         </div>
 
-        {error ? (
-          <div className="rounded-2xl border border-[#f8c8d5] bg-[#fff4f7] px-4 py-3 text-sm text-[#b3506e]">
-            {error}
-          </div>
-        ) : null}
-
         <div className="space-y-3">
           {isLoading ? (
             <div className="rounded-[28px] border border-dashed border-[#e7d6dd] bg-white/70 p-10 text-center text-slate-500">
               Loading applications...
+            </div>
+          ) : loadError ? (
+            <div role="alert" className="rounded-[28px] border border-[#f8c8d5] bg-[#fff4f7] p-6 text-sm text-[#b3506e]">
+              {loadError}
             </div>
           ) : filteredApplications.length > 0 ? (
             filteredApplications.map((application) => (

@@ -1,10 +1,13 @@
 {
   "name": "cs-internship-and-job-application-tracker",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "private": true,
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "npm --prefix client/my-app run dev",
+    "build": "npm --prefix client/my-app run build",
+    "start": "npm --prefix client/my-app run start",
+    "install:client": "npm --prefix client/my-app install",
+    "install:server": "npm --prefix server install"
   },
   "repository": {
     "type": "git",

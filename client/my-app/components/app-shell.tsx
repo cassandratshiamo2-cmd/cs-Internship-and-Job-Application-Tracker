@@ -2,8 +2,15 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useSyncExternalStore, type ReactNode } from "react";
 import { getCurrentUserName, setCurrentUser, subscribeToUserChanges } from "@/lib/mock-data";
+import {
+  clearNotificationState,
+  getNotificationState,
+  getServerNotificationState,
+  refreshUserNotifications,
+  subscribeToNotifications,
+} from "@/lib/notification-api";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard" },
@@ -20,8 +27,39 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
     getCurrentUserName,
     () => "Your profile"
   );
+  const notificationState = useSyncExternalStore(
+    subscribeToNotifications,
+    getNotificationState,
+    getServerNotificationState
+  );
+  const unreadCount = notificationState.notifications.filter(
+    (notification) => notification.status === "sent" && notification.read === false
+  ).length;
+
+  useEffect(() => {
+    void refreshUserNotifications();
+
+    const refreshWhenFocused = () => {
+      if (document.visibilityState === "visible") {
+        void refreshUserNotifications();
+      }
+    };
+    const refreshInterval = window.setInterval(() => {
+      void refreshUserNotifications();
+    }, 30000);
+
+    window.addEventListener("focus", refreshWhenFocused);
+    document.addEventListener("visibilitychange", refreshWhenFocused);
+
+    return () => {
+      window.clearInterval(refreshInterval);
+      window.removeEventListener("focus", refreshWhenFocused);
+      document.removeEventListener("visibilitychange", refreshWhenFocused);
+    };
+  }, [pathname, userName]);
 
   const handleLogout = () => {
+    clearNotificationState();
     setCurrentUser(null);
     window.localStorage.removeItem("applyflow_token");
     router.push("/");
@@ -31,13 +69,13 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#fff8fb,_#fff6ef_30%,_#f7f7ff_100%)] text-slate-800">
       <header className="border-b border-white/60 bg-white/75 backdrop-blur-sm">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8">
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-[#ffb5c8] via-[#ffb36c] to-[#3ec5c1] text-lg font-bold text-white shadow-sm">
               A
             </div>
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#0f766e]">ApplyFlow</p>
-              <h1 className="truncate text-base font-semibold text-slate-800">{title}</h1>
+              <h1 className="text-base font-semibold text-slate-800">{title}</h1>
             </div>
           </div>
 
@@ -48,18 +86,21 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
                 <Link
                   key={item.href}
                   href={item.href}
+                  aria-label={item.href === "/notifications" && unreadCount > 0
+                    ? `Notifications, ${unreadCount} unread`
+                    : item.label}
                   className={`rounded-full px-4 py-2 text-sm font-medium transition ${
                     active ? "bg-[#2ec4c0] text-white shadow-sm" : "text-slate-600 hover:bg-white"
                   }`}
                 >
-                  {item.label}
+                  <NotificationNavLabel item={item} unreadCount={unreadCount} />
                 </Link>
               );
             })}
           </div>
 
           <div className="flex items-center gap-3">
-            <button className="hidden rounded-full border border-[#f3d5df] bg-[#fff8fb] px-3 py-2 text-sm font-medium text-slate-700 sm:block">
+            <button className="rounded-full border border-[#f3d5df] bg-[#fff8fb] px-3 py-2 text-sm font-medium text-slate-700">
               {userName}
             </button>
             <button
@@ -78,17 +119,48 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
               <Link
                 key={item.href}
                 href={item.href}
+                aria-label={item.href === "/notifications" && unreadCount > 0
+                  ? `Notifications, ${unreadCount} unread`
+                  : item.label}
                 className={`shrink-0 rounded-full px-3 py-2 text-sm font-medium ${active ? "bg-[#2ec4c0] text-white" : "bg-white/80 text-slate-600"}`}
               >
-                {item.label}
+                <NotificationNavLabel item={item} unreadCount={unreadCount} />
               </Link>
             );
           })}
         </nav>
       </header>
 
-      <main className="mx-auto min-w-0 max-w-7xl overflow-hidden px-4 py-6 sm:px-6 lg:px-8">{children}</main>
+      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</main>
     </div>
+  );
+}
+
+function NotificationNavLabel({
+  item,
+  unreadCount,
+}: {
+  item: (typeof navItems)[number];
+  unreadCount: number;
+}) {
+  const isNotifications = item.href === "/notifications";
+  const badgeText = unreadCount > 99 ? "99+" : String(unreadCount);
+
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      {isNotifications ? (
+        <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" className="h-4 w-4 fill-none stroke-current" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+          <path d="M10 21h4" />
+        </svg>
+      ) : null}
+      <span>{item.label}</span>
+      {isNotifications && unreadCount > 0 ? (
+        <span aria-hidden="true" className="inline-flex min-h-5 min-w-5 items-center justify-center rounded-full bg-[#d94255] px-1.5 text-[11px] font-bold leading-none text-white">
+          {badgeText}
+        </span>
+      ) : null}
+    </span>
   );
 }
 

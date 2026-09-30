@@ -5,18 +5,17 @@ import type {
 } from "@/lib/types";
 
 const APPLICATIONS_KEY = "applyflow_applications";
+const INTERVIEWS_KEY = "applyflow_interviews";
+const NOTIFICATIONS_KEY = "applyflow_notifications";
 const USER_KEY = "applyflow_user";
-const USERS_KEY = "applyflow_users";
-const DEMO_EMAIL = "demo@applyflow.com";
-const DEMO_PASSWORD = "Password123";
+const USER_CHANGE_EVENT = "applyflow-user-change";
 
-const legacyApplicationIds = new Set([
-  "app-101",
-  "app-102",
-  "app-103",
-  "app-104",
-  "app-105",
-]);
+function addDaysToDate(days: number) {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
 
 export const defaultApplications: Application[] = [
   {
@@ -31,8 +30,8 @@ export const defaultApplications: Application[] = [
     applicationLink: "https://example.com/jobs/frontend-intern",
     interviewDate: "2026-09-30",
     interviewTime: "14:00",
-    notificationChannels: ["In-app", "Email"],
-    interviewEmail: "applicant@example.com",
+    interviewType: "Video",
+    notificationChannels: ["In-app"],
   },
   {
     id: "app-demo-2",
@@ -58,127 +57,59 @@ export const defaultApplications: Application[] = [
   },
 ];
 
-async function hashPassword(password: string) {
-  if (typeof window === "undefined" || !window.crypto?.subtle) {
-    return password;
-  }
+const seedApplications: Application[] = defaultApplications;
 
-  const encoded = new TextEncoder().encode(password);
-  const digest = await window.crypto.subtle.digest("SHA-256", encoded);
+const seedInterviews: Interview[] = [
+  {
+    id: "int-1",
+    company: "Northstar Labs",
+    position: "Frontend Engineer Intern",
+    date: addDaysToDate(1),
+    time: "10:00 AM",
+    type: "Video",
+    status: "Upcoming",
+    details: "Portfolio review with the engineering manager.",
+  },
+  {
+    id: "int-2",
+    company: "Apex Systems",
+    position: "Product Analyst",
+    date: addDaysToDate(3),
+    time: "2:30 PM",
+    type: "Panel",
+    status: "Upcoming",
+    details: "Panel discussion with product and business stakeholders.",
+  },
+  {
+    id: "int-3",
+    company: "Launchpad AI",
+    position: "Graduate Software Engineer",
+    date: addDaysToDate(9),
+    time: "9:15 AM",
+    type: "Technical",
+    status: "Upcoming",
+    details: "Technical coding exercise and system design discussion.",
+  },
+];
 
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
+function buildInterviewNotifications(interviews: Interview[]): NotificationItem[] {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
 
-function normalizeEmail(email: string) {
-  return email.trim().toLowerCase();
-}
-
-export function getStoredUsers(): Array<{
-  id: string;
-  fullName: string;
-  email: string;
-  passwordHash: string;
-}> {
-  if (typeof window === "undefined") {
-    return [];
-  }
-
-  const rawUsers = window.localStorage.getItem(USERS_KEY);
-
-  if (!rawUsers) {
-    return [];
-  }
-
-  try {
-    const parsedUsers = JSON.parse(rawUsers);
-    return Array.isArray(parsedUsers) ? parsedUsers : [];
-  } catch {
-    window.localStorage.removeItem(USERS_KEY);
-    return [];
-  }
-}
-
-export function saveStoredUsers(users: Array<{ id: string; fullName: string; email: string; passwordHash: string }>) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.localStorage.setItem(USERS_KEY, JSON.stringify(users));
-}
-
-export async function registerLocalUser(user: { fullName: string; email: string; password: string }) {
-  const normalizedEmail = normalizeEmail(user.email);
-  const existingUsers = getStoredUsers();
-  const emailExists = existingUsers.some((storedUser) => storedUser.email === normalizedEmail);
-
-  if (emailExists) {
-    return null;
-  }
-
-  const newUser = {
-    id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    fullName: user.fullName.trim(),
-    email: normalizedEmail,
-    passwordHash: await hashPassword(user.password),
-  };
-
-  saveStoredUsers([...existingUsers, newUser]);
-
-  return {
-    id: newUser.id,
-    fullName: newUser.fullName,
-    email: newUser.email,
-  };
-}
-
-export async function ensureDemoUser() {
-  const users = getStoredUsers();
-
-  if (users.some((user) => user.email === DEMO_EMAIL)) {
-    return users.find((user) => user.email === DEMO_EMAIL) ?? null;
-  }
-
-  const demoUser = {
-    id: "demo-user",
-    fullName: "Demo User",
-    email: DEMO_EMAIL,
-    passwordHash: await hashPassword(DEMO_PASSWORD),
-  };
-
-  saveStoredUsers([...users, demoUser]);
-
-  return demoUser;
-}
-
-export async function loginLocalUser(email: string, password: string) {
-  const normalizedEmail = normalizeEmail(email);
-  const users = getStoredUsers();
-  const passwordHash = await hashPassword(password);
-
-  const seededUsers = users.some((user) => user.email === DEMO_EMAIL)
-    ? users
-    : [...users, await ensureDemoUser()].filter(Boolean) as Array<{
-        id: string;
-        fullName: string;
-        email: string;
-        passwordHash: string;
-      }>;
-
-  const match = seededUsers.find(
-    (user) => user.email === normalizedEmail && user.passwordHash === passwordHash
-  );
-
-  if (!match) {
-    return null;
-  }
-
-  return {
-    id: match.id,
-    fullName: match.fullName,
-    email: match.email,
-  };
+  return interviews
+    .filter((interview) => {
+      const interviewDate = new Date(`${interview.date}T00:00:00`);
+      const diffInDays = Math.round((interviewDate.getTime() - today.getTime()) / 86400000);
+      return diffInDays >= 0 && diffInDays <= 7;
+    })
+    .map((interview) => ({
+      id: `notify-${interview.id}`,
+      title: `Interview reminder: ${interview.company}`,
+      type: "Interview Reminder",
+      message: `${interview.position} interview is coming up on ${interview.date} at ${interview.time}.`,
+      date: interview.date,
+      read: false,
+    }));
 }
 
 export function getCurrentUser() {
@@ -187,14 +118,12 @@ export function getCurrentUser() {
   }
 
   const rawUser = window.localStorage.getItem(USER_KEY);
-
   if (!rawUser) {
     return null;
   }
 
   try {
     const parsedUser = JSON.parse(rawUser);
-
     if (!parsedUser || typeof parsedUser !== "object") {
       window.localStorage.removeItem(USER_KEY);
       return null;
@@ -207,97 +136,72 @@ export function getCurrentUser() {
   }
 }
 
-export function getCurrentUserName() {
-  return getCurrentUser()?.fullName || "Your profile";
-}
-
-export function subscribeToUserChanges(listener: () => void) {
-  if (typeof window === "undefined") {
-    return () => undefined;
-  }
-
-  const handleStorage = (event: StorageEvent) => {
-    if (event.key === USER_KEY) {
-      listener();
-    }
-  };
-
-  const handleUserChange = () => listener();
-
-  window.addEventListener("storage", handleStorage);
-  window.addEventListener("applyflow-user-change", handleUserChange);
-
-  return () => {
-    window.removeEventListener("storage", handleStorage);
-    window.removeEventListener("applyflow-user-change", handleUserChange);
-  };
-}
-
-export function setCurrentUser(
-  user: {
-    fullName?: string;
-    email?: string;
-    id?: number | string;
-  } | null
-) {
+export function setCurrentUser(user: { fullName?: string; email?: string; id?: number | string } | null) {
   if (typeof window === "undefined") {
     return;
   }
 
   if (!user) {
     window.localStorage.removeItem(USER_KEY);
-    window.dispatchEvent(new Event("applyflow-user-change"));
+    window.dispatchEvent(new Event(USER_CHANGE_EVENT));
     return;
   }
 
   window.localStorage.setItem(USER_KEY, JSON.stringify(user));
-  window.dispatchEvent(new Event("applyflow-user-change"));
+  window.dispatchEvent(new Event(USER_CHANGE_EVENT));
 }
 
-export function getStoredApplications(): Application[] {
+export function getCurrentUserName() {
+  return getCurrentUser()?.fullName || "Your profile";
+}
+
+export function subscribeToUserChanges(listener: () => void) {
   if (typeof window === "undefined") {
-    return [];
+    return () => {};
   }
 
-  const rawApplications = window.localStorage.getItem(APPLICATIONS_KEY);
+  window.addEventListener(USER_CHANGE_EVENT, listener);
+  window.addEventListener("storage", listener);
+  return () => {
+    window.removeEventListener(USER_CHANGE_EVENT, listener);
+    window.removeEventListener("storage", listener);
+  };
+}
 
-  if (!rawApplications) {
-    window.localStorage.setItem(APPLICATIONS_KEY, JSON.stringify(defaultApplications));
-    return [...defaultApplications];
+function getOrCreateStorage<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+
+  const rawValue = window.localStorage.getItem(key);
+  if (!rawValue) {
+    window.localStorage.setItem(key, JSON.stringify(fallback));
+    return fallback;
   }
 
   try {
-    const parsedApplications = JSON.parse(rawApplications);
-
-    if (!Array.isArray(parsedApplications)) {
-      window.localStorage.removeItem(APPLICATIONS_KEY);
-      window.localStorage.setItem(APPLICATIONS_KEY, JSON.stringify(defaultApplications));
-      return [...defaultApplications];
+    const parsedValue = JSON.parse(rawValue);
+    if (!parsedValue || typeof parsedValue !== "object") {
+      throw new Error("Invalid storage payload");
     }
-
-    const sanitizedApplications = parsedApplications.filter(
-      (item): item is Application =>
-        Boolean(item) &&
-        typeof item === "object" &&
-        typeof (item as Application).id !== "undefined" &&
-        !legacyApplicationIds.has(String((item as Application).id))
-    );
-
-    if (sanitizedApplications.length === 0) {
-      window.localStorage.setItem(APPLICATIONS_KEY, JSON.stringify(defaultApplications));
-      return [...defaultApplications];
-    }
-
-    if (sanitizedApplications.length !== parsedApplications.length) {
-      window.localStorage.setItem(APPLICATIONS_KEY, JSON.stringify(sanitizedApplications));
-    }
-
-    return sanitizedApplications;
+    return parsedValue as T;
   } catch {
-    window.localStorage.removeItem(APPLICATIONS_KEY);
-    window.localStorage.setItem(APPLICATIONS_KEY, JSON.stringify(defaultApplications));
-    return [...defaultApplications];
+    window.localStorage.setItem(key, JSON.stringify(fallback));
+    return fallback;
   }
+}
+
+export function getStoredApplications(): Application[] {
+  const applications = getOrCreateStorage(APPLICATIONS_KEY, seedApplications);
+  const validApplications = applications.filter(
+    (application) => !["app-101", "app-102", "app-103", "app-104", "app-105"].includes(String(application.id))
+  );
+
+  if (validApplications.length !== applications.length) {
+    saveApplications(validApplications);
+  }
+
+  return validApplications;
 }
 
 export function getApplicationById(id: string | number | undefined): Application | null {
@@ -306,7 +210,7 @@ export function getApplicationById(id: string | number | undefined): Application
   }
 
   const normalizedId = String(id).trim();
-  return getStoredApplications().find((item) => String(item.id) === normalizedId) ?? null;
+  return getStoredApplications().find((application) => String(application.id) === normalizedId) ?? null;
 }
 
 export function saveApplications(applications: Application[]) {
@@ -314,54 +218,47 @@ export function saveApplications(applications: Application[]) {
     return;
   }
 
-  window.localStorage.setItem(
-    APPLICATIONS_KEY,
-    JSON.stringify(applications)
-  );
+  window.localStorage.setItem(APPLICATIONS_KEY, JSON.stringify(applications));
 }
 
-export function getInterviewNotifications(
-  applications: Application[]
-): NotificationItem[] {
-  const now = Date.now();
-
-  return applications
-    .filter(
-      (application) =>
-        application.status === "Interview" &&
-        application.interviewDate &&
-        application.interviewTime
-    )
-    .map((application): NotificationItem => {
-      const interviewDate: string = application.interviewDate!;
-      const interviewTime: string = application.interviewTime!;
-
-      const interviewAt = new Date(
-        `${interviewDate}T${interviewTime}`
-      ).getTime();
-
-      const channels =
-        application.notificationChannels?.length
-          ? application.notificationChannels
-          : ["In-app"];
-
-      return {
-        id: `interview-${application.id}`,
-        title: `Interview coming up at ${application.company}`,
-        type: "Interview Reminder",
-        message: `${application.position} is scheduled for ${interviewDate} at ${interviewTime}. Notifications: ${channels.join(", ")}.`,
-        date: interviewDate,
-        read: interviewAt <= now,
-      };
-    })
-    .filter((notification) => !notification.read)
-    .sort((first, second) =>
-      first.date.localeCompare(second.date)
-    );
+export function getStoredInterviews(): Interview[] {
+  return getOrCreateStorage(INTERVIEWS_KEY, seedInterviews);
 }
 
-export const mockApplications: Application[] = [];
+export function saveInterviews(interviews: Interview[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
 
-export const mockInterviews: Interview[] = [];
+  window.localStorage.setItem(INTERVIEWS_KEY, JSON.stringify(interviews));
+}
 
-export const mockNotifications: NotificationItem[] = [];
+export function getStoredNotifications(): NotificationItem[] {
+  const notifications = getOrCreateStorage(NOTIFICATIONS_KEY, buildInterviewNotifications(seedInterviews));
+  const activeInterviewNotifications = buildInterviewNotifications(getStoredInterviews());
+
+  if (notifications.length === 0 && activeInterviewNotifications.length > 0) {
+    window.localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(activeInterviewNotifications));
+    return activeInterviewNotifications;
+  }
+
+  return notifications;
+}
+
+export function saveNotifications(notifications: NotificationItem[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(notifications));
+}
+
+export function syncInterviewNotifications(interviews: Interview[] = getStoredInterviews()) {
+  const nextNotifications = buildInterviewNotifications(interviews);
+  saveNotifications(nextNotifications);
+  return nextNotifications;
+}
+
+export const mockApplications: Application[] = seedApplications;
+export const mockInterviews: Interview[] = seedInterviews;
+export const mockNotifications: NotificationItem[] = buildInterviewNotifications(seedInterviews);
