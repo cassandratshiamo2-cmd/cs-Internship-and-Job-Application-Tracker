@@ -2,20 +2,58 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { AppShell, SectionTitle, StatusBadge } from "@/components/app-shell";
-import { getStoredApplications, getStoredInterviews, getStoredNotifications, syncInterviewNotifications } from "@/lib/mock-data";
 import {
   getNotificationState,
   getServerNotificationState,
   refreshUserNotifications,
   subscribeToNotifications,
 } from "@/lib/notification-api";
-import type { Application, Interview, NotificationItem } from "@/lib/types";
+import type { Application } from "@/lib/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
+function normalizeDateOnly(value: unknown) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  const normalizedValue = value.trim();
+  const isoDate = /^(\d{4})-(\d{2})-(\d{2})/.exec(normalizedValue);
+  if (isoDate) {
+    return `${isoDate[1]}-${isoDate[2]}-${isoDate[3]}`;
+  }
+
+  const javascriptDate = /^(?:\w{3} )?(\w{3}) (\d{1,2}) (\d{4})\b/.exec(normalizedValue);
+  if (javascriptDate) {
+    const [, abbreviatedMonth, day, year] = javascriptDate;
+    const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].indexOf(abbreviatedMonth);
+    if (month >= 0) {
+      return `${year}-${String(month + 1).padStart(2, "0")}-${day.padStart(2, "0")}`;
+    }
+  }
+
+  return "";
+}
+
+function normalizeInterviewApplication(value: unknown): Application | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const row = value as Record<string, unknown>;
+  const status = String(row.status || "").trim();
+  const interviewDate = normalizeDateOnly(row.interviewDate ?? row.interview_date);
+  const interviewTime = String(row.interviewTime ?? row.interview_time ?? "").trim().slice(0, 5);
+
+  return {
+    ...(row as unknown as Application),
+    status: status as Application["status"],
+    interviewDate,
+    interviewTime,
+  };
+}
+
 export default function InterviewsPage() {
-  const [interviews, setInterviews] = useState<Interview[]>([]);
-  const [localNotifications, setLocalNotifications] = useState<NotificationItem[] | null>(null);
   const [applications, setApplications] = useState<Application[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -31,50 +69,47 @@ export default function InterviewsPage() {
 
     if (token) {
       void refreshUserNotifications();
-    } else {
-      void Promise.resolve().then(() => {
-        if (!isMounted) {
-          return;
-        }
-
-        const localInterviews = getStoredInterviews();
-        setInterviews(localInterviews);
-        setLocalNotifications(getStoredNotifications());
-        syncInterviewNotifications(localInterviews);
-      });
     }
 
     async function loadApplications() {
       try {
-        let loadedApplications: Application[];
-
         if (!token) {
-          loadedApplications = getStoredApplications();
-        } else {
-          const response = await fetch(`${API_URL}/api/applications`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          const payload = (await response.json().catch(() => ({}))) as {
-            applications?: Application[];
-            message?: string;
-          };
-
-          if (!response.ok) {
-            throw new Error(payload.message || "Unable to load interviews.");
-          }
-
-          loadedApplications = payload.applications || [];
+          throw new Error("Please log in to view interviews.");
         }
 
+        const response = await fetch(`${API_URL}/api/applications`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const payload = await response.json().catch(() => null) as unknown;
+
+        if (!response.ok) {
+          const message = payload && typeof payload === "object" && "message" in payload
+            ? String(payload.message)
+            : "Unable to load interviews.";
+          throw new Error(message);
+        }
+
+        const rows = Array.isArray(payload)
+          ? payload
+          : payload && typeof payload === "object" && "applications" in payload && Array.isArray(payload.applications)
+            ? payload.applications
+            : null;
+
+        if (!rows) {
+          throw new Error("The applications response did not contain an application list.");
+        }
+
+        const loadedApplications = rows
+          .map(normalizeInterviewApplication)
+          .filter((application): application is Application => Boolean(
+            application &&
+            application.status.trim().toLowerCase() === "interview" &&
+            application.interviewDate &&
+            application.interviewTime
+          ));
+
         if (isMounted) {
-          setApplications(
-            loadedApplications.filter(
-              (application) =>
-                application.status === "Interview" &&
-                application.interviewDate &&
-                application.interviewTime
-            )
-          );
+          setApplications(loadedApplications);
         }
       } catch (error) {
         if (isMounted) {
@@ -94,9 +129,9 @@ export default function InterviewsPage() {
     };
   }, []);
 
-  const notifications = localNotifications ?? notificationState.notifications;
-  const isNotificationLoading = localNotifications === null && notificationState.isLoading;
-  const notificationError = localNotifications === null ? notificationState.message : "";
+  const notifications = notificationState.notifications;
+  const isNotificationLoading = notificationState.isLoading;
+  const notificationError = notificationState.message || "";
 
   const getInterviewStatus = (interviewDate?: string, interviewTime?: string) => {
     if (!interviewDate || !interviewTime) {
@@ -148,29 +183,6 @@ export default function InterviewsPage() {
                 </div>
               ))}
             </div>
-          </div>
-        ) : null}
-
-        {interviews.length > 0 ? (
-          <div className="grid gap-4 lg:grid-cols-2">
-            {interviews.map((interview) => (
-              <div key={interview.id} className="rounded-[28px] border border-white/60 bg-white/80 p-5 shadow-[0_10px_30px_rgba(203,213,225,0.26)]">
-                <div className="mb-4 flex items-start justify-between gap-2">
-                  <div>
-                    <p className="text-xl font-semibold text-slate-800">{interview.company}</p>
-                    <p className="text-sm text-slate-500">{interview.position}</p>
-                  </div>
-                  <StatusBadge status={interview.status} />
-                </div>
-                <div className="space-y-2 text-sm text-slate-600">
-                  <p><span className="font-semibold text-slate-700">Date:</span> {interview.date}</p>
-                  <p><span className="font-semibold text-slate-700">Time:</span> {interview.time}</p>
-                  <p><span className="font-semibold text-slate-700">Type:</span> {interview.type}</p>
-                  <p><span className="font-semibold text-slate-700">Status:</span> {interview.status}</p>
-                  <p><span className="font-semibold text-slate-700">Details:</span> {interview.details}</p>
-                </div>
-              </div>
-            ))}
           </div>
         ) : null}
 

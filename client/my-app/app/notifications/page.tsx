@@ -20,6 +20,8 @@ const reminderDateFormatter = new Intl.DateTimeFormat("en-ZA", {
   minute: "2-digit",
   hourCycle: "h23",
 });
+const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const abbreviatedMonthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function formatReminderDate(scheduledFor?: string) {
   if (!scheduledFor) {
@@ -32,6 +34,36 @@ function formatReminderDate(scheduledFor?: string) {
   }
 
   return `${reminderDateFormatter.format(scheduledAt)} SAST`;
+}
+
+function formatDateOnly(value: string) {
+  const isoDate = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim());
+  if (isoDate) {
+    const [, year, month, day] = isoDate;
+    const monthName = monthNames[Number(month) - 1];
+    return monthName ? `${day} ${monthName} ${year}` : value;
+  }
+
+  const javascriptDate = /^(?:\w{3} )?(\w{3}) (\d{1,2}) (\d{4})\b/.exec(value.trim());
+  if (javascriptDate) {
+    const [, abbreviatedMonth, day, year] = javascriptDate;
+    const monthIndex = abbreviatedMonthNames.indexOf(abbreviatedMonth);
+    const monthName = monthNames[monthIndex];
+    if (monthName) {
+      return `${day.padStart(2, "0")} ${monthName} ${year}`;
+    }
+  }
+
+  return value;
+}
+
+function formatNotificationMessage(message: string) {
+  const scheduledInterview = /^(.* is scheduled for )(.+?)( at \d{1,2}:\d{2}\.)$/.exec(message);
+  if (!scheduledInterview) {
+    return message;
+  }
+
+  return `${scheduledInterview[1]}${formatDateOnly(scheduledInterview[2])}${scheduledInterview[3]}`;
 }
 
 export default function NotificationsPage() {
@@ -115,13 +147,13 @@ export default function NotificationsPage() {
                     ) : null}
                   </div>
                   <p className="text-lg font-semibold text-slate-800">{notification.title}</p>
-                  <p className="mt-1 text-sm text-slate-600">{notification.message}</p>
+                  <p className="mt-1 text-sm text-slate-600">{formatNotificationMessage(notification.message)}</p>
                 </div>
                 <div className="flex shrink-0 flex-col items-start gap-2 sm:items-end">
                   <p className="text-xs font-medium text-slate-500">
                     {notification.scheduledFor
                       ? `Reminder: ${formatReminderDate(notification.scheduledFor)}`
-                      : notification.date}
+                      : formatDateOnly(notification.date)}
                   </p>
                   {notification.status === "sent" && !notification.read ? (
                     <button
