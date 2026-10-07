@@ -15,6 +15,7 @@ import {
 const navItems = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/applications", label: "Applications" },
+  { href: "/gmail", label: "Gmail" },
   { href: "/interviews", label: "Interviews" },
   { href: "/notifications", label: "Notifications" },
 ];

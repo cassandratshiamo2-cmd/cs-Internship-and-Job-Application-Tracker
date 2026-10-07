@@ -94,6 +94,22 @@ Create `server/.env` for backend settings and `client/my-app/.env.local` for fro
 | `NEXT_PUBLIC_API_URL` | Frontend | Optional backend base URL. Defaults to `http://localhost:5000`. |
 | `RESEND_API_KEY` | Backend | Optional email-provider configuration retained by the server. It does not make email selectable for interview reminders. |
 | `NOTIFICATION_FROM_EMAIL` | Backend | Optional sender address used with the email-provider configuration. |
+| `GOOGLE_CLIENT_ID` | Backend | Google OAuth client ID for Gmail read-only linking. |
+| `GOOGLE_CLIENT_SECRET` | Backend | Google OAuth client secret. Keep it server-side. |
+| `GOOGLE_REDIRECT_URI` | Backend | Exact callback URL registered in Google Cloud, ending in `/api/gmail/oauth/callback`. |
+| `GMAIL_TOKEN_ENCRYPTION_KEY` | Backend | Base64-encoded 32-byte key used to encrypt Gmail tokens at rest. |
+| `GMAIL_SYNC_INTERVAL_MS` | Backend | Optional Gmail polling interval in milliseconds. Defaults to `120000`. |
+| `GMAIL_INITIAL_SYNC_DAYS` | Backend | Optional recent-message window used for initial sync. Defaults to `30`. |
+
+## Gmail Integration Setup
+
+1. In Google Cloud Console, create/select a project, enable the Gmail API, and configure the OAuth consent screen.
+2. Create a Web application OAuth client. Add the backend callback URL as an authorized redirect URI, for example `http://localhost:5000/api/gmail/oauth/callback`; production must use the public HTTPS backend URL.
+3. Add the OAuth client ID, client secret, exact redirect URI, and encryption key to `server/.env`. Generate an encryption key locally with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`; do not commit the generated value.
+4. While the OAuth app is in Testing, add the Gmail accounts you will use as test users. Google may require verification for the restricted Gmail read scope before general release.
+5. Start the backend and frontend, log in to ApplyFlow, open Gmail in the navigation, and connect the account. ApplyFlow requests `gmail.readonly` only; it does not ask for Gmail passwords or store Gmail tokens in browser storage.
+
+The first sync scans recent incoming messages (30 days by default) in pages. Later syncs use Gmail history and run on a separate backend poller (2 minutes by default). Clear, unique matches can update only the application status. Uncertain matches are placed in the Gmail review queue. Interview status emails do not create interview details or reminders; those remain managed through the existing application edit flow.
 
 ## Application Workflow
 
