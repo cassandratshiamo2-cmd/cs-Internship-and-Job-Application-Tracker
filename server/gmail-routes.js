@@ -1,0 +1,290 @@
+const express = require('express');
+const { google } = require('googleapis');
+const { getInterviewDetailsToFill } = require('./gmail-parser');
+const { getReviewedEmailUpdateDecision } = require('./gmail-matcher');
+const { scheduleInterviewReminderIfReady } = require('./gmail-interview');
+const {
+  createAuthorizationUrl,
+  createOAuthClient,
+  createOAuthState,
+  decryptToken,
+  encryptToken,
+  hashOAuthState,
+} = require('./gmail-oauth');
+
+function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInterviewReminder, env = process.env }) {
+  const router = express.Router();
+  const clientUrl = env.CLIENT_URL || 'http://localhost:3000';
+
+  router.get('/oauth/callback', async (req, res) => {
+    const redirectWithResult = (result) => {
+      const redirect = new URL('/gmail', clientUrl);
+      redirect.searchParams.set('gmail', result);
+      return res.redirect(redirect.toString());
+    };
+
+    if (req.query.error) return redirectWithResult('denied');
+    if (typeof req.query.state !== 'string' || typeof req.query.code !== 'string') {
+      return redirectWithResult('invalid');
+    }
+
+    try {
+      const stateResult = await pool.query(
+        'DELETE FROM gmail_oauth_states WHERE state_hash = $1 AND expires_at > NOW() RETURNING user_id',
+        [hashOAuthState(req.query.state)]
+      );
+      if (!stateResult.rowCount) return redirectWithResult('expired');
+      const userId = stateResult.rows[0].user_id;
+      const oauthClient = createOAuthClient(env);
+      const tokenResult = await oauthClient.getToken(req.query.code);
+      const tokens = tokenResult.tokens;
+      oauthClient.setCredentials(tokens);
+      const gmail = google.gmail({ version: 'v1', auth: oauthClient });
+      const profile = await gmail.users.getProfile({ userId: 'me' });
+      const gmailAddress = String(profile.data.emailAddress || '').trim().toLowerCase();
+      if (!gmailAddress) throw new Error('Google did not return the Gmail account address.');
+
+      const existing = await pool.query(
+        'SELECT refresh_token_ciphertext FROM gmail_connections WHERE user_id = $1',
+        [userId]
+      );
+      const refreshToken = tokens.refresh_token
+        ? encryptToken(tokens.refresh_token, env.GMAIL_TOKEN_ENCRYPTION_KEY)
+        : existing.rows[0]?.refresh_token_ciphertext;
+      if (!refreshToken) throw new Error('Google did not provide a refresh token. Disconnect and reconnect Gmail.');
+
+      await pool.query(
+        'INSERT INTO gmail_connections (' +
+          'user_id, gmail_address, refresh_token_ciphertext, access_token_ciphertext, ' +
+          'token_expires_at, history_id, is_connected, last_sync_error' +
+        ') VALUES ($1, $2, $3, $4, $5, NULL, TRUE, NULL) ' +
+        'ON CONFLICT (user_id) DO UPDATE SET ' +
+          'gmail_address = EXCLUDED.gmail_address, ' +
+          'refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, ' +
+          'access_token_ciphertext = EXCLUDED.access_token_ciphertext, ' +
+          'token_expires_at = EXCLUDED.token_expires_at, ' +
+          'history_id = NULL, initial_sync_history_id = NULL, initial_sync_page_token = NULL, ' +
+          'is_connected = TRUE, last_sync_at = NULL, last_sync_error = NULL, updated_at = NOW()',
+        [
+          userId,
+          gmailAddress,
+          refreshToken,
+          tokens.access_token ? encryptToken(tokens.access_token, env.GMAIL_TOKEN_ENCRYPTION_KEY) : null,
+          tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+        ]
+      );
+
+      void syncService.syncUser(userId).catch((error) => {
+        console.error('Initial Gmail sync failed:', error.message);
+      });
+      return redirectWithResult('connected');
+    } catch (error) {
+      console.error('Gmail OAuth callback failed:', error.message);
+      return redirectWithResult('error');
+    }
+  });
+
+  router.get('/status', authenticateRequest, async (req, res) => {
+    try {
+      const result = await pool.query(
+        'SELECT gmail_address, is_connected, last_sync_at, last_sync_error ' +
+          'FROM gmail_connections WHERE user_id = $1',
+        [req.user.id]
+      );
+      const connection = result.rows[0];
+      return res.status(200).json({
+        connected: Boolean(connection?.is_connected),
+        email: connection?.is_connected ? connection.gmail_address : null,
+        lastSyncAt: connection?.last_sync_at || null,
+        lastSyncError: connection?.last_sync_error || null,
+      });
+    } catch (error) {
+      console.error('Loading Gmail connection status failed:', error.message);
+      return res.status(500).json({ message: 'Unable to load Gmail connection status.' });
+    }
+  });
+
+  router.post('/connect', authenticateRequest, async (req, res) => {
+    if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.GOOGLE_REDIRECT_URI || !env.GMAIL_TOKEN_ENCRYPTION_KEY) {
+      return res.status(503).json({ message: 'Gmail OAuth is not configured on the server.' });
+    }
+    try {
+      const state = createOAuthState();
+      await pool.query(
+        'INSERT INTO gmail_oauth_states (user_id, state_hash, expires_at) ' +
+          "VALUES ($1, $2, NOW() + INTERVAL '10 minutes')",
+        [req.user.id, hashOAuthState(state)]
+      );
+      return res.status(200).json({ authorizationUrl: createAuthorizationUrl(createOAuthClient(env), state) });
+    } catch (error) {
+      console.error('Starting Gmail OAuth failed:', error.message);
+      return res.status(500).json({ message: 'Unable to start Gmail connection.' });
+    }
+  });
+
+  router.post('/sync', authenticateRequest, async (req, res) => {
+    try {
+      const result = await syncService.syncUser(req.user.id);
+      return res.status(200).json({
+        message: result.initialSyncComplete === false
+          ? 'Gmail sync is continuing in the background.'
+          : 'Gmail sync completed.',
+        processed: result.processed,
+        outcomes: result.outcomes,
+      });
+    } catch (error) {
+      console.error('Manual Gmail sync failed:', error.message);
+      return res.status(502).json({ message: error.message || 'Unable to sync Gmail.' });
+    }
+  });
+
+  router.delete('/connection', authenticateRequest, async (req, res) => {
+    try {
+      const result = await pool.query(
+        'SELECT id, refresh_token_ciphertext FROM gmail_connections WHERE user_id = $1 AND is_connected = TRUE',
+        [req.user.id]
+      );
+      const connection = result.rows[0];
+      if (!connection) return res.status(200).json({ disconnected: true });
+
+      if (connection.refresh_token_ciphertext && env.GMAIL_TOKEN_ENCRYPTION_KEY) {
+        try {
+          const oauthClient = createOAuthClient(env);
+          await oauthClient.revokeToken(
+            decryptToken(connection.refresh_token_ciphertext, env.GMAIL_TOKEN_ENCRYPTION_KEY)
+          );
+        } catch (error) {
+          console.error('Revoking Gmail access failed:', error.message);
+        }
+      }
+
+      await pool.query(
+        'UPDATE gmail_connections SET is_connected = FALSE, gmail_address = NULL, ' +
+          'refresh_token_ciphertext = NULL, access_token_ciphertext = NULL, token_expires_at = NULL, ' +
+          'last_sync_error = NULL, updated_at = NOW() WHERE id = $1',
+        [connection.id]
+      );
+      return res.status(200).json({ disconnected: true });
+    } catch (error) {
+      console.error('Disconnecting Gmail failed:', error.message);
+      return res.status(500).json({ message: 'Unable to disconnect Gmail.' });
+    }
+  });
+
+  router.get('/review', authenticateRequest, async (req, res) => {
+    try {
+      const result = await pool.query(
+        "SELECT id, gmail_message_id, sender, subject, received_at, detected_status, confidence, " +
+          "candidate_application_ids, review_reason FROM gmail_processed_messages " +
+          "WHERE user_id = $1 AND outcome = 'review' ORDER BY received_at DESC LIMIT 100",
+        [req.user.id]
+      );
+      return res.status(200).json({ messages: result.rows });
+    } catch (error) {
+      console.error('Loading Gmail review queue failed:', error.message);
+      return res.status(500).json({ message: 'Unable to load Gmail review items.' });
+    }
+  });
+
+  router.post('/review/:messageId', authenticateRequest, async (req, res) => {
+    const action = String(req.body?.action || '');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const messageResult = await client.query(
+        "SELECT id, detected_status, detected_interview_date::text AS detected_interview_date, " +
+          "detected_interview_time::text AS detected_interview_time FROM gmail_processed_messages " +
+          "WHERE id = $1 AND user_id = $2 AND outcome = 'review' FOR UPDATE",
+        [req.params.messageId, req.user.id]
+      );
+      const message = messageResult.rows[0];
+      if (!message) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ message: 'Review item was not found.' });
+      }
+
+      if (action === 'dismiss') {
+        await client.query(
+          "UPDATE gmail_processed_messages SET outcome = 'dismissed', processed_at = NOW() WHERE id = $1",
+          [message.id]
+        );
+        await client.query('COMMIT');
+        return res.status(200).json({ message: 'Email dismissed.' });
+      }
+
+      const applicationId = Number(req.body?.applicationId);
+      if (action !== 'apply' || !Number.isInteger(applicationId) || applicationId <= 0 || !message.detected_status) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: 'Choose a valid application and review action.' });
+      }
+
+      const applicationResult = await client.query(
+        'SELECT id, company, position, status, interview_date::text AS interview_date, ' +
+          'interview_time::text AS interview_time, notification_channels, application_link, interview_email ' +
+          'FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
+        [applicationId, req.user.id]
+      );
+      const application = applicationResult.rows[0];
+      if (!application) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ message: 'Application was not found.' });
+      }
+      const detailsToFill = getInterviewDetailsToFill(application, {
+        interviewDate: message.detected_interview_date,
+        interviewTime: message.detected_interview_time,
+      });
+      const updateDecision = getReviewedEmailUpdateDecision({
+        currentStatus: application.status,
+        nextStatus: message.detected_status,
+        interviewDetailsToFill: detailsToFill,
+      });
+      if (!updateDecision.allowed) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ message: 'This status would not advance the selected application.' });
+      }
+
+      const updatedResult = await client.query(
+        'UPDATE applications SET ' +
+          'status = CASE WHEN $5::boolean THEN status ELSE $3 END, ' +
+          'interview_date = COALESCE(interview_date, $4::date), ' +
+          'interview_time = COALESCE(interview_time, $6::time), ' +
+          'updated_at = NOW() ' +
+          'WHERE id = $1 AND user_id = $2 ' +
+          'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
+          'interview_time::text AS interview_time, notification_channels, application_link, interview_email',
+        [
+          applicationId,
+          req.user.id,
+          message.detected_status,
+          detailsToFill.interviewDate,
+          updateDecision.preserveStatus,
+          detailsToFill.interviewTime,
+        ]
+      );
+      await scheduleInterviewReminderIfReady({
+        scheduleInterviewReminder,
+        userId: req.user.id,
+        applicationId,
+        application: updatedResult.rows[0],
+        client,
+      });
+      await client.query(
+        "UPDATE gmail_processed_messages SET outcome = 'reviewed', application_id = $2, " +
+          'previous_status = $3, new_status = detected_status, processed_at = NOW() WHERE id = $1',
+        [message.id, applicationId, application.status]
+      );
+      await client.query('COMMIT');
+      return res.status(200).json({ message: 'Application status updated.' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Applying Gmail review failed:', error.message);
+      return res.status(500).json({ message: 'Unable to apply this email update.' });
+    } finally {
+      client.release();
+    }
+  });
+
+  return router;
+}
+
+module.exports = { createGmailRouter };

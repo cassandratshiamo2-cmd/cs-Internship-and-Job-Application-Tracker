@@ -4,6 +4,8 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const { createGmailRouter } = require('./gmail-routes');
+const { createGmailSyncService, startGmailSyncWorker } = require('./gmail-sync');
 const {
   calculateInterviewReminderSchedule,
   interviewDateTimeToInstant,
@@ -140,6 +142,79 @@ async function ensureDatabase() {
   );
 
   await pool.query(
+    'CREATE TABLE IF NOT EXISTS gmail_connections (' +
+      'id BIGSERIAL PRIMARY KEY, ' +
+      'user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE, ' +
+      'gmail_address VARCHAR(255), ' +
+      'refresh_token_ciphertext TEXT, ' +
+      'access_token_ciphertext TEXT, ' +
+      'token_expires_at TIMESTAMPTZ, ' +
+      'history_id VARCHAR(255), ' +
+      'initial_sync_history_id VARCHAR(255), ' +
+      'initial_sync_page_token TEXT, ' +
+      'is_connected BOOLEAN NOT NULL DEFAULT TRUE, ' +
+      'last_sync_at TIMESTAMPTZ, ' +
+      'last_sync_error TEXT, ' +
+      'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
+      'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
+      ')'
+  );
+
+  await pool.query(
+    'CREATE TABLE IF NOT EXISTS gmail_oauth_states (' +
+      'state_hash CHAR(64) PRIMARY KEY, ' +
+      'user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ' +
+      'expires_at TIMESTAMPTZ NOT NULL, ' +
+      'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
+      ')'
+  );
+
+  await pool.query(
+    'CREATE TABLE IF NOT EXISTS gmail_processed_messages (' +
+      'id BIGSERIAL PRIMARY KEY, ' +
+      'connection_id BIGINT NOT NULL REFERENCES gmail_connections(id) ON DELETE CASCADE, ' +
+      'user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ' +
+      'gmail_message_id VARCHAR(255) NOT NULL, ' +
+      'gmail_thread_id VARCHAR(255), ' +
+      'sender VARCHAR(998) NOT NULL DEFAULT \'\', ' +
+      'subject VARCHAR(998) NOT NULL DEFAULT \'\', ' +
+      'received_at TIMESTAMPTZ NOT NULL, ' +
+      'detected_status VARCHAR(32) CHECK (detected_status IN (\'Applied\', \'Assessment\', \'Shortlisted\', \'Interview\', \'Offer\', \'Rejected\')), ' +
+      'detected_interview_date DATE, ' +
+      'detected_interview_time TIME, ' +
+      'confidence NUMERIC(4, 3) NOT NULL DEFAULT 0, ' +
+      'candidate_application_ids JSONB NOT NULL DEFAULT \'[]\'::jsonb, ' +
+      'application_id INTEGER REFERENCES applications(id) ON DELETE SET NULL, ' +
+      'previous_status VARCHAR(32), ' +
+      'new_status VARCHAR(32), ' +
+      'outcome VARCHAR(16) NOT NULL DEFAULT \'processing\' CHECK (outcome IN (\'processing\', \'updated\', \'review\', \'reviewed\', \'ignored\', \'dismissed\')), ' +
+      'review_reason TEXT, ' +
+      'processed_at TIMESTAMPTZ, ' +
+      'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
+      'UNIQUE (connection_id, gmail_message_id)' +
+      ')'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS detected_interview_date DATE'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS detected_interview_time TIME'
+  );
+
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS gmail_messages_review_idx ' +
+      'ON gmail_processed_messages (user_id, outcome, received_at DESC)'
+  );
+
+  await pool.query(
+    'DELETE FROM gmail_oauth_states WHERE expires_at <= NOW()'
+  );
+
+  await pool.query(
     "UPDATE notification_jobs SET status = 'cancelled', processed_at = NOW(), updated_at = NOW(), last_error = 'Legacy SMS notifications are no longer supported.' WHERE channel IN ('SMS', 'Phone') AND status IN ('pending', 'processing')"
   );
 
@@ -241,6 +316,20 @@ function authenticateRequest(req, res, next) {
     });
   }
 }
+
+const gmailSyncService = createGmailSyncService({
+  pool,
+  scheduleInterviewReminder: replaceInterviewNotificationJobs,
+});
+app.use(
+  '/api/gmail',
+  createGmailRouter({
+    pool,
+    syncService: gmailSyncService,
+    authenticateRequest,
+    scheduleInterviewReminder: replaceInterviewNotificationJobs,
+  })
+);
 
 async function sendInterviewEmail(data) {
   const email = data.email;
@@ -1845,6 +1934,7 @@ ensureDatabase()
         );
 
         startNotificationWorker();
+        startGmailSyncWorker(gmailSyncService);
       }
     );
   })
