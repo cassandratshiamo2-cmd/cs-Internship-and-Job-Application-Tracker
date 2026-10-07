@@ -64,6 +64,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'access_token_ciphertext = EXCLUDED.access_token_ciphertext, ' +
           'token_expires_at = EXCLUDED.token_expires_at, ' +
           'history_id = NULL, initial_sync_history_id = NULL, initial_sync_page_token = NULL, ' +
+          'quota_backoff_until = NULL, quota_failure_count = 0, ' +
           'is_connected = TRUE, last_sync_at = NULL, last_sync_error = NULL, updated_at = NOW()',
         [
           userId,
@@ -79,7 +80,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       });
       return redirectWithResult('connected');
     } catch (error) {
-      console.error('Gmail OAuth callback failed:', error.message);
+      console.error('Gmail OAuth callback failed.');
       return redirectWithResult('error');
     }
   });
@@ -117,7 +118,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       );
       return res.status(200).json({ authorizationUrl: createAuthorizationUrl(createOAuthClient(env), state) });
     } catch (error) {
-      console.error('Starting Gmail OAuth failed:', error.message);
+      console.error('Starting Gmail OAuth failed.');
       return res.status(500).json({ message: 'Unable to start Gmail connection.' });
     }
   });
@@ -125,6 +126,21 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
   router.post('/sync', authenticateRequest, async (req, res) => {
     try {
       const result = await syncService.syncUser(req.user.id);
+      if (result.quotaLimited) {
+        const retryAfterSeconds = Math.max(1, Number(result.retryAfterSeconds || 60));
+        res.set('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({
+          message: `Gmail is temporarily rate-limited. Try again in ${retryAfterSeconds} seconds.`,
+          retryAfterSeconds,
+        });
+      }
+      if (result.inProgress) {
+        return res.status(200).json({
+          message: 'Gmail sync is already in progress.',
+          processed: 0,
+          inProgress: true,
+        });
+      }
       return res.status(200).json({
         message: result.initialSyncComplete === false
           ? 'Gmail sync is continuing in the background.'
@@ -133,8 +149,12 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         outcomes: result.outcomes,
       });
     } catch (error) {
-      console.error('Manual Gmail sync failed:', error.message);
-      return res.status(502).json({ message: error.message || 'Unable to sync Gmail.' });
+      console.error('Manual Gmail sync failed.');
+      return res.status(502).json({
+        message: error.code === 'GMAIL_NOT_CONNECTED'
+          ? error.message
+          : 'Unable to sync Gmail. Please try again later.',
+      });
     }
   });
 
@@ -154,19 +174,20 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
             decryptToken(connection.refresh_token_ciphertext, env.GMAIL_TOKEN_ENCRYPTION_KEY)
           );
         } catch (error) {
-          console.error('Revoking Gmail access failed:', error.message);
+          console.error('Revoking Gmail access failed.');
         }
       }
 
       await pool.query(
         'UPDATE gmail_connections SET is_connected = FALSE, gmail_address = NULL, ' +
           'refresh_token_ciphertext = NULL, access_token_ciphertext = NULL, token_expires_at = NULL, ' +
+          'quota_backoff_until = NULL, quota_failure_count = 0, ' +
           'last_sync_error = NULL, updated_at = NOW() WHERE id = $1',
         [connection.id]
       );
       return res.status(200).json({ disconnected: true });
     } catch (error) {
-      console.error('Disconnecting Gmail failed:', error.message);
+      console.error('Disconnecting Gmail failed.');
       return res.status(500).json({ message: 'Unable to disconnect Gmail.' });
     }
   });

@@ -152,12 +152,24 @@ async function ensureDatabase() {
       'history_id VARCHAR(255), ' +
       'initial_sync_history_id VARCHAR(255), ' +
       'initial_sync_page_token TEXT, ' +
+      'quota_backoff_until TIMESTAMPTZ, ' +
+      'quota_failure_count INTEGER NOT NULL DEFAULT 0, ' +
       'is_connected BOOLEAN NOT NULL DEFAULT TRUE, ' +
       'last_sync_at TIMESTAMPTZ, ' +
       'last_sync_error TEXT, ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
       'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
       ')'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_connections ' +
+      'ADD COLUMN IF NOT EXISTS quota_backoff_until TIMESTAMPTZ'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_connections ' +
+      'ADD COLUMN IF NOT EXISTS quota_failure_count INTEGER NOT NULL DEFAULT 0'
   );
 
   await pool.query(
@@ -1942,5 +1954,4 @@ ensureDatabase()
     console.error('Failed to initialize database:', error);
     process.exit(1);
   });
-
 
