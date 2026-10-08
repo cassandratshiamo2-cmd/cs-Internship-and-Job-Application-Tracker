@@ -13,6 +13,12 @@ const INITIAL_SYNC_DAYS = 30;
 const INITIAL_SYNC_PAGE_SIZE = 50;
 const HISTORY_PAGE_SIZE = 100;
 const MESSAGE_TEXT_LIMIT = 100000;
+const GMAIL_SYNC_LOCK_NAMESPACE = 0x474d4149;
+const MAX_QUOTA_RETRIES = 3;
+const DEFAULT_QUOTA_RETRY_BASE_MS = 1000;
+const MAX_QUOTA_RETRY_DELAY_MS = 30000;
+const QUOTA_COOLDOWN_BASE_SECONDS = 60;
+const QUOTA_COOLDOWN_MAX_SECONDS = 3600;
 
 function asHeaderText(value) {
   if (!value) return '';
@@ -25,11 +31,83 @@ function emailAddress(value) {
   return match ? match[0].toLowerCase() : '';
 }
 
-function createGmailSyncService({ pool, scheduleInterviewReminder, env = process.env }) {
+function getGmailErrorStatus(error) {
+  return Number(error?.response?.status || error?.status || error?.statusCode || 0);
+}
+
+function getGmailErrorReasons(error) {
+  const responseError = error?.response?.data?.error;
+  const errors = [
+    ...(Array.isArray(error?.errors) ? error.errors : []),
+    ...(Array.isArray(responseError?.errors) ? responseError.errors : []),
+  ];
+  return errors.map((item) => String(item?.reason || '').toLowerCase());
+}
+
+function isGmailQuotaError(error) {
+  const status = getGmailErrorStatus(error);
+  if (status === 429) return true;
+  if (status !== 403) return false;
+
+  const quotaReasons = new Set([
+    'dailylimitexceeded',
+    'quotaexceeded',
+    'ratelimitexceeded',
+    'userratelimitexceeded',
+  ]);
+  if (getGmailErrorReasons(error).some((reason) => quotaReasons.has(reason))) return true;
+
+  return /quota exceeded|rate limit|units per minute/i.test(String(error?.message || ''));
+}
+
+function getRetryAfterMs(error, now = Date.now()) {
+  const headers = error?.response?.headers;
+  const value = typeof headers?.get === 'function'
+    ? headers.get('retry-after')
+    : headers?.['retry-after'] || headers?.['Retry-After'];
+  if (value == null) return 0;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1000);
+
+  const retryAt = Date.parse(String(value));
+  return Number.isFinite(retryAt) ? Math.max(0, retryAt - now) : 0;
+}
+
+function createGmailSyncService({
+  pool,
+  scheduleInterviewReminder,
+  env = process.env,
+  oauthClientFactory = createOAuthClient,
+  gmailClientFactory = (auth) => google.gmail({ version: 'v1', auth }),
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  random = Math.random,
+  retryBaseMs = DEFAULT_QUOTA_RETRY_BASE_MS,
+}) {
   const encryptionKey = env.GMAIL_TOKEN_ENCRYPTION_KEY;
+  const baseDelayMs = Number.isFinite(retryBaseMs)
+    ? Math.max(1, retryBaseMs)
+    : DEFAULT_QUOTA_RETRY_BASE_MS;
+
+  async function withQuotaRetry(operation) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await operation();
+      } catch (error) {
+        if (!isGmailQuotaError(error) || attempt >= MAX_QUOTA_RETRIES) throw error;
+
+        const exponentialDelay = Math.min(
+          MAX_QUOTA_RETRY_DELAY_MS,
+          baseDelayMs * (2 ** attempt)
+        );
+        const jitteredDelay = Math.round(exponentialDelay * (0.5 + random()));
+        await wait(Math.max(jitteredDelay, getRetryAfterMs(error)));
+      }
+    }
+  }
 
   async function buildGmailClient(connection) {
-    const oauthClient = createOAuthClient(env);
+    const oauthClient = oauthClientFactory(env);
     oauthClient.setCredentials({
       access_token: connection.access_token_ciphertext
         ? decryptToken(connection.access_token_ciphertext, encryptionKey)
@@ -57,15 +135,15 @@ function createGmailSyncService({ pool, scheduleInterviewReminder, env = process
       ]
     );
 
-    return google.gmail({ version: 'v1', auth: oauthClient });
+    return gmailClientFactory(oauthClient);
   }
 
   async function fetchMessage(gmail, messageId) {
-    const result = await gmail.users.messages.get({
+    const result = await withQuotaRetry(() => gmail.users.messages.get({
       userId: 'me',
       id: messageId,
       format: 'raw',
-    });
+    }));
     if ((result.data.labelIds || []).includes('SENT')) return null;
     const raw = result.data.raw;
     if (!raw) return null;
@@ -250,6 +328,12 @@ function createGmailSyncService({ pool, scheduleInterviewReminder, env = process
   }
 
   async function processMessage(connection, gmail, messageId) {
+    const existing = await pool.query(
+      'SELECT 1 FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
+      [connection.id, messageId]
+    );
+    if (existing.rowCount > 0) return 'duplicate';
+
     const email = await fetchMessage(gmail, messageId);
     if (!email) return 'ignored';
 
@@ -274,27 +358,13 @@ function createGmailSyncService({ pool, scheduleInterviewReminder, env = process
     return recordMessage(connection, email, classification, match, interviewDetails);
   }
 
-  async function reprocessPendingReviews(connection, gmail) {
-    const result = await pool.query(
-      "SELECT gmail_message_id FROM gmail_processed_messages " +
-        "WHERE connection_id = $1 AND outcome = 'review' " +
-        'ORDER BY received_at ASC LIMIT 50',
-      [connection.id]
-    );
-    const outcomes = [];
-    for (const message of result.rows) {
-      outcomes.push(await processMessage(connection, gmail, message.gmail_message_id));
-    }
-    return { processed: result.rows.length, outcomes };
-  }
-
   async function listInitialPage(gmail, pageToken) {
-    return gmail.users.messages.list({
+    return withQuotaRetry(() => gmail.users.messages.list({
       userId: 'me',
       maxResults: INITIAL_SYNC_PAGE_SIZE,
       pageToken: pageToken || undefined,
       q: `newer_than:${Number(env.GMAIL_INITIAL_SYNC_DAYS || INITIAL_SYNC_DAYS)}d -in:sent`,
-    });
+    }));
   }
 
   async function syncInitialPage(connection, gmail, profile) {
@@ -334,13 +404,13 @@ function createGmailSyncService({ pool, scheduleInterviewReminder, env = process
     let latestHistoryId = connection.history_id;
 
     do {
-      const response = await gmail.users.history.list({
+      const response = await withQuotaRetry(() => gmail.users.history.list({
         userId: 'me',
         startHistoryId: connection.history_id,
         historyTypes: ['messageAdded'],
         maxResults: HISTORY_PAGE_SIZE,
         pageToken,
-      });
+      }));
       latestHistoryId = response.data.historyId || latestHistoryId;
       for (const history of response.data.history || []) {
         for (const added of history.messagesAdded || []) {
@@ -365,56 +435,129 @@ function createGmailSyncService({ pool, scheduleInterviewReminder, env = process
   }
 
   async function syncConnection(connectionId) {
-    const result = await pool.query(
-      'SELECT * FROM gmail_connections WHERE id = $1 AND is_connected = TRUE',
-      [connectionId]
-    );
-    const connection = result.rows[0];
-    if (!connection) return { processed: 0, outcomes: [], disconnected: true };
-
+    const lockClient = await pool.connect();
+    let hasLock = false;
     try {
-      const gmail = await buildGmailClient(connection);
-      const profileResult = await gmail.users.getProfile({ userId: 'me' });
-      const profile = profileResult.data;
-      const reviewed = await reprocessPendingReviews(connection, gmail);
-      const refreshedConnection = {
-        ...connection,
-        initial_sync_history_id: connection.initial_sync_history_id,
-      };
-
-      let syncResult;
-      if (connection.initial_sync_history_id || !connection.history_id) {
-        syncResult = await syncInitialPage(refreshedConnection, gmail, profile);
-      } else {
-        try {
-          syncResult = await syncHistory(connection, gmail);
-        } catch (error) {
-          if (error.code !== 404 && error.response?.status !== 404) throw error;
-          await pool.query(
-            'UPDATE gmail_connections SET history_id = NULL, initial_sync_history_id = NULL, ' +
-              'initial_sync_page_token = NULL WHERE id = $1',
-            [connection.id]
-          );
-          syncResult = await syncInitialPage({
-            ...connection,
-            history_id: null,
-            initial_sync_history_id: null,
-            initial_sync_page_token: null,
-          }, gmail, profile);
-        }
+      const lockResult = await lockClient.query(
+        'SELECT pg_try_advisory_lock($1, hashtext($2)) AS acquired',
+        [GMAIL_SYNC_LOCK_NAMESPACE, String(connectionId)]
+      );
+      hasLock = Boolean(lockResult.rows[0]?.acquired);
+      if (!hasLock) {
+        return { processed: 0, outcomes: [], inProgress: true };
       }
 
-      return {
-        ...syncResult,
-        processed: reviewed.processed + syncResult.processed,
-        outcomes: [...reviewed.outcomes, ...syncResult.outcomes],
-      };
-    } catch (error) {
-      await pool.query(
-        'UPDATE gmail_connections SET last_sync_error = $2, updated_at = NOW() WHERE id = $1',
-        [connection.id, String(error.message || 'Gmail sync failed').slice(0, 1000)]
+      const result = await pool.query(
+        'SELECT * FROM gmail_connections WHERE id = $1 AND is_connected = TRUE',
+        [connectionId]
       );
-      throw error;
+      const connection = result.rows[0];
+      if (!connection) return { processed: 0, outcomes: [], disconnected: true };
+
+      const cooldownResult = await pool.query(
+        'SELECT CEIL(EXTRACT(EPOCH FROM (quota_backoff_until - NOW()))) AS retry_after_seconds ' +
+          'FROM gmail_connections WHERE id = $1 AND quota_backoff_until > NOW()',
+        [connection.id]
+      );
+      if (cooldownResult.rows[0]) {
+        return {
+          processed: 0,
+          outcomes: [],
+          quotaLimited: true,
+          retryAfterSeconds: Number(cooldownResult.rows[0].retry_after_seconds),
+        };
+      }
+
+      try {
+        const gmail = await buildGmailClient(connection);
+        let syncResult;
+        const needsInitialSync = Boolean(
+          connection.initial_sync_history_id || !connection.history_id
+        );
+
+        if (needsInitialSync) {
+          const profile = connection.initial_sync_history_id
+            ? null
+            : (await withQuotaRetry(() => gmail.users.getProfile({ userId: 'me' }))).data;
+          syncResult = await syncInitialPage(connection, gmail, profile || {});
+        } else {
+          try {
+            syncResult = await syncHistory(connection, gmail);
+          } catch (error) {
+            if (error.code !== 404 && error.response?.status !== 404) throw error;
+            const profile = (await withQuotaRetry(() =>
+              gmail.users.getProfile({ userId: 'me' })
+            )).data;
+            await pool.query(
+              'UPDATE gmail_connections SET history_id = NULL, initial_sync_history_id = NULL, ' +
+                'initial_sync_page_token = NULL WHERE id = $1',
+              [connection.id]
+            );
+            syncResult = await syncInitialPage({
+              ...connection,
+              history_id: null,
+              initial_sync_history_id: null,
+              initial_sync_page_token: null,
+            }, gmail, profile);
+          }
+        }
+
+        await pool.query(
+          'UPDATE gmail_connections SET quota_backoff_until = NULL, quota_failure_count = 0, ' +
+            'last_sync_error = NULL, updated_at = NOW() WHERE id = $1',
+          [connection.id]
+        );
+        return syncResult;
+      } catch (error) {
+        if (isGmailQuotaError(error)) {
+          const retryAfterSeconds = getRetryAfterMs(error) / 1000;
+          const backoffResult = await pool.query(
+            'UPDATE gmail_connections SET ' +
+              'quota_failure_count = LEAST(quota_failure_count + 1, 12), ' +
+              'quota_backoff_until = NOW() + (GREATEST($2::double precision, ' +
+                'LEAST($3::double precision * POWER(2, LEAST(quota_failure_count, 6)), $4::double precision)) ' +
+                '* INTERVAL \'1 second\'), ' +
+              'last_sync_error = $5, updated_at = NOW() WHERE id = $1 ' +
+              'RETURNING CEIL(EXTRACT(EPOCH FROM (quota_backoff_until - NOW()))) AS retry_after_seconds',
+            [
+              connection.id,
+              retryAfterSeconds,
+              QUOTA_COOLDOWN_BASE_SECONDS,
+              QUOTA_COOLDOWN_MAX_SECONDS,
+              'Gmail is temporarily rate-limited. Sync will retry after a cooldown.',
+            ]
+          );
+          return {
+            processed: 0,
+            outcomes: [],
+            quotaLimited: true,
+            retryAfterSeconds: Number(
+              backoffResult.rows[0]?.retry_after_seconds || QUOTA_COOLDOWN_BASE_SECONDS
+            ),
+          };
+        }
+
+        const errorStatus = getGmailErrorStatus(error);
+        const safeMessage = errorStatus === 401 || errorStatus === 403
+          ? 'Gmail access was denied or expired. Reconnect Gmail and try again.'
+          : 'Gmail sync failed. Please try again later.';
+        await pool.query(
+          'UPDATE gmail_connections SET last_sync_error = $2, updated_at = NOW() WHERE id = $1',
+          [connection.id, safeMessage]
+        );
+        throw new Error(safeMessage);
+      }
+    } finally {
+      try {
+        if (hasLock) {
+          await lockClient.query(
+            'SELECT pg_advisory_unlock($1, hashtext($2))',
+            [GMAIL_SYNC_LOCK_NAMESPACE, String(connectionId)]
+          );
+        }
+      } finally {
+        lockClient.release();
+      }
     }
   }
 
@@ -424,7 +567,9 @@ function createGmailSyncService({ pool, scheduleInterviewReminder, env = process
       [userId]
     );
     if (!result.rows.length) {
-      throw new Error('No Gmail account is connected.');
+      const error = new Error('No Gmail account is connected.');
+      error.code = 'GMAIL_NOT_CONNECTED';
+      throw error;
     }
     return syncConnection(result.rows[0].id);
   }
@@ -438,7 +583,9 @@ function createGmailSyncService({ pool, scheduleInterviewReminder, env = process
       try {
         outcomes.push(await syncConnection(connection.id));
       } catch (error) {
-        console.error('Gmail sync failed for connection ' + connection.id + ': ' + error.message);
+        if (error.code !== 'GMAIL_QUOTA_LIMITED') {
+          console.error('Gmail sync failed for connection ' + connection.id + ': ' + error.message);
+        }
       }
     }
     return outcomes;
@@ -467,4 +614,9 @@ function startGmailSyncWorker(syncService, env = process.env) {
   return setInterval(run, intervalMs);
 }
 
-module.exports = { createGmailSyncService, startGmailSyncWorker };
+module.exports = {
+  createGmailSyncService,
+  getRetryAfterMs,
+  isGmailQuotaError,
+  startGmailSyncWorker,
+};

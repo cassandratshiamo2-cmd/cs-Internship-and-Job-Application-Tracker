@@ -109,7 +109,7 @@ Create `server/.env` for backend settings and `client/my-app/.env.local` for fro
 4. While the OAuth app is in Testing, add the Gmail accounts you will use as test users. Google may require verification for the restricted Gmail read scope before general release.
 5. Start the backend and frontend, log in to ApplyFlow, open Gmail in the navigation, and connect the account. ApplyFlow requests `gmail.readonly` only; it does not ask for Gmail passwords or store Gmail tokens in browser storage.
 
-The first sync scans recent incoming messages (30 days by default) in pages. Later syncs use Gmail history and run on a separate backend poller (2 minutes by default). Clear, unique matches can update only the application status. Uncertain matches are placed in the Gmail review queue. Interview status emails do not create interview details or reminders; those remain managed through the existing application edit flow.
+The first sync scans recent incoming messages (30 days by default) in pages. Later syncs use Gmail history and run on a separate backend poller (2 minutes by default). Processed messages are skipped before their bodies are fetched, and syncs for one Gmail account are serialized across backend instances. Quota responses use bounded exponential retries and a persisted per-account cooldown. Clear, unique matches can update only the application status. Uncertain matches are placed in the Gmail review queue without being repeatedly re-downloaded. Interview status emails do not create interview details or reminders; those remain managed through the existing application edit flow.
 
 ## Application Workflow
 

@@ -66,7 +66,12 @@ export function disconnectGmail(token: string) {
 }
 
 export function syncGmail(token: string) {
-  return apiRequest<{ message: string; processed: number }>('/sync', {
+  return apiRequest<{
+    message: string;
+    processed: number;
+    inProgress?: boolean;
+    retryAfterSeconds?: number;
+  }>('/sync', {
     token,
     method: 'POST',
   });

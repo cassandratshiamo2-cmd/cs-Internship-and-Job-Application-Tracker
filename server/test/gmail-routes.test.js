@@ -39,7 +39,7 @@ async function withGmailReviewServer(t, options) {
   app.use(express.json());
   app.use('/api/gmail', createGmailRouter({
     pool: createTestPool(options),
-    syncService: {},
+    syncService: options.syncService || {},
     authenticateRequest(req, res, next) {
       req.user = { id: 7 };
       next();
@@ -51,6 +51,45 @@ async function withGmailReviewServer(t, options) {
   t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
   return `http://127.0.0.1:${server.address().port}`;
 }
+
+test('manual sync returns a retryable response for Gmail quota cooldowns', async (t) => {
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    syncService: {
+      async syncUser() {
+        return { quotaLimited: true, retryAfterSeconds: 90 };
+      },
+    },
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/sync`, { method: 'POST' });
+  const payload = await response.json();
+
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get('retry-after'), '90');
+  assert.equal(payload.retryAfterSeconds, 90);
+  assert.match(payload.message, /try again in 90 seconds/i);
+});
+
+test('manual sync reports an existing per-user sync without starting another', async (t) => {
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    syncService: {
+      async syncUser() {
+        return { inProgress: true, processed: 0 };
+      },
+    },
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/sync`, { method: 'POST' });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.inProgress, true);
+  assert.equal(payload.processed, 0);
+});
 
 test('review endpoint fills an already-Interview application and schedules its complete in-app reminder', async (t) => {
   const application = {
