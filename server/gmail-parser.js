@@ -255,6 +255,28 @@ function getInterviewDetailsToFill(existing, extracted) {
   };
 }
 
+function getInterviewDetailsToUpdate(existing, extracted) {
+  const existingDate = existing?.interview_date
+    ? String(existing.interview_date).slice(0, 10)
+    : null;
+  const existingTime = existing?.interview_time
+    ? String(existing.interview_time).slice(0, 5)
+    : null;
+  const existingType = existing?.interview_type || existing?.interviewType || null;
+
+  return {
+    interviewDate: extracted?.interviewDate && extracted.interviewDate !== existingDate
+      ? extracted.interviewDate
+      : null,
+    interviewTime: extracted?.interviewTime && extracted.interviewTime !== existingTime
+      ? extracted.interviewTime
+      : null,
+    interviewType: extracted?.interviewType && extracted.interviewType !== existingType
+      ? extracted.interviewType
+      : null,
+  };
+}
+
 function extractInterviewType({ subject = '', text = '' }) {
   const content = `${subject}\n${text}`.slice(0, 100000);
   return INTERVIEW_TYPE_PATTERNS.find(({ pattern }) => pattern.test(content))?.type || null;
@@ -314,4 +336,5 @@ module.exports = {
   extractInterviewDateTime,
   extractInterviewType,
   getInterviewDetailsToFill,
+  getInterviewDetailsToUpdate,
 };

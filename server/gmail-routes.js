@@ -1,5 +1,6 @@
 const express = require('express');
 const { google } = require('googleapis');
+const { getSafeSyncErrorDetails } = require('./gmail-sync');
 const { getInterviewDetailsToFill } = require('./gmail-parser');
 const { getReviewedEmailUpdateDecision } = require('./gmail-matcher');
 const { scheduleInterviewReminderIfReady } = require('./gmail-interview');
@@ -149,7 +150,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         outcomes: result.outcomes,
       });
     } catch (error) {
-      console.error('Manual Gmail sync failed.');
+      console.error('Manual Gmail sync failed:', getSafeSyncErrorDetails(error));
       return res.status(502).json({
         message: error.code === 'GMAIL_NOT_CONNECTED'
           ? error.message

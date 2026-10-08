@@ -5,6 +5,7 @@ const {
   extractInterviewDateTime,
   extractInterviewType,
   getInterviewDetailsToFill,
+  getInterviewDetailsToUpdate,
 } = require('./gmail-parser');
 const { getEmailUpdateDecision, matchApplication } = require('./gmail-matcher');
 const { createOAuthClient, decryptToken, encryptToken } = require('./gmail-oauth');
@@ -34,6 +35,26 @@ function emailAddress(value) {
 
 function getGmailErrorStatus(error) {
   return Number(error?.response?.status || error?.status || error?.statusCode || 0);
+}
+
+function getSafeSyncErrorDetails(error) {
+  const source = error?.cause || error;
+  const message = String(source?.message || 'Unknown sync error')
+    .replace(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi, '[redacted email]')
+    .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+    .replace(/\b(?:ya29|1\/\/0)\.[a-z0-9._~+/-]+/gi, '[redacted token]')
+    .slice(0, 500);
+  const status = getGmailErrorStatus(source);
+  const code = String(source?.code || '').slice(0, 80);
+  const reasons = getGmailErrorReasons(source).slice(0, 5);
+
+  return {
+    name: String(source?.name || 'Error').slice(0, 80),
+    ...(code ? { code } : {}),
+    ...(status ? { status } : {}),
+    ...(reasons.length ? { reasons } : {}),
+    message,
+  };
 }
 
 function getGmailErrorReasons(error) {
@@ -246,16 +267,32 @@ function createGmailSyncService({
       }
 
       const applicationResult = await client.query(
-        'SELECT id, company, position, status, updated_at, interview_date, interview_time, ' +
+        'SELECT id, company, position, status, updated_at, ' +
+          'interview_date::text AS interview_date, interview_time::text AS interview_time, ' +
           'interview_type, notification_channels, application_link, interview_email ' +
           'FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
         [match.application.id, connection.user_id]
       );
       const application = applicationResult.rows[0];
-      const detailsToFill = getInterviewDetailsToFill(application, interviewDetails);
+      const isExistingInterview = Boolean(
+        classification.status === 'Interview' && application?.status === 'Interview'
+      );
+      const detailsToFill = isExistingInterview
+        ? getInterviewDetailsToUpdate(application, interviewDetails)
+        : getInterviewDetailsToFill(application, interviewDetails);
+      const interviewDetailsWereDetected = Boolean(
+        interviewDetails?.interviewDate ||
+        interviewDetails?.interviewTime ||
+        interviewDetails?.interviewType
+      );
       const hasInterviewDetailsToFill = Boolean(
         classification.status === 'Interview' &&
-        (detailsToFill.interviewDate || detailsToFill.interviewTime || detailsToFill.interviewType)
+        (
+          detailsToFill.interviewDate ||
+          detailsToFill.interviewTime ||
+          detailsToFill.interviewType ||
+          (isExistingInterview && interviewDetailsWereDetected)
+        )
       );
       const updateDecision = application
         ? getEmailUpdateDecision({
@@ -263,7 +300,9 @@ function createGmailSyncService({
             nextStatus: classification.status,
             updatedAt: application.updated_at,
             receivedAt: email.receivedAt,
-            interviewDetailsToFill: hasInterviewDetailsToFill ? detailsToFill : null,
+            interviewDetailsToFill: hasInterviewDetailsToFill
+              ? (isExistingInterview ? interviewDetails : detailsToFill)
+              : null,
           })
         : { allowed: false, preserveStatus: false };
       if (
@@ -280,9 +319,9 @@ function createGmailSyncService({
 
       const updated = await client.query(
         'UPDATE applications SET status = CASE WHEN $8::boolean THEN status ELSE $3 END, updated_at = NOW() ' +
-          ', interview_date = COALESCE(interview_date, $6::date), ' +
-          'interview_time = COALESCE(interview_time, $7::time), ' +
-          'interview_type = COALESCE(interview_type, $9) ' +
+          ', interview_date = CASE WHEN $8::boolean THEN COALESCE($6::date, interview_date) ELSE COALESCE(interview_date, $6::date) END, ' +
+          'interview_time = CASE WHEN $8::boolean THEN COALESCE($7::time, interview_time) ELSE COALESCE(interview_time, $7::time) END, ' +
+          'interview_type = CASE WHEN $8::boolean THEN COALESCE($9, interview_type) ELSE COALESCE(interview_type, $9) END ' +
           'WHERE id = $1 AND user_id = $2 AND status = $4 ' +
           'AND (updated_at <= $5 OR $8::boolean) ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
@@ -443,9 +482,10 @@ function createGmailSyncService({
   }
 
   async function syncConnection(connectionId) {
-    const lockClient = await pool.connect();
+    let lockClient;
     let hasLock = false;
     try {
+      lockClient = await pool.connect();
       const lockResult = await lockClient.query(
         'SELECT pg_try_advisory_lock($1, hashtext($2)) AS acquired',
         [GMAIL_SYNC_LOCK_NAMESPACE, String(connectionId)]
@@ -553,19 +593,29 @@ function createGmailSyncService({
           'UPDATE gmail_connections SET last_sync_error = $2, updated_at = NOW() WHERE id = $1',
           [connection.id, safeMessage]
         );
-        throw new Error(safeMessage);
+        const syncError = new Error(safeMessage);
+        syncError.cause = error;
+        throw syncError;
       }
+    } catch (error) {
+      console.error('Gmail sync failed:', getSafeSyncErrorDetails(error));
+      throw error;
     } finally {
+      let unlockError;
       try {
-        if (hasLock) {
+        if (lockClient && hasLock) {
           await lockClient.query(
             'SELECT pg_advisory_unlock($1, hashtext($2))',
             [GMAIL_SYNC_LOCK_NAMESPACE, String(connectionId)]
           );
         }
+      } catch (error) {
+        unlockError = error;
+        console.error('Gmail advisory lock release failed:', getSafeSyncErrorDetails(error));
       } finally {
-        lockClient.release();
+        if (lockClient) lockClient.release(unlockError);
       }
+      if (unlockError) throw unlockError;
     }
   }
 
@@ -624,6 +674,7 @@ function startGmailSyncWorker(syncService, env = process.env) {
 
 module.exports = {
   createGmailSyncService,
+  getSafeSyncErrorDetails,
   getRetryAfterMs,
   isGmailQuotaError,
   startGmailSyncWorker,

@@ -13,10 +13,11 @@ function createTestService({
   historyList,
   existingMessage = false,
   cooldownAfterQuota = false,
+  failUnlock = false,
   wait = async () => {},
   random = () => 0.5,
 } = {}) {
-  const calls = { profile: 0, history: 0, get: 0, delays: [] };
+  const calls = { profile: 0, history: 0, get: 0, delays: [], unlocks: 0, releases: 0, discardedClients: 0 };
   const connection = {
     id: 7,
     user_id: 4,
@@ -30,6 +31,7 @@ function createTestService({
   };
   let lockHeld = false;
   let coolingDown = false;
+  let shouldFailUnlock = failUnlock;
 
   const pool = {
     async query(sql) {
@@ -62,16 +64,27 @@ function createTestService({
         async query(sql) {
           if (sql.includes('pg_try_advisory_lock')) {
             const acquired = !lockHeld;
-            lockHeld = true;
+            if (acquired) lockHeld = true;
             return { rowCount: 1, rows: [{ acquired }] };
           }
           if (sql.includes('pg_advisory_unlock')) {
+            calls.unlocks += 1;
+            if (shouldFailUnlock) {
+              shouldFailUnlock = false;
+              throw new Error('Synthetic advisory unlock failure');
+            }
             lockHeld = false;
             return { rowCount: 1, rows: [{ pg_advisory_unlock: true }] };
           }
           throw new Error(`Unexpected lock query: ${sql}`);
         },
-        release() {},
+        release(error) {
+          calls.releases += 1;
+          if (error) {
+            calls.discardedClients += 1;
+            lockHeld = false;
+          }
+        },
       };
     },
   };
@@ -124,7 +137,7 @@ function createTestService({
     random,
   });
 
-  return { calls, service };
+  return { calls, service, isLockHeld: () => lockHeld };
 }
 
 test('incremental sync skips stored messages before fetching their bodies', async () => {
@@ -166,6 +179,40 @@ test('a connection lock prevents a second sync from calling Gmail concurrently',
 
   releaseHistory({ data: { historyId: 'history-next', history: [] } });
   await firstSync;
+});
+
+test('a failed Gmail sync releases the advisory lock for the next attempt', async () => {
+  let failOnce = true;
+  const { calls, service, isLockHeld } = createTestService({
+    historyList: async () => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error('Synthetic history request failure');
+      }
+      return { data: { historyId: 'history-recovered', history: [] } };
+    },
+  });
+
+  await assert.rejects(service.syncConnection(7), /Gmail sync failed/);
+  assert.equal(isLockHeld(), false);
+  assert.equal(calls.unlocks, 1);
+
+  const retryResult = await service.syncConnection(7);
+  assert.equal(retryResult.inProgress, undefined);
+  assert.equal(calls.unlocks, 2);
+  assert.equal(isLockHeld(), false);
+});
+
+test('an advisory unlock failure discards its database session', async () => {
+  const { calls, service, isLockHeld } = createTestService({ failUnlock: true });
+
+  await assert.rejects(service.syncConnection(7), /Synthetic advisory unlock failure/);
+  assert.equal(calls.discardedClients, 1);
+  assert.equal(isLockHeld(), false);
+
+  const retryResult = await service.syncConnection(7);
+  assert.equal(retryResult.inProgress, undefined);
+  assert.equal(isLockHeld(), false);
 });
 
 test('quota errors use bounded exponential retry and then a persisted cooldown', async () => {
@@ -226,11 +273,11 @@ test('sync applies the Shoprite interview date and time without replacing an exi
   const application = {
     id: 42,
     company: 'Shoprite',
-    position: 'Graduate',
-    status: 'Applied',
-    updated_at: new Date('2026-10-07T06:00:00Z'),
-    interview_date: null,
-    interview_time: null,
+    position: 'Cashier',
+    status: 'Interview',
+    updated_at: new Date('2026-10-08T09:00:00Z'),
+    interview_date: '2026-10-09',
+    interview_time: '07:30:00',
     interview_type: 'Panel',
     notification_channels: [],
     application_link: null,
@@ -301,9 +348,15 @@ test('sync applies the Shoprite interview date and time without replacing an exi
           }
           if (sql.startsWith('UPDATE applications SET status = CASE')) {
             application.status = params[7] ? application.status : params[2];
-            application.interview_date = application.interview_date || params[5];
-            application.interview_time = application.interview_time || params[6];
-            application.interview_type = application.interview_type || params[8];
+            application.interview_date = params[7]
+              ? (params[5] || application.interview_date)
+              : (application.interview_date || params[5]);
+            application.interview_time = params[7]
+              ? (params[6] || application.interview_time)
+              : (application.interview_time || params[6]);
+            application.interview_type = params[7]
+              ? (params[8] || application.interview_type)
+              : (application.interview_type || params[8]);
             return { rowCount: 1, rows: [{ ...application }] };
           }
           if (sql.startsWith('UPDATE gmail_processed_messages SET outcome = \'updated\'')) {

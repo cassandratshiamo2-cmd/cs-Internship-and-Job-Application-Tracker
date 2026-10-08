@@ -6,6 +6,7 @@ const {
   extractInterviewDateTime,
   extractInterviewType,
   getInterviewDetailsToFill,
+  getInterviewDetailsToUpdate,
 } = require('../gmail-parser');
 
 test('classifies supported application status email language', () => {
@@ -223,5 +224,22 @@ test('does not replace existing interview details with extracted values', () => 
       { interviewDate: '2026-10-16', interviewTime: '11:00', interviewType: 'Video' }
     ),
     { interviewDate: null, interviewTime: '11:00', interviewType: 'Video' }
+  );
+});
+
+test('identifies changed interview details without inventing or replacing absent values', () => {
+  assert.deepEqual(
+    getInterviewDetailsToUpdate(
+      { interview_date: '2026-10-09', interview_time: '07:30:00', interview_type: 'Panel' },
+      { interviewDate: '2026-10-09', interviewTime: '08:30', interviewType: null }
+    ),
+    { interviewDate: null, interviewTime: '08:30', interviewType: null }
+  );
+  assert.deepEqual(
+    getInterviewDetailsToUpdate(
+      { interview_date: '2026-10-09', interview_time: '08:30:00', interview_type: 'Panel' },
+      { interviewDate: '2026-10-09', interviewTime: '08:30', interviewType: 'Video' }
+    ),
+    { interviewDate: null, interviewTime: null, interviewType: 'Video' }
   );
 });
