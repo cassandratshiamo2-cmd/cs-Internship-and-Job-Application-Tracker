@@ -210,3 +210,139 @@ test('quota retries honor Gmail Retry-After headers', () => {
     response: { headers: { 'retry-after': 'Thu, 01 Jan 1970 00:00:05 GMT' } },
   }, 1000), 4000);
 });
+
+test('sync applies the Shoprite interview date and time without replacing an existing type', async () => {
+  const connection = {
+    id: 7,
+    user_id: 4,
+    gmail_address: 'applyflow@example.com',
+    refresh_token_ciphertext: encryptToken('refresh-token', encryptionKey),
+    access_token_ciphertext: null,
+    token_expires_at: null,
+    history_id: 'history-start',
+    initial_sync_history_id: null,
+    initial_sync_page_token: null,
+  };
+  const application = {
+    id: 42,
+    company: 'Shoprite',
+    position: 'Graduate',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: 'Panel',
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const rawEmail = Buffer.from([
+    'From: Shoprite Careers <careers@shoprite.co.za>',
+    'To: applyflow@example.com',
+    'Subject: INTERVIEW INVITATION',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset="UTF-8"',
+    '',
+    'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026 AT 08:30',
+    '',
+    'Kind regards',
+    '',
+    'Shoprite',
+  ].join('\r\n')).toString('base64url');
+  let lockHeld = false;
+  const pool = {
+    async query(sql) {
+      if (sql.startsWith('SELECT * FROM gmail_connections')) return { rowCount: 1, rows: [connection] };
+      if (sql.startsWith('SELECT CEIL(EXTRACT(EPOCH FROM (quota_backoff_until')) return { rowCount: 0, rows: [] };
+      if (sql.startsWith('SELECT 1 FROM gmail_processed_messages')) return { rowCount: 0, rows: [] };
+      if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
+        return { rowCount: 1, rows: [application] };
+      }
+      if (sql.startsWith('UPDATE gmail_connections')) return { rowCount: 1, rows: [] };
+      throw new Error(`Unexpected pool query: ${sql}`);
+    },
+    async connect() {
+      return {
+        async query(sql, params = []) {
+          if (sql.includes('pg_try_advisory_lock')) {
+            lockHeld = true;
+            return { rowCount: 1, rows: [{ acquired: true }] };
+          }
+          if (sql.includes('pg_advisory_unlock')) {
+            lockHeld = false;
+            return { rowCount: 1, rows: [{ pg_advisory_unlock: true }] };
+          }
+          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rowCount: 1, rows: [] };
+          if (sql.startsWith('INSERT INTO gmail_processed_messages')) {
+            assert.equal(params[8], '2026-10-09');
+            assert.equal(params[9], '08:30');
+            return { rowCount: 1, rows: [{ id: 500 }] };
+          }
+          if (sql.startsWith('SELECT id, company, position, status, updated_at, interview_date')) {
+            return { rowCount: 1, rows: [application] };
+          }
+          if (sql.startsWith('UPDATE applications SET status = CASE')) {
+            application.status = params[7] ? application.status : params[2];
+            application.interview_date = application.interview_date || params[5];
+            application.interview_time = application.interview_time || params[6];
+            application.interview_type = application.interview_type || params[8];
+            return { rowCount: 1, rows: [{ ...application }] };
+          }
+          if (sql.startsWith('UPDATE gmail_processed_messages SET outcome = \'updated\'')) {
+            return { rowCount: 1, rows: [] };
+          }
+          throw new Error(`Unexpected transaction query: ${sql}`);
+        },
+        release() {},
+      };
+    },
+  };
+  const service = createGmailSyncService({
+    pool,
+    env: { GMAIL_TOKEN_ENCRYPTION_KEY: encryptionKey },
+    oauthClientFactory() {
+      return {
+        credentials: { access_token: 'access-token', refresh_token: 'refresh-token', expiry_date: Date.now() + 60000 },
+        setCredentials() {},
+        async getAccessToken() {},
+      };
+    },
+    gmailClientFactory() {
+      return {
+        users: {
+          history: {
+            async list() {
+              return {
+                data: {
+                  historyId: 'history-next',
+                  history: [{ messagesAdded: [{ message: { id: 'shoprite-interview' } }] }],
+                },
+              };
+            },
+          },
+          messages: {
+            async get() {
+              return {
+                data: {
+                  labelIds: [],
+                  raw: rawEmail,
+                  threadId: 'shoprite-thread',
+                  internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+                },
+              };
+            },
+          },
+        },
+      };
+    },
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.deepEqual(
+    [application.status, application.interview_date, application.interview_time, application.interview_type],
+    ['Interview', '2026-10-09', '08:30', 'Panel']
+  );
+  assert.equal(lockHeld, false);
+});

@@ -194,6 +194,7 @@ async function ensureDatabase() {
       'detected_status VARCHAR(32) CHECK (detected_status IN (\'Applied\', \'Assessment\', \'Shortlisted\', \'Interview\', \'Offer\', \'Rejected\')), ' +
       'detected_interview_date DATE, ' +
       'detected_interview_time TIME, ' +
+      'detected_interview_type VARCHAR(32), ' +
       'confidence NUMERIC(4, 3) NOT NULL DEFAULT 0, ' +
       'candidate_application_ids JSONB NOT NULL DEFAULT \'[]\'::jsonb, ' +
       'application_id INTEGER REFERENCES applications(id) ON DELETE SET NULL, ' +
@@ -215,6 +216,11 @@ async function ensureDatabase() {
   await pool.query(
     'ALTER TABLE gmail_processed_messages ' +
       'ADD COLUMN IF NOT EXISTS detected_interview_time TIME'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS detected_interview_type VARCHAR(32)'
   );
 
   await pool.query(

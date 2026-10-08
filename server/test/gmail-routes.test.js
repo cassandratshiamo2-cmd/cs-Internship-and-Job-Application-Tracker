@@ -4,7 +4,7 @@ const express = require('express');
 const http = require('node:http');
 const { createGmailRouter } = require('../gmail-routes');
 
-function createTestPool({ message, application }) {
+function createTestPool({ message, application, history = [] }) {
   const client = {
     async query(sql, params = []) {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
@@ -17,10 +17,11 @@ function createTestPool({ message, application }) {
         return { rowCount: 1, rows: [{ ...application }] };
       }
       if (sql.startsWith('UPDATE applications SET')) {
-        const [, , nextStatus, nextDate, preserveStatus, nextTime] = params;
+        const [, , nextStatus, nextDate, preserveStatus, nextTime, nextType] = params;
         application.status = preserveStatus ? application.status : nextStatus;
         application.interview_date = application.interview_date || nextDate;
         application.interview_time = application.interview_time || nextTime;
+        application.interview_type = application.interview_type || nextType;
         return { rowCount: 1, rows: [{ ...application }] };
       }
       if (sql.startsWith('UPDATE gmail_processed_messages SET outcome = \'reviewed\'')) {
@@ -31,7 +32,15 @@ function createTestPool({ message, application }) {
     release() {},
   };
 
-  return { async connect() { return client; } };
+  return {
+    async query(sql) {
+      if (sql.includes('FROM gmail_processed_messages AS message')) {
+        return { rowCount: history.length, rows: history };
+      }
+      throw new Error(`Unexpected pool query: ${sql}`);
+    },
+    async connect() { return client; },
+  };
 }
 
 async function withGmailReviewServer(t, options) {
@@ -99,6 +108,7 @@ test('review endpoint fills an already-Interview application and schedules its c
     status: 'Interview',
     interview_date: null,
     interview_time: null,
+    interview_type: null,
     notification_channels: ['In-app'],
     application_link: null,
     interview_email: null,
@@ -110,6 +120,7 @@ test('review endpoint fills an already-Interview application and schedules its c
       detected_status: 'Interview',
       detected_interview_date: '2026-10-15',
       detected_interview_time: '10:00',
+      detected_interview_type: 'Video',
     },
     application,
     async scheduleInterviewReminder(data) { reminderCall = data; },
@@ -125,6 +136,7 @@ test('review endpoint fills an already-Interview application and schedules its c
   assert.equal(application.status, 'Interview');
   assert.equal(application.interview_date, '2026-10-15');
   assert.equal(application.interview_time, '10:00');
+  assert.equal(application.interview_type, 'Video');
   assert.equal(reminderCall.applicationId, '13');
   assert.equal(reminderCall.interviewDate, '2026-10-15');
   assert.equal(reminderCall.interviewTime, '10:00');
@@ -138,6 +150,7 @@ test('review endpoint still rejects an already-Interview application when the em
     status: 'Interview',
     interview_date: null,
     interview_time: null,
+    interview_type: null,
     notification_channels: ['In-app'],
     application_link: null,
     interview_email: null,
@@ -148,6 +161,7 @@ test('review endpoint still rejects an already-Interview application when the em
       detected_status: 'Interview',
       detected_interview_date: null,
       detected_interview_time: null,
+      detected_interview_type: null,
     },
     application,
     async scheduleInterviewReminder() { assert.fail('Reminder must not be scheduled without details.'); },
@@ -165,4 +179,30 @@ test('review endpoint still rejects an already-Interview application when the em
   assert.equal(application.status, 'Interview');
   assert.equal(application.interview_date, null);
   assert.equal(application.interview_time, null);
+});
+
+test('history endpoint returns processed interview details and matched application', async (t) => {
+  const history = [{
+    id: 88,
+    subject: 'INTERVIEW INVITATION',
+    outcome: 'updated',
+    detected_status: 'Interview',
+    detected_interview_date: '2026-10-09',
+    detected_interview_time: '08:30',
+    detected_interview_type: null,
+    application_company: 'Shoprite',
+    application_position: 'Graduate Programme',
+    application_status: 'Interview',
+  }];
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    history,
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/history`);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.messages, history);
 });

@@ -6,10 +6,12 @@ import {
   beginGmailConnection,
   decideGmailReview,
   disconnectGmail,
+  getGmailProcessingHistory,
   getGmailReviewQueue,
   getGmailStatus,
   syncGmail,
   type GmailConnectionStatus,
+  type GmailProcessedMessage,
   type GmailReviewMessage,
 } from '@/lib/gmail-api';
 import type { Application } from '@/lib/types';
@@ -22,6 +24,7 @@ export default function GmailIntegrationPage() {
   );
   const [status, setStatus] = useState<GmailConnectionStatus | null>(null);
   const [messages, setMessages] = useState<GmailReviewMessage[]>([]);
+  const [history, setHistory] = useState<GmailProcessedMessage[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
   const [selectedApplicationIds, setSelectedApplicationIds] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(true);
@@ -30,9 +33,10 @@ export default function GmailIntegrationPage() {
   const [notice, setNotice] = useState('');
 
   async function loadIntegrationData(activeToken: string) {
-    const [nextStatus, nextMessages, applicationsResponse] = await Promise.all([
+    const [nextStatus, nextMessages, nextHistory, applicationsResponse] = await Promise.all([
       getGmailStatus(activeToken),
       getGmailReviewQueue(activeToken),
+      getGmailProcessingHistory(activeToken),
       fetch(`${API_URL}/api/applications`, {
         headers: { Authorization: `Bearer ${activeToken}` },
       }),
@@ -46,6 +50,7 @@ export default function GmailIntegrationPage() {
     }
     setStatus(nextStatus);
     setMessages(nextMessages);
+    setHistory(nextHistory);
     setApplications(applicationsPayload.applications || []);
     setSelectedApplicationIds((current) => {
       const next = { ...current };
@@ -257,6 +262,40 @@ export default function GmailIntegrationPage() {
             </div>
           ) : (
             <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-white/70 p-8 text-center text-sm text-slate-500">No emails need review.</div>
+          )}
+        </section>
+
+        <section>
+          <SectionTitle title={`Processed email history (${history.length})`} />
+          {isLoading ? (
+            <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-white/70 p-8 text-center text-sm text-slate-500">Loading processed email history...</div>
+          ) : history.length ? (
+            <div className="space-y-3">
+              {history.map((message) => (
+                <article key={message.id} className="rounded-[20px] border border-[#eadce2] bg-white/85 p-4 shadow-sm sm:p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="break-words font-semibold text-slate-800">{message.subject || '(No subject)'}</p>
+                      <p className="mt-1 break-all text-sm text-slate-500">{message.sender}</p>
+                      <p className="mt-1 text-xs text-slate-500">Processed {message.processed_at ? new Date(message.processed_at).toLocaleString() : 'recently'}</p>
+                    </div>
+                    {message.detected_status ? <StatusBadge status={message.detected_status} /> : null}
+                  </div>
+                  <p className="mt-3 text-sm font-medium text-slate-700">
+                    {message.outcome === 'updated' ? 'Automatically applied' : message.outcome === 'reviewed' ? 'Applied from review' : message.outcome === 'dismissed' ? 'Dismissed' : 'Processed'}
+                    {message.application_company ? ` to ${message.application_company} - ${message.application_position || 'Application'}` : ''}
+                  </p>
+                  <dl className="mt-3 grid gap-x-6 gap-y-1 text-sm text-slate-600 sm:grid-cols-2 lg:grid-cols-4">
+                    <div><dt className="inline font-medium">Application status: </dt><dd className="inline">{message.application_status || message.detected_status || 'Not available'}</dd></div>
+                    <div><dt className="inline font-medium">Interview date: </dt><dd className="inline">{message.detected_interview_date || message.application_interview_date || 'Not detected'}</dd></div>
+                    <div><dt className="inline font-medium">Interview time: </dt><dd className="inline">{message.detected_interview_time?.slice(0, 5) || message.application_interview_time?.slice(0, 5) || 'Not detected'}</dd></div>
+                    <div><dt className="inline font-medium">Interview type: </dt><dd className="inline">{message.detected_interview_type || message.application_interview_type || 'Not specified'}</dd></div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-white/70 p-8 text-center text-sm text-slate-500">No processed Gmail emails yet.</div>
           )}
         </section>
       </div>

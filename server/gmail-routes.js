@@ -207,6 +207,32 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
     }
   });
 
+  router.get('/history', authenticateRequest, async (req, res) => {
+    try {
+      const result = await pool.query(
+        "SELECT message.id, message.gmail_message_id, message.sender, message.subject, " +
+          'message.received_at, message.processed_at, message.detected_status, ' +
+          'message.detected_interview_date::text AS detected_interview_date, ' +
+          'message.detected_interview_time::text AS detected_interview_time, ' +
+          'message.detected_interview_type, message.outcome, ' +
+          'application.company AS application_company, application.position AS application_position, ' +
+          'application.status AS application_status, ' +
+          'application.interview_date::text AS application_interview_date, ' +
+          'application.interview_time::text AS application_interview_time, ' +
+          'application.interview_type AS application_interview_type ' +
+        'FROM gmail_processed_messages AS message ' +
+        'LEFT JOIN applications AS application ON application.id = message.application_id ' +
+        "WHERE message.user_id = $1 AND message.outcome IN ('updated', 'reviewed', 'dismissed', 'ignored') " +
+        'ORDER BY message.processed_at DESC, message.received_at DESC LIMIT 100',
+        [req.user.id]
+      );
+      return res.status(200).json({ messages: result.rows });
+    } catch (error) {
+      console.error('Loading Gmail processing history failed:', error.message);
+      return res.status(500).json({ message: 'Unable to load Gmail processing history.' });
+    }
+  });
+
   router.post('/review/:messageId', authenticateRequest, async (req, res) => {
     const action = String(req.body?.action || '');
     const client = await pool.connect();
@@ -214,7 +240,8 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       await client.query('BEGIN');
       const messageResult = await client.query(
         "SELECT id, detected_status, detected_interview_date::text AS detected_interview_date, " +
-          "detected_interview_time::text AS detected_interview_time FROM gmail_processed_messages " +
+          "detected_interview_time::text AS detected_interview_time, detected_interview_type " +
+          'FROM gmail_processed_messages ' +
           "WHERE id = $1 AND user_id = $2 AND outcome = 'review' FOR UPDATE",
         [req.params.messageId, req.user.id]
       );
@@ -241,7 +268,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
 
       const applicationResult = await client.query(
         'SELECT id, company, position, status, interview_date::text AS interview_date, ' +
-          'interview_time::text AS interview_time, notification_channels, application_link, interview_email ' +
+          'interview_time::text AS interview_time, interview_type, notification_channels, application_link, interview_email ' +
           'FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
         [applicationId, req.user.id]
       );
@@ -253,6 +280,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       const detailsToFill = getInterviewDetailsToFill(application, {
         interviewDate: message.detected_interview_date,
         interviewTime: message.detected_interview_time,
+        interviewType: message.detected_interview_type,
       });
       const updateDecision = getReviewedEmailUpdateDecision({
         currentStatus: application.status,
@@ -269,6 +297,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'status = CASE WHEN $5::boolean THEN status ELSE $3 END, ' +
           'interview_date = COALESCE(interview_date, $4::date), ' +
           'interview_time = COALESCE(interview_time, $6::time), ' +
+          'interview_type = COALESCE(interview_type, $7), ' +
           'updated_at = NOW() ' +
           'WHERE id = $1 AND user_id = $2 ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
@@ -280,6 +309,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           detailsToFill.interviewDate,
           updateDecision.preserveStatus,
           detailsToFill.interviewTime,
+          detailsToFill.interviewType,
         ]
       );
       await scheduleInterviewReminderIfReady({

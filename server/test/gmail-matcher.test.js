@@ -1,7 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { canAdvanceStatus, getEmailUpdateDecision, matchApplication } = require('../gmail-matcher');
-const { classifyApplicationEmail, extractInterviewDateTime, getInterviewDetailsToFill } = require('../gmail-parser');
+const {
+  classifyApplicationEmail,
+  extractInterviewDateTime,
+  extractInterviewType,
+  getInterviewDetailsToFill,
+} = require('../gmail-parser');
 
 const applications = [
   { id: '11', company: 'Acme Technology', position: 'Junior Software Engineer', status: 'Applied' },
@@ -77,7 +82,7 @@ test('fills a missing schedule on an existing Interview application without chan
   assert.equal(classification.status, 'Interview');
   assert.equal(match.outcome, 'matched');
   assert.equal(match.application.id, application.id);
-  assert.deepEqual(fieldsToFill, { interviewDate: '2026-10-15', interviewTime: '10:00' });
+  assert.deepEqual(fieldsToFill, { interviewDate: '2026-10-15', interviewTime: '10:00', interviewType: null });
   assert.deepEqual(decision, { allowed: true, preserveStatus: true });
   assert.equal(application.status, 'Interview');
 });
@@ -239,4 +244,56 @@ test('exact company matching does not bypass terminal status transition protecti
   assert.equal(match.application.id, application.id);
   assert.equal(classification.status, 'Rejected');
   assert.equal(decision.allowed, false);
+});
+
+test('matches the Shoprite interview invitation and fills status, date, and time', () => {
+  const email = {
+    from: 'careers@shoprite.co.za',
+    subject: 'INTERVIEW INVITATION',
+    text: 'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026 AT 08:30',
+  };
+  const application = {
+    id: '42',
+    company: 'Shoprite',
+    position: 'Graduate',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T08:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+  };
+  const classification = classifyApplicationEmail(email);
+  const match = matchApplication(email, [application]);
+  const interviewDetails = {
+    ...extractInterviewDateTime(email),
+    interviewType: extractInterviewType(email),
+  };
+  const detailsToFill = getInterviewDetailsToFill(application, interviewDetails);
+  const decision = getEmailUpdateDecision({
+    currentStatus: application.status,
+    nextStatus: classification.status,
+    updatedAt: application.updated_at,
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+    interviewDetailsToFill: detailsToFill,
+  });
+
+  assert.equal(match.outcome, 'matched');
+  assert.equal(match.application.id, '42');
+  assert.equal(decision.allowed, true);
+  assert.equal(classification.status, 'Interview');
+  assert.deepEqual(detailsToFill, {
+    interviewDate: '2026-10-09',
+    interviewTime: '08:30',
+    interviewType: null,
+  });
+  Object.assign(application, {
+    status: classification.status,
+    interview_date: detailsToFill.interviewDate,
+    interview_time: detailsToFill.interviewTime,
+    interview_type: detailsToFill.interviewType,
+  });
+  assert.deepEqual(
+    [application.status, application.interview_date, application.interview_time],
+    ['Interview', '2026-10-09', '08:30']
+  );
 });

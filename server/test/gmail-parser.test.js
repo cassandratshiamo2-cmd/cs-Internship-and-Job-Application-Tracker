@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const {
   classifyApplicationEmail,
   extractInterviewDateTime,
+  extractInterviewType,
   getInterviewDetailsToFill,
 } = require('../gmail-parser');
 
@@ -40,27 +41,33 @@ test('extracts a clearly associated date and time in supported formats', () => {
   ];
 
   for (const [text, expectedDate, expectedTime] of examples) {
-    assert.deepEqual(
-      extractInterviewDateTime({ text }),
-      {
-        interviewDate: expectedDate,
-        interviewTime: expectedTime,
-        ambiguous: false,
-        hasUnsupportedTimezone: false,
-      }
-    );
+    assert.deepEqual(extractInterviewDateTime({ text }), {
+      interviewDate: expectedDate,
+      interviewTime: expectedTime,
+      ambiguous: false,
+      hasUnsupportedTimezone: false,
+    });
   }
 });
 
+test('extracts the date and time from the Shoprite interview invitation wording', () => {
+  const email = {
+    subject: 'INTERVIEW INVITATION',
+    text: 'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026 AT 08:30',
+  };
+
+  assert.deepEqual(extractInterviewDateTime(email), {
+    interviewDate: '2026-10-09',
+    interviewTime: '08:30',
+    ambiguous: false,
+    hasUnsupportedTimezone: false,
+  });
+});
+
 test('saves an unambiguous date without inventing a time', () => {
-  assert.equal(
-    extractInterviewDateTime({ text: 'Your interview is scheduled for 15 October 2026.' }).interviewDate,
-    '2026-10-15'
-  );
-  assert.equal(
-    extractInterviewDateTime({ text: 'Your interview is scheduled for 15 October 2026.' }).interviewTime,
-    null
-  );
+  const result = extractInterviewDateTime({ text: 'Your interview is scheduled for 15 October 2026.' });
+  assert.equal(result.interviewDate, '2026-10-15');
+  assert.equal(result.interviewTime, null);
 });
 
 test('does not invent a date or save an unanchored time', () => {
@@ -70,44 +77,20 @@ test('does not invent a date or save an unanchored time', () => {
 });
 
 test('supports 12-hour AM/PM values and normalizes to 24-hour time', () => {
-  assert.equal(
-    extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:30 PM.' }).interviewTime,
-    '22:30'
-  );
-  assert.equal(
-    extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10 AM.' }).interviewTime,
-    '10:00'
-  );
-  assert.equal(
-    extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 12:00 AM.' }).interviewTime,
-    '00:00'
-  );
+  assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:30 PM.' }).interviewTime, '22:30');
+  assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10 AM.' }).interviewTime, '10:00');
+  assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 12:00 AM.' }).interviewTime, '00:00');
 });
 
 test('uses SAST by default and honors supported explicit timezones', () => {
-  assert.equal(
-    extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00.' }).interviewTime,
-    '10:00'
-  );
-  assert.equal(
-    extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 SAST.' }).interviewTime,
-    '10:00'
-  );
-  assert.equal(
-    extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 UTC.' }).interviewTime,
-    '12:00'
-  );
+  assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00.' }).interviewTime, '10:00');
+  assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 SAST.' }).interviewTime, '10:00');
+  assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 UTC.' }).interviewTime, '12:00');
 });
 
 test('rejects ambiguous numeric dates and unsupported explicit timezones', () => {
-  assert.equal(
-    extractInterviewDateTime({ text: 'Interview: 10/11/2026 at 10:00.' }).interviewDate,
-    null
-  );
-  assert.equal(
-    extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 IST.' }).interviewTime,
-    null
-  );
+  assert.equal(extractInterviewDateTime({ text: 'Interview: 10/11/2026 at 10:00.' }).interviewDate, null);
+  assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 IST.' }).interviewTime, null);
 });
 
 test('ignores unrelated dates and date ranges not precisely scheduled for an interview', () => {
@@ -139,19 +122,35 @@ test('keeps interview status classification when the invitation has no schedule'
   });
 });
 
-test('does not replace existing interview date or time with extracted values', () => {
+test('extracts only explicitly stated supported interview types', () => {
+  const examples = [
+    ['We would like to invite you to a phone interview.', 'Phone'],
+    ['Your video interview is scheduled for tomorrow.', 'Video'],
+    ['Interview Type: Video', 'Video'],
+    ['The in-person interview will take place at our office.', 'In-person'],
+    ['You are invited to a technical interview.', 'Technical'],
+    ['The panel interview will include three managers.', 'Panel'],
+    ['We would like to interview you.', null],
+  ];
+
+  for (const [text, expectedType] of examples) {
+    assert.equal(extractInterviewType({ text }), expectedType);
+  }
+});
+
+test('does not replace existing interview details with extracted values', () => {
   assert.deepEqual(
     getInterviewDetailsToFill(
-      { interview_date: '2026-10-15', interview_time: '10:00:00' },
-      { interviewDate: '2026-10-16', interviewTime: '11:00' }
+      { interview_date: '2026-10-15', interview_time: '10:00:00', interview_type: 'Panel' },
+      { interviewDate: '2026-10-16', interviewTime: '11:00', interviewType: 'Video' }
     ),
-    { interviewDate: null, interviewTime: null }
+    { interviewDate: null, interviewTime: null, interviewType: null }
   );
   assert.deepEqual(
     getInterviewDetailsToFill(
-      { interview_date: '2026-10-15', interview_time: null },
-      { interviewDate: '2026-10-16', interviewTime: '11:00' }
+      { interview_date: '2026-10-15', interview_time: null, interview_type: null },
+      { interviewDate: '2026-10-16', interviewTime: '11:00', interviewType: 'Video' }
     ),
-    { interviewDate: null, interviewTime: '11:00' }
+    { interviewDate: null, interviewTime: '11:00', interviewType: 'Video' }
   );
 });

@@ -129,6 +129,14 @@ const TIMEZONE_OFFSETS = {
   EET: 120,
   EEST: 180,
 };
+const INTERVIEW_TYPE_PATTERNS = [
+  { type: 'Phone', pattern: /\b(?:interview\s+)?type\s*[:\-]\s*(?:phone|telephone)\b|\b(?:phone|telephone)\s+(?:screen|interview|call)\b|\binterview\b[^.!?\n]{0,30}\b(?:by|via|over)\s+(?:phone|telephone)\b/i },
+  { type: 'Video', pattern: /\b(?:interview\s+)?type\s*[:\-]\s*(?:video|virtual)\b|\b(?:video|virtual)\s+(?:interview|call|meeting)\b|\binterview\b[^.!?\n]{0,30}\b(?:by|via|over)\s+(?:video|zoom|teams|google meet)\b/i },
+  { type: 'In-person', pattern: /\b(?:interview\s+)?type\s*[:\-]\s*(?:in[\s-]?person|face[\s-]?to[\s-]?face|on[\s-]?site)\b|\b(?:in[\s-]?person|face[\s-]?to[\s-]?face|on[\s-]?site)\s+(?:interview|meeting)\b|\binterview\b[^.!?\n]{0,30}\b(?:in[\s-]?person|on[\s-]?site)\b/i },
+  { type: 'Technical', pattern: /\b(?:interview\s+)?type\s*[:\-]\s*technical\b|\btechnical\s+interview\b/i },
+  { type: 'Panel', pattern: /\b(?:interview\s+)?type\s*[:\-]\s*panel\b|\bpanel\s+interview\b/i },
+  { type: 'Other', pattern: /\binterview\s+type\s*[:\-]\s*other\b/i },
+];
 
 function monthNumber(value) {
   const normalized = value.toLowerCase().replace(/\.$/, '');
@@ -160,7 +168,7 @@ function interviewDateIsExplicitlyAssociated(prefix) {
     /\binterview(?:\s+invitation)?\s*[:\-]\s*$/i.test(recentPrefix) ||
     /\binterview\s+date\s*[:\-]\s*$/i.test(recentPrefix) ||
     /\binterview\b[^.!?\n]{0,90}\b(?:scheduled|set|booked|planned|held|takes place|will take place)\b[^.!?\n]{0,45}\b(?:for|on)\s*$/i.test(recentPrefix) ||
-    /\binterview\s+(?:date\s*)?(?:is\s+)?(?:on|for)\s*$/i.test(recentPrefix) ||
+    /\binterview\s+(?:date\s*)?(?:is\s+)?(?:on|for)\s+(?:the\s+)?$/i.test(recentPrefix) ||
     /\binterview\s+will\s+be\s+(?:held\s+)?(?:on|for)\s*$/i.test(recentPrefix)
   );
 }
@@ -235,7 +243,15 @@ function getInterviewDetailsToFill(existing, extracted) {
     interviewTime: existing?.interview_time
       ? null
       : extracted?.interviewTime || null,
+    interviewType: existing?.interview_type || existing?.interviewType
+      ? null
+      : extracted?.interviewType || null,
   };
+}
+
+function extractInterviewType({ subject = '', text = '' }) {
+  const content = `${subject}\n${text}`.slice(0, 100000);
+  return INTERVIEW_TYPE_PATTERNS.find(({ pattern }) => pattern.test(content))?.type || null;
 }
 
 function extractInterviewDateTime({ subject = '', text = '' }) {
@@ -289,5 +305,6 @@ function extractInterviewDateTime({ subject = '', text = '' }) {
 module.exports = {
   classifyApplicationEmail,
   extractInterviewDateTime,
+  extractInterviewType,
   getInterviewDetailsToFill,
 };

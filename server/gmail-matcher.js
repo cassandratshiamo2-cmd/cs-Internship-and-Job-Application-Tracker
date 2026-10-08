@@ -191,7 +191,9 @@ function getEmailUpdateDecision({
   const canCompleteExistingInterview = Boolean(
     currentStatus === 'Interview' &&
     nextStatus === 'Interview' &&
-    (interviewDetailsToFill?.interviewDate || interviewDetailsToFill?.interviewTime)
+    (interviewDetailsToFill?.interviewDate ||
+      interviewDetailsToFill?.interviewTime ||
+      interviewDetailsToFill?.interviewType)
   );
   const statusTransitionAllowed =
     canAdvanceStatus(currentStatus, nextStatus) || canCompleteExistingInterview;
@@ -211,7 +213,9 @@ function getReviewedEmailUpdateDecision({
   const preserveStatus = Boolean(
     currentStatus === 'Interview' &&
     nextStatus === 'Interview' &&
-    (interviewDetailsToFill?.interviewDate || interviewDetailsToFill?.interviewTime)
+    (interviewDetailsToFill?.interviewDate ||
+      interviewDetailsToFill?.interviewTime ||
+      interviewDetailsToFill?.interviewType)
   );
 
   return {

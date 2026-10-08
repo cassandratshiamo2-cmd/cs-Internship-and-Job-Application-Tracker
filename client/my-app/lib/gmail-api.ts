@@ -21,6 +21,26 @@ export type GmailReviewMessage = {
   review_reason: string | null;
 };
 
+export type GmailProcessedMessage = {
+  id: string;
+  gmail_message_id: string;
+  sender: string;
+  subject: string;
+  received_at: string;
+  processed_at: string | null;
+  detected_status: Application['status'] | null;
+  detected_interview_date: string | null;
+  detected_interview_time: string | null;
+  detected_interview_type: string | null;
+  outcome: 'updated' | 'reviewed' | 'dismissed' | 'ignored';
+  application_company: string | null;
+  application_position: string | null;
+  application_status: Application['status'] | null;
+  application_interview_date: string | null;
+  application_interview_time: string | null;
+  application_interview_type: string | null;
+};
+
 type ApiOptions = RequestInit & { token: string };
 
 async function apiRequest<T>(path: string, options: ApiOptions): Promise<T> {
@@ -44,6 +64,14 @@ export function getGmailStatus(token: string) {
 
 export async function getGmailReviewQueue(token: string) {
   const result = await apiRequest<{ messages: GmailReviewMessage[] }>('/review', {
+    token,
+    cache: 'no-store',
+  });
+  return result.messages;
+}
+
+export async function getGmailProcessingHistory(token: string) {
+  const result = await apiRequest<{ messages: GmailProcessedMessage[] }>('/history', {
     token,
     cache: 'no-store',
   });
