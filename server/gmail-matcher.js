@@ -10,6 +10,10 @@ const ROLE_WORD_ALIASES = {
   snr: 'senior',
   sr: 'senior',
 };
+const COMPANY_SUFFIXES = new Set([
+  'inc', 'incorporated', 'corp', 'corporation', 'ltd', 'limited',
+  'pty', 'proprietary', 'llc', 'plc', 'holdings', 'group',
+]);
 
 function normalizeText(value) {
   return String(value || '')
@@ -32,6 +36,14 @@ function normalizeRoleText(value) {
     .filter(Boolean)
     .map((word) => ROLE_WORD_ALIASES[word] || word)
     .join(' ');
+}
+
+function normalizeCompanyName(value) {
+  const words = normalizeText(value).split(/\s+/).filter(Boolean);
+  while (words.length && COMPANY_SUFFIXES.has(words[words.length - 1])) {
+    words.pop();
+  }
+  return words.join(' ');
 }
 
 function senderDomain(from) {
@@ -58,12 +70,12 @@ function exactPhraseRanges(normalizedText, phrase) {
 }
 
 function companyMatchIsOnlyNested(application, applications, normalizedMessage) {
-  const company = normalizeText(application.company);
+  const company = normalizeCompanyName(application.company);
   const companyRanges = exactPhraseRanges(normalizedMessage, company);
   if (!companyRanges.length) return false;
 
   return applications.some((otherApplication) => {
-    const otherCompany = normalizeText(otherApplication.company);
+    const otherCompany = normalizeCompanyName(otherApplication.company);
     if (otherCompany.length <= company.length) return false;
 
     const otherRanges = exactPhraseRanges(normalizedMessage, otherCompany);
@@ -80,8 +92,8 @@ function scoreApplicationMatch(email, application) {
   const normalizedBody = normalizeText(email.text || '');
   const normalizedMessage = `${normalizedSubject} ${normalizedBody}`.trim();
   const normalizedRoleMessage = normalizeRoleText(`${email.subject || ''} ${email.text || ''}`);
-  const company = normalizeText(application.company);
-  const companyWords = meaningfulWords(application.company);
+  const company = normalizeCompanyName(application.company);
+  const companyWords = meaningfulWords(company);
   const domainWords = meaningfulWords(senderDomain(email.from));
   const companySubjectMatch = Boolean(company && exactPhraseRanges(normalizedSubject, company).length);
   const companyBodyMatch = Boolean(company && exactPhraseRanges(normalizedBody, company).length);
@@ -138,7 +150,7 @@ function matchApplication(email, applications, options = {}) {
         normalizedMessage
       );
       const sameCompanyApplications = applications.filter((candidate) =>
-        normalizeText(candidate.company) === normalizeText(application.company)
+        normalizeCompanyName(candidate.company) === normalizeCompanyName(application.company)
       );
       const requiresRoleEvidence =
         sameCompanyApplications.length > 1 &&
@@ -212,6 +224,7 @@ function decideApplicationEmailUpdate({
   interviewDetailsDetected = false,
   interviewDetailsChanged = false,
   manual = false,
+  allowEmailStatusCorrection = false,
 }) {
   if (!detectedStatus) {
     return {
@@ -256,7 +269,7 @@ function decideApplicationEmailUpdate({
     new Date(updatedAt).getTime() > new Date(receivedAt).getTime()
   );
 
-  if (!allowedTransition || isStale) {
+  if ((!allowedTransition && !allowEmailStatusCorrection) || isStale) {
     return {
       action: 'manual_review',
       applyStatus: false,
@@ -279,7 +292,7 @@ function decideApplicationEmailUpdate({
     applyInterviewDetails: detectedStatus === 'Interview' && interviewDetailsDetected,
     alreadyUpToDate: false,
     requiresReview: false,
-    isBackward: false,
+    isBackward,
     isStale: false,
     reason: null,
   };

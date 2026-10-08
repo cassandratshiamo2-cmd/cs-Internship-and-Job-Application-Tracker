@@ -59,6 +59,7 @@ function createTestService({
       outcome: message.outcome,
       detectedStatus: message.detectedStatus || null,
       reviewReason: message.reviewReason || null,
+      reprocessVersion: message.reprocessVersion || 0,
     });
   }
   const connection = {
@@ -97,13 +98,14 @@ function createTestService({
             outcome: row.outcome,
             detected_status: row.detectedStatus,
             review_reason: row.reviewReason,
+            reprocess_version: row.reprocessVersion || 0,
           }] : [],
         };
       }
       if (sql.startsWith('SELECT gmail_message_id FROM gmail_processed_messages')) {
         const rows = Array.from(processedRows.entries())
           .filter(([, row]) => row.outcome === 'ignored' && !row.detectedStatus &&
-            row.reviewReason === params[1])
+            row.reviewReason === params[1] && (row.reprocessVersion || 0) < params[2])
           .map(([gmailMessageId]) => ({ gmail_message_id: gmailMessageId }));
         return { rowCount: rows.length, rows };
       }
@@ -226,6 +228,7 @@ function createTestService({
               outcome: row.outcome,
               detected_status: row.detectedStatus,
               review_reason: row.reviewReason,
+              reprocess_version: row.reprocessVersion || 0,
             }] : [] };
           }
           if (sql.startsWith('UPDATE gmail_processed_messages SET sender =')) {
@@ -234,6 +237,7 @@ function createTestService({
               row.outcome = 'processing';
               row.detectedStatus = params[4];
               row.reviewReason = null;
+              if (params[10]) row.reprocessVersion = params[11];
             }
             return { rowCount: 1, rows: [] };
           }
@@ -258,7 +262,12 @@ function createTestService({
           }
           if (sql.startsWith('UPDATE gmail_processed_messages SET outcome =')) {
             const row = Array.from(processedRows.values()).find((item) => item.id === params[0]);
-            if (row) row.outcome = /SET outcome = '([^']+)'/.exec(sql)?.[1] || row.outcome;
+            if (row) {
+              row.outcome = /SET outcome = '([^']+)'/.exec(sql)?.[1] || row.outcome;
+              row.applicationId = params[1];
+              row.previousStatus = params[2];
+              row.newStatus = params[3];
+            }
             return { rowCount: 1, rows: [] };
           }
           throw new Error(`Unexpected lock query: ${sql}`);
@@ -659,6 +668,8 @@ test('scenario 12: processing the same Gmail message twice has one application a
   assert.equal(processedRows.size, 1);
   assert.equal(calls.applicationUpdates, 1);
   assert.equal(reminderCount, 1);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(calls.notifications[0].read, false);
   assert.equal(application.status, 'Interview');
   assert.equal(application.interview_date, '2026-10-09');
   assert.equal(application.interview_time, '08:30');
@@ -864,6 +875,171 @@ test('Shoprite outcome email matches Cashier and records Interview to Rejected i
   assert.equal(historyRow.outcome, 'updated');
   assert.equal(application.status, 'Rejected');
   assert.equal(calls.applicationUpdates, 1);
+});
+
+test('a clear Shoprite invitation corrects Rejected to Interview despite unrelated company candidates', async () => {
+  const applications = [
+    {
+      id: 79,
+      company: 'Shoprite',
+      position: 'Cashier',
+      status: 'Rejected',
+      updated_at: new Date('2026-10-07T06:00:00Z'),
+      interview_date: null,
+      interview_time: null,
+      interview_type: null,
+      notification_channels: [],
+      application_link: null,
+      interview_email: null,
+    },
+    { id: 80, company: 'Test Company', position: 'Developer', status: 'Applied' },
+    { id: 81, company: 'ABC Test Company', position: 'Analyst', status: 'Applied' },
+    { id: 82, company: 'Rejected Test Company', position: 'Engineer', status: 'Rejected' },
+  ];
+  const raw = Buffer.from([
+    'From: Shoprite Careers <careers@shoprite.co.za>',
+    'To: applyflow@example.com',
+    'Subject: INTERVIEW INVITATION - Shoprite TEST',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Shoprite invites you to an interview for the Cashier position.',
+    'Your interview is scheduled for 15 October 2026 at 10:00.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications,
+    historyList: async () => ({
+      data: {
+        historyId: 'history-shoprite-interview-correction',
+        history: [{ messagesAdded: [{ message: { id: 'shoprite-interview-correction' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'shoprite-interview-correction-thread',
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+  const processed = processedRows.get('shoprite-interview-correction');
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(processed.detectedStatus, 'Interview');
+  assert.equal(processed.applicationId, 79);
+  assert.equal(applications[0].status, 'Interview');
+  assert.equal(applications[0].interview_date, '2026-10-15');
+  assert.equal(applications[0].interview_time, '10:00');
+  assert.deepEqual(applications.slice(1).map(({ status }) => status), ['Applied', 'Applied', 'Rejected']);
+  assert.equal(calls.applicationUpdates, 1);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(calls.notifications[0].read, false);
+  assert.equal(calls.notifications[0].previous_status, 'Rejected');
+  assert.equal(calls.notifications[0].new_status, 'Interview');
+  assert.equal(calls.notifications[0].event_key, 'status-change:79:shoprite-interview-correction');
+});
+
+test('a Microsoft rejection updates the matching Applied application and notifies once', async () => {
+  const application = {
+    id: 83,
+    company: 'Microsoft',
+    position: 'Software Engineer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: Microsoft Recruiting <recruiting@microsoft.com>',
+    'To: applyflow@example.com',
+    'Subject: Microsoft Application Update',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We regret to inform you that your Microsoft Software Engineer application was unsuccessful.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-microsoft-rejection',
+        history: [{ messagesAdded: [{ message: { id: 'microsoft-rejection' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(application.status, 'Rejected');
+  assert.equal(calls.applicationUpdates, 1);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(calls.notifications[0].previous_status, 'Applied');
+  assert.equal(calls.notifications[0].new_status, 'Rejected');
+  assert.equal(calls.notifications[0].read, false);
+});
+
+test('a Google security alert cannot change an application or create a status notification', async () => {
+  const application = {
+    id: 84,
+    company: 'Shoprite',
+    position: 'Cashier',
+    status: 'Interview',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: Google <no-reply@accounts.google.com>',
+    'To: applyflow@example.com',
+    'Subject: Security alert for your Google Account',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'A new device signed in to your Google Account. If this was not you, secure your account.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-google-security-alert',
+        history: [{ messagesAdded: [{ message: { id: 'google-security-alert' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['ignored']);
+  assert.equal(processedRows.get('google-security-alert').outcome, 'ignored');
+  assert.equal(application.status, 'Interview');
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(calls.notifications.length, 0);
 });
 
 test('Hitech rejection email with a misspelling updates the matching application and creates an unread notification', async () => {
@@ -1187,8 +1363,8 @@ test('scenarios 1-7: status transitions run through matching, persistence, and a
     { current: 'Shortlisted', detected: 'Interview', expected: 'updated', expectedStatus: 'Interview', interview: true },
     { current: 'Interview', detected: 'Offer', expected: 'updated', expectedStatus: 'Offer' },
     { current: 'Interview', detected: 'Interview', expected: 'updated', expectedStatus: 'Interview', interview: true },
-    { current: 'Rejected', detected: 'Interview', expected: 'review', expectedStatus: 'Rejected', interview: true },
-    { current: 'Offer', detected: 'Interview', expected: 'review', expectedStatus: 'Offer', interview: true },
+    { current: 'Rejected', detected: 'Interview', expected: 'updated', expectedStatus: 'Interview', interview: true },
+    { current: 'Offer', detected: 'Interview', expected: 'updated', expectedStatus: 'Interview', interview: true },
   ];
   const emailText = {
     Interview: 'Shoprite invites you to interview for the Cashier position. Your interview is scheduled for 09 October 2026 at 08:30.',

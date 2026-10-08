@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useSyncExternalStore } from "react";
+import Link from "next/link";
 import { AppShell, SectionTitle } from "@/components/app-shell";
 import { getStoredNotifications, syncInterviewNotifications } from "@/lib/mock-data";
 import {
@@ -146,8 +147,25 @@ export default function NotificationsPage() {
                       <span className="h-2.5 w-2.5 rounded-full bg-[#ff7aa2]" aria-label="Unread notification" />
                     ) : null}
                   </div>
-                  <p className="text-lg font-semibold text-slate-800">{notification.title}</p>
-                  <p className="mt-1 whitespace-pre-line text-sm text-slate-600">{formatNotificationMessage(notification.message)}</p>
+                    {notification.applicationId ? (
+                      <Link
+                        href={`/applications/${encodeURIComponent(notification.applicationId)}`}
+                        onClick={() => {
+                          if (!notification.read && notification.status === "sent") {
+                            void handleMarkRead(notification.id);
+                          }
+                        }}
+                        className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[#147d82]"
+                      >
+                        <p className="text-lg font-semibold text-slate-800">{notification.title}</p>
+                        <p className="mt-1 whitespace-pre-line text-sm text-slate-600">{formatNotificationMessage(notification.message)}</p>
+                      </Link>
+                    ) : (
+                      <>
+                        <p className="text-lg font-semibold text-slate-800">{notification.title}</p>
+                        <p className="mt-1 whitespace-pre-line text-sm text-slate-600">{formatNotificationMessage(notification.message)}</p>
+                      </>
+                    )}
                 </div>
                 <div className="flex shrink-0 flex-col items-start gap-2 sm:items-end">
                   <p className="text-xs font-medium text-slate-500">

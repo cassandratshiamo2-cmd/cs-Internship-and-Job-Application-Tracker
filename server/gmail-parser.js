@@ -14,6 +14,14 @@ const STATUS_RULES = [
     ],
   },
   {
+    status: 'Withdrawn',
+    patterns: [
+      /your application (?:has been )?withdrawn/i,
+      /we (?:have )?withdrawn your application/i,
+      /we acknowledge your withdrawal of (?:the )?application/i,
+    ],
+  },
+  {
     status: 'Offer',
     patterns: [
       /offer of employment/i,
@@ -21,6 +29,7 @@ const STATUS_RULES = [
       /employment offer/i,
       /pleased to offer/i,
       /we would like to offer you/i,
+      /selected for the (?:position|role|job) of/i,
     ],
   },
   {
@@ -28,6 +37,8 @@ const STATUS_RULES = [
     patterns: [
       /invited? you to (?:an? )?interview/i,
       /interview invitation/i,
+      /shortlisted.{0,40}interview/i,
+      /interview.{0,40}shortlisted/i,
       /schedule an interview/i,
       /interview.{0,30}invitation/i,
       /would like to interview you/i,
@@ -60,6 +71,13 @@ const STATUS_RULES = [
       /thank you for applying/i,
       /application has been submitted/i,
       /confirm(?:ation)? of your application/i,
+    ],
+  },
+  {
+    status: 'Saved',
+    patterns: [
+      /application (?:has been )?saved/i,
+      /we have saved your application/i,
     ],
   },
 ];

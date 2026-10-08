@@ -50,6 +50,7 @@ export interface NotificationItem {
   message: string;
   date: string;
   read: boolean;
+  applicationId?: string;
   scheduledFor?: string;
   status?: "pending" | "processing" | "sent" | "failed" | "cancelled";
 }

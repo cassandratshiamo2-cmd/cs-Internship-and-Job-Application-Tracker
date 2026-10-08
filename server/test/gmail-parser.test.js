@@ -15,8 +15,12 @@ test('classifies supported application status email language', () => {
     ['Online assessment invitation', 'Please complete the coding challenge.', 'Assessment'],
     ['You have been shortlisted', 'Your application was shortlisted.', 'Shortlisted'],
     ['Interview invitation', 'We would like to interview you.', 'Interview'],
+    ['You have been shortlisted for an interview', 'Please confirm your availability.', 'Interview'],
     ['Offer of employment', 'We are pleased to offer you the position.', 'Offer'],
+    ['Position selected', 'You have been selected for the position of Analyst.', 'Offer'],
     ['Application update', 'We regret to inform you that you were not selected.', 'Rejected'],
+    ['Application saved', 'Your application has been saved.', 'Saved'],
+    ['Application withdrawal confirmed', 'Your application has been withdrawn.', 'Withdrawn'],
   ];
 
   for (const [subject, text, expectedStatus] of cases) {

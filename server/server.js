@@ -259,12 +259,42 @@ async function ensureDatabase() {
       'application_id INTEGER REFERENCES applications(id) ON DELETE SET NULL, ' +
       'previous_status VARCHAR(32), ' +
       'new_status VARCHAR(32), ' +
+      'reprocess_version INTEGER NOT NULL DEFAULT 0, ' +
       'outcome VARCHAR(16) NOT NULL DEFAULT \'processing\' CHECK (outcome IN (\'processing\', \'updated\', \'review\', \'reviewed\', \'ignored\', \'dismissed\')), ' +
       'review_reason TEXT, ' +
       'processed_at TIMESTAMPTZ, ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
       'UNIQUE (connection_id, gmail_message_id)' +
       ')'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS reprocess_version INTEGER NOT NULL DEFAULT 0'
+  );
+
+  await pool.query(
+    'DO $$ ' +
+      'DECLARE status_constraint RECORD; ' +
+      'BEGIN ' +
+        'IF NOT EXISTS (' +
+          "SELECT 1 FROM pg_constraint WHERE conrelid = 'gmail_processed_messages'::regclass " +
+            "AND contype = 'c' " +
+            "AND pg_get_constraintdef(oid) LIKE '%detected_status%' " +
+            "AND pg_get_constraintdef(oid) LIKE '%Saved%' " +
+            "AND pg_get_constraintdef(oid) LIKE '%Withdrawn%' " +
+        ') THEN ' +
+          'FOR status_constraint IN ' +
+            "SELECT conname FROM pg_constraint WHERE conrelid = 'gmail_processed_messages'::regclass " +
+              "AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%detected_status%' " +
+          'LOOP ' +
+            "EXECUTE format('ALTER TABLE gmail_processed_messages DROP CONSTRAINT %I', status_constraint.conname); " +
+          'END LOOP; ' +
+          'ALTER TABLE gmail_processed_messages ' +
+            'ADD CONSTRAINT gmail_processed_messages_detected_status_check ' +
+            "CHECK (detected_status IN ('Saved', 'Applied', 'Assessment', 'Shortlisted', 'Interview', 'Offer', 'Rejected', 'Withdrawn')); " +
+        'END IF; ' +
+      'END $$'
   );
 
   await pool.query(

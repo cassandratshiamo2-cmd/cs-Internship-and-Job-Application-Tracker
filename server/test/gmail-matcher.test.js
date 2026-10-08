@@ -38,6 +38,19 @@ test('matches punctuation variants and abbreviated position titles using exact t
   assert.equal(result.application.id, '16');
 });
 
+test('matches company aliases with legal and holdings suffixes', () => {
+  const result = matchApplication({
+    subject: 'SHOPRITE interview invitation',
+    text: 'Shoprite Holdings would like to interview you.',
+    from: 'careers@shoprite.co.za',
+  }, [
+    { id: '18', company: 'Shoprite Holdings Ltd', position: 'Cashier', status: 'Applied' },
+  ]);
+
+  assert.equal(result.outcome, 'matched');
+  assert.equal(result.application.id, '18');
+});
+
 test('queues an email when multiple applications at the same company are plausible', () => {
   const result = matchApplication({
     from: 'recruiting@acme.com',
@@ -65,6 +78,33 @@ test('only permits forward status transitions', () => {
   assert.equal(canAdvanceStatus('Interview', 'Assessment'), false);
   assert.equal(canAdvanceStatus('Offer', 'Rejected'), false);
   assert.equal(canAdvanceStatus('Withdrawn', 'Applied'), false);
+});
+
+test('a newer matched application email can correct a previous terminal status', () => {
+  const decision = decideApplicationEmailUpdate({
+    currentStatus: 'Rejected',
+    detectedStatus: 'Interview',
+    updatedAt: new Date('2026-10-07T08:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+    allowEmailStatusCorrection: true,
+  });
+
+  assert.equal(decision.action, 'apply');
+  assert.equal(decision.applyStatus, true);
+  assert.equal(decision.isBackward, true);
+});
+
+test('email status correction still requires a non-stale message', () => {
+  const decision = decideApplicationEmailUpdate({
+    currentStatus: 'Rejected',
+    detectedStatus: 'Interview',
+    updatedAt: new Date('2026-10-08T09:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+    allowEmailStatusCorrection: true,
+  });
+
+  assert.equal(decision.action, 'manual_review');
+  assert.equal(decision.isStale, true);
 });
 
 const transitionScenarios = [

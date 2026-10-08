@@ -26,11 +26,13 @@ const MAX_GMAIL_REQUEST_TIMEOUT_MS = 120000;
 const UNCLASSIFIED_EMAIL_REVIEW_REASON = 'No supported application status rule matched.';
 const IGNORED_MESSAGE_REPROCESS_DAYS = 30;
 const IGNORED_MESSAGE_REPROCESS_LIMIT = 25;
+const IGNORED_MESSAGE_REPROCESS_VERSION = 1;
 
 function isRetryableIgnoredMessage(message) {
   return message?.outcome === 'ignored' &&
     !message.detected_status &&
-    message.review_reason === UNCLASSIFIED_EMAIL_REVIEW_REASON;
+    message.review_reason === UNCLASSIFIED_EMAIL_REVIEW_REASON &&
+    Number(message.reprocess_version || 0) < IGNORED_MESSAGE_REPROCESS_VERSION;
 }
 
 function getGmailRequestTimeoutMs(env) {
@@ -349,7 +351,7 @@ function createGmailSyncService({
       let messageRowId;
       if (inserted.rowCount === 0) {
         const existing = await client.query(
-          'SELECT id, outcome, detected_status, review_reason FROM gmail_processed_messages ' +
+          'SELECT id, outcome, detected_status, review_reason, reprocess_version FROM gmail_processed_messages ' +
             'WHERE connection_id = $1 AND gmail_message_id = $2 FOR UPDATE',
           [connection.id, email.id]
         );
@@ -367,7 +369,8 @@ function createGmailSyncService({
             'sender = $2, subject = $3, received_at = $4, detected_status = $5, ' +
             'detected_interview_date = $6::date, detected_interview_time = $7::time, ' +
             'detected_interview_type = $8, confidence = $9, candidate_application_ids = $10::jsonb, outcome = \'processing\', ' +
-            'review_reason = NULL, processed_at = NULL WHERE id = $1',
+            'review_reason = NULL, processed_at = NULL, ' +
+            'reprocess_version = CASE WHEN $11::boolean THEN $12 ELSE reprocess_version END WHERE id = $1',
           [
             messageRowId,
             email.from.slice(0, 998),
@@ -379,6 +382,8 @@ function createGmailSyncService({
             interviewDetails?.interviewType || null,
             classification.confidence,
             JSON.stringify(match.candidateIds || []),
+            isRetryableIgnoredMessage(existingMessage),
+            IGNORED_MESSAGE_REPROCESS_VERSION,
           ]
         );
       } else {
@@ -432,6 +437,7 @@ function createGmailSyncService({
         receivedAt: email.receivedAt,
         interviewDetailsDetected: interviewDetailsWereDetected,
         interviewDetailsChanged,
+        allowEmailStatusCorrection: true,
       });
       if (updateDecision.action === 'manual_review' || !application) {
         await client.query(
@@ -521,7 +527,7 @@ function createGmailSyncService({
 
   async function processMessage(connection, gmail, messageId) {
     const existing = await pool.query(
-      'SELECT outcome, detected_status, review_reason FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
+      'SELECT outcome, detected_status, review_reason, reprocess_version FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
       [connection.id, messageId]
     );
     const existingMessage = existing.rows[0];
@@ -783,6 +789,26 @@ function createGmailSyncService({
         };
       }
 
+      const ignoredMessages = reprocessIgnored
+        ? await pool.query(
+            'SELECT gmail_message_id FROM gmail_processed_messages ' +
+              'WHERE connection_id = $1 ' +
+                "AND outcome = 'ignored' " +
+                'AND detected_status IS NULL ' +
+                'AND review_reason = $2 ' +
+                'AND COALESCE(reprocess_version, 0) < $3 ' +
+                "AND received_at >= NOW() - ($4::int * INTERVAL '1 day') " +
+              'ORDER BY received_at DESC LIMIT $5',
+            [
+              connection.id,
+              UNCLASSIFIED_EMAIL_REVIEW_REASON,
+              IGNORED_MESSAGE_REPROCESS_VERSION,
+              IGNORED_MESSAGE_REPROCESS_DAYS,
+              IGNORED_MESSAGE_REPROCESS_LIMIT,
+            ]
+          )
+        : { rows: [] };
+
       try {
         const gmail = await buildGmailClient(connection);
         let syncResult;
@@ -822,21 +848,6 @@ function createGmailSyncService({
         }
 
         if (reprocessIgnored) {
-          const ignoredMessages = await pool.query(
-            'SELECT gmail_message_id FROM gmail_processed_messages ' +
-              'WHERE connection_id = $1 ' +
-                "AND outcome = 'ignored' " +
-                'AND detected_status IS NULL ' +
-                'AND review_reason = $2 ' +
-                "AND received_at >= NOW() - ($3::int * INTERVAL '1 day') " +
-              'ORDER BY received_at DESC LIMIT $4',
-            [
-              connection.id,
-              UNCLASSIFIED_EMAIL_REVIEW_REASON,
-              IGNORED_MESSAGE_REPROCESS_DAYS,
-              IGNORED_MESSAGE_REPROCESS_LIMIT,
-            ]
-          );
           if (ignoredMessages.rows.length) {
             const retryBatch = await processMessagesIndividually(
               connection,
