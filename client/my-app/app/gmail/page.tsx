@@ -124,7 +124,9 @@ export default function GmailIntegrationPage() {
     setNotice('');
     try {
       const result = await syncGmail(token);
-      setNotice(`${result.message} ${result.processed} messages checked.`);
+      setNotice(result.inProgress
+        ? 'A Gmail sync is already running. Try again shortly.'
+        : `${result.message} ${result.processed} messages checked.`);
       await refreshData();
     } catch (syncError) {
       setError(syncError instanceof Error ? syncError.message : 'Unable to check Gmail.');

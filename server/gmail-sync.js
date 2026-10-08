@@ -21,6 +21,16 @@ const DEFAULT_QUOTA_RETRY_BASE_MS = 1000;
 const MAX_QUOTA_RETRY_DELAY_MS = 30000;
 const QUOTA_COOLDOWN_BASE_SECONDS = 60;
 const QUOTA_COOLDOWN_MAX_SECONDS = 3600;
+const DEFAULT_GMAIL_REQUEST_TIMEOUT_MS = 30000;
+const MAX_GMAIL_REQUEST_TIMEOUT_MS = 120000;
+
+function getGmailRequestTimeoutMs(env) {
+  const configuredTimeout = Number(env.GMAIL_SYNC_REQUEST_TIMEOUT_MS);
+  if (!Number.isFinite(configuredTimeout) || configuredTimeout <= 0) {
+    return DEFAULT_GMAIL_REQUEST_TIMEOUT_MS;
+  }
+  return Math.min(configuredTimeout, MAX_GMAIL_REQUEST_TIMEOUT_MS);
+}
 
 function asHeaderText(value) {
   if (!value) return '';
@@ -120,6 +130,32 @@ function createGmailSyncService({
   const baseDelayMs = Number.isFinite(retryBaseMs)
     ? Math.max(1, retryBaseMs)
     : DEFAULT_QUOTA_RETRY_BASE_MS;
+  const requestTimeoutMs = getGmailRequestTimeoutMs(env);
+
+  async function withGmailRequestTimeout(operation, requestName) {
+    const controller = new AbortController();
+    let timeoutId;
+    const timeout = new Promise((resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        const error = new Error(`${requestName} timed out after ${requestTimeoutMs} ms.`);
+        error.code = 'GMAIL_REQUEST_TIMEOUT';
+        reject(error);
+      }, requestTimeoutMs);
+    });
+
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => operation({
+          timeout: requestTimeoutMs,
+          signal: controller.signal,
+        })),
+        timeout,
+      ]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
 
   async function withQuotaRetry(operation) {
     for (let attempt = 0; ; attempt += 1) {
@@ -140,6 +176,12 @@ function createGmailSyncService({
 
   async function buildGmailClient(connection) {
     const oauthClient = oauthClientFactory(env);
+    if (oauthClient.transporter?.defaults) {
+      oauthClient.transporter.defaults = {
+        ...oauthClient.transporter.defaults,
+        timeout: requestTimeoutMs,
+      };
+    }
     oauthClient.setCredentials({
       access_token: connection.access_token_ciphertext
         ? decryptToken(connection.access_token_ciphertext, encryptionKey)
@@ -150,7 +192,10 @@ function createGmailSyncService({
         : undefined,
     });
 
-    await oauthClient.getAccessToken();
+    await withGmailRequestTimeout(
+      () => oauthClient.getAccessToken(),
+      'Gmail OAuth token refresh'
+    );
     const credentials = oauthClient.credentials;
     await pool.query(
       'UPDATE gmail_connections SET ' +
@@ -173,11 +218,15 @@ function createGmailSyncService({
   async function fetchMessage(gmail, messageId) {
     let result;
     try {
-      result = await withQuotaRetry(() => gmail.users.messages.get({
-        userId: 'me',
-        id: messageId,
-        format: 'raw',
-      }));
+      result = await withQuotaRetry(() => withGmailRequestTimeout(
+        (requestOptions) => gmail.users.messages.get({
+          userId: 'me',
+          id: messageId,
+          format: 'raw',
+          ...requestOptions,
+        }),
+        'Gmail message fetch'
+      ));
     } catch (error) {
       if (getGmailErrorStatus(error) === 404) {
         const missingMessageError = new Error('Gmail message no longer exists.');
@@ -526,12 +575,16 @@ function createGmailSyncService({
   }
 
   async function listInitialPage(gmail, pageToken) {
-    return withQuotaRetry(() => gmail.users.messages.list({
-      userId: 'me',
-      maxResults: INITIAL_SYNC_PAGE_SIZE,
-      pageToken: pageToken || undefined,
-      q: `newer_than:${Number(env.GMAIL_INITIAL_SYNC_DAYS || INITIAL_SYNC_DAYS)}d -in:sent`,
-    }));
+    return withQuotaRetry(() => withGmailRequestTimeout(
+      (requestOptions) => gmail.users.messages.list({
+        userId: 'me',
+        maxResults: INITIAL_SYNC_PAGE_SIZE,
+        pageToken: pageToken || undefined,
+        q: `newer_than:${Number(env.GMAIL_INITIAL_SYNC_DAYS || INITIAL_SYNC_DAYS)}d -in:sent`,
+        ...requestOptions,
+      }),
+      'Gmail message list'
+    ));
   }
 
   async function syncInitialPage(connection, gmail, profile) {
@@ -576,13 +629,17 @@ function createGmailSyncService({
     let latestHistoryId = connection.history_id;
 
     do {
-      const response = await withQuotaRetry(() => gmail.users.history.list({
-        userId: 'me',
-        startHistoryId: connection.history_id,
-        historyTypes: ['messageAdded'],
-        maxResults: HISTORY_PAGE_SIZE,
-        pageToken,
-      }));
+      const response = await withQuotaRetry(() => withGmailRequestTimeout(
+        (requestOptions) => gmail.users.history.list({
+          userId: 'me',
+          startHistoryId: connection.history_id,
+          historyTypes: ['messageAdded'],
+          maxResults: HISTORY_PAGE_SIZE,
+          pageToken,
+          ...requestOptions,
+        }),
+        'Gmail history fetch'
+      ));
       latestHistoryId = response.data.historyId || latestHistoryId;
       for (const history of response.data.history || []) {
         for (const added of history.messagesAdded || []) {
@@ -614,12 +671,18 @@ function createGmailSyncService({
   async function syncConnection(connectionId) {
     let lockClient;
     let hasLock = false;
+    let lockAcquisitionAttempted = false;
+    let lockAcquisitionCompleted = false;
+    let syncFailure;
     try {
       lockClient = await pool.connect();
-      const lockResult = await lockClient.query(
-        'SELECT pg_try_advisory_lock($1, hashtext($2)) AS acquired',
-        [GMAIL_SYNC_LOCK_NAMESPACE, String(connectionId)]
-      );
+      lockAcquisitionAttempted = true;
+      const lockResult = await lockClient.query({
+        text: 'SELECT pg_try_advisory_lock($1, hashtext($2)) AS acquired',
+        values: [GMAIL_SYNC_LOCK_NAMESPACE, String(connectionId)],
+        query_timeout: requestTimeoutMs,
+      });
+      lockAcquisitionCompleted = true;
       hasLock = Boolean(lockResult.rows[0]?.acquired);
       if (!hasLock) {
         return { processed: 0, outcomes: [], inProgress: true };
@@ -656,16 +719,20 @@ function createGmailSyncService({
         if (needsInitialSync) {
           const profile = connection.initial_sync_history_id
             ? null
-            : (await withQuotaRetry(() => gmail.users.getProfile({ userId: 'me' }))).data;
+            : (await withQuotaRetry(() => withGmailRequestTimeout(
+              (requestOptions) => gmail.users.getProfile({ userId: 'me', ...requestOptions }),
+              'Gmail profile fetch'
+            ))).data;
           syncResult = await syncInitialPage(connection, gmail, profile || {});
         } else {
           try {
             syncResult = await syncHistory(connection, gmail);
           } catch (error) {
             if (error.code !== 404 && error.response?.status !== 404) throw error;
-            const profile = (await withQuotaRetry(() =>
-              gmail.users.getProfile({ userId: 'me' })
-            )).data;
+            const profile = (await withQuotaRetry(() => withGmailRequestTimeout(
+              (requestOptions) => gmail.users.getProfile({ userId: 'me', ...requestOptions }),
+              'Gmail profile fetch'
+            ))).data;
             await pool.query(
               'UPDATE gmail_connections SET history_id = NULL, initial_sync_history_id = NULL, ' +
                 'initial_sync_page_token = NULL WHERE id = $1',
@@ -728,24 +795,38 @@ function createGmailSyncService({
         throw syncError;
       }
     } catch (error) {
+      syncFailure = error;
       console.error('Gmail sync failed:', getSafeSyncErrorDetails(error));
       throw error;
     } finally {
-      let unlockError;
+      let cleanupError = lockAcquisitionAttempted && !lockAcquisitionCompleted
+        ? syncFailure || new Error('Gmail advisory lock acquisition could not be confirmed.')
+        : null;
       try {
         if (lockClient && hasLock) {
-          await lockClient.query(
-            'SELECT pg_advisory_unlock($1, hashtext($2))',
-            [GMAIL_SYNC_LOCK_NAMESPACE, String(connectionId)]
-          );
+          const unlockResult = await lockClient.query({
+            text: 'SELECT pg_advisory_unlock($1, hashtext($2))',
+            values: [GMAIL_SYNC_LOCK_NAMESPACE, String(connectionId)],
+            query_timeout: requestTimeoutMs,
+          });
+          if (unlockResult.rows[0]?.pg_advisory_unlock !== true) {
+            cleanupError = new Error('Gmail advisory lock release could not be confirmed.');
+          }
         }
       } catch (error) {
-        unlockError = error;
+        cleanupError = cleanupError || error;
         console.error('Gmail advisory lock release failed:', getSafeSyncErrorDetails(error));
-      } finally {
-        if (lockClient) lockClient.release(unlockError);
       }
-      if (unlockError) throw unlockError;
+      try {
+        if (lockClient) lockClient.release(cleanupError || undefined);
+      } catch (error) {
+        cleanupError = cleanupError || error;
+        console.error('Gmail advisory lock client release failed:', getSafeSyncErrorDetails(error));
+      }
+      if (cleanupError && !syncFailure) {
+        console.error('Gmail advisory lock cleanup failed:', getSafeSyncErrorDetails(cleanupError));
+        throw cleanupError;
+      }
     }
   }
 

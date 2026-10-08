@@ -15,6 +15,9 @@ function createTestService({
   existingMessage = false,
   cooldownAfterQuota = false,
   failUnlock = false,
+  unlockReturnsFalse = false,
+  failLockAcquisition = false,
+  requestTimeoutMs = 30000,
   messageGet,
   parseMessage,
   applications = [],
@@ -31,6 +34,8 @@ function createTestService({
     releases: 0,
     discardedClients: 0,
     applicationUpdates: 0,
+    oauthTimeout: null,
+    lockQueryTimeouts: [],
   };
   const processedRows = new Map();
   let nextProcessedId = 100;
@@ -54,6 +59,8 @@ function createTestService({
   let lockHeld = false;
   let coolingDown = false;
   let shouldFailUnlock = failUnlock;
+  let shouldReturnFalseOnUnlock = unlockReturnsFalse;
+  let shouldFailLockAcquisition = failLockAcquisition;
 
   const pool = {
     async query(sql, params = []) {
@@ -87,8 +94,18 @@ function createTestService({
     },
     async connect() {
       return {
-        async query(sql, params = []) {
+        async query(query, params = []) {
+          const sql = typeof query === 'string' ? query : query.text;
+          if (typeof query !== 'string') {
+            params = query.values || [];
+            calls.lockQueryTimeouts.push(query.query_timeout);
+          }
           if (sql.includes('pg_try_advisory_lock')) {
+            if (shouldFailLockAcquisition) {
+              shouldFailLockAcquisition = false;
+              lockHeld = true;
+              throw new Error('Synthetic advisory lock acquisition response failure');
+            }
             const acquired = !lockHeld;
             if (acquired) lockHeld = true;
             return { rowCount: 1, rows: [{ acquired }] };
@@ -98,6 +115,10 @@ function createTestService({
             if (shouldFailUnlock) {
               shouldFailUnlock = false;
               throw new Error('Synthetic advisory unlock failure');
+            }
+            if (shouldReturnFalseOnUnlock) {
+              shouldReturnFalseOnUnlock = false;
+              return { rowCount: 1, rows: [{ pg_advisory_unlock: false }] };
             }
             lockHeld = false;
             return { rowCount: 1, rows: [{ pg_advisory_unlock: true }] };
@@ -118,7 +139,13 @@ function createTestService({
             }
             if (processedRows.has(messageId)) return { rowCount: 0, rows: [] };
             const id = nextProcessedId++;
-            processedRows.set(messageId, { id, outcome: 'processing' });
+            processedRows.set(messageId, {
+              id,
+              outcome: 'processing',
+              sender: params[4],
+              subject: params[5],
+              detectedStatus: params[7],
+            });
             return { rowCount: 1, rows: [{ id }] };
           }
           if (sql.startsWith('SELECT id, outcome FROM gmail_processed_messages')) {
@@ -173,17 +200,21 @@ function createTestService({
     parseMessage,
     env: {
       GMAIL_TOKEN_ENCRYPTION_KEY: encryptionKey,
+      GMAIL_SYNC_REQUEST_TIMEOUT_MS: String(requestTimeoutMs),
     },
     retryBaseMs: 100,
     oauthClientFactory() {
       return {
+        transporter: { defaults: {} },
         credentials: {
           access_token: 'access-token',
           refresh_token: 'refresh-token',
           expiry_date: Date.now() + 60000,
         },
         setCredentials() {},
-        async getAccessToken() {},
+        async getAccessToken() {
+          calls.oauthTimeout = this.transporter.defaults.timeout;
+        },
       };
     },
     gmailClientFactory() {
@@ -345,6 +376,57 @@ test('an advisory unlock failure discards its database session', async () => {
 
   const retryResult = await service.syncConnection(7);
   assert.equal(retryResult.inProgress, undefined);
+  assert.equal(isLockHeld(), false);
+});
+
+test('an unlock-false result discards the session and permits a later sync', async () => {
+  const { calls, service, isLockHeld } = createTestService({ unlockReturnsFalse: true });
+
+  await assert.rejects(service.syncConnection(7), /lock release could not be confirmed/);
+  assert.equal(calls.discardedClients, 1);
+  assert.equal(isLockHeld(), false);
+
+  const retryResult = await service.syncConnection(7);
+  assert.equal(retryResult.inProgress, undefined);
+  assert.equal(isLockHeld(), false);
+});
+
+test('an ambiguous lock acquisition failure discards its session', async () => {
+  const { calls, service, isLockHeld } = createTestService({ failLockAcquisition: true });
+
+  await assert.rejects(service.syncConnection(7), /Synthetic advisory lock acquisition response failure/);
+  assert.equal(calls.discardedClients, 1);
+  assert.equal(isLockHeld(), false);
+
+  const retryResult = await service.syncConnection(7);
+  assert.equal(retryResult.inProgress, undefined);
+  assert.equal(isLockHeld(), false);
+});
+
+test('a hanging Gmail request times out, releases its lock, and recovers on retry', async () => {
+  let historyAttempts = 0;
+  let timedOutSignal;
+  const { calls, service, isLockHeld } = createTestService({
+    requestTimeoutMs: 10,
+    historyList: async (requestOptions) => {
+      historyAttempts += 1;
+      if (historyAttempts === 1) {
+        timedOutSignal = requestOptions.signal;
+        return new Promise(() => {});
+      }
+      return { data: { historyId: 'history-after-timeout', history: [] } };
+    },
+  });
+
+  await assert.rejects(service.syncConnection(7), /Gmail sync failed/);
+  assert.equal(timedOutSignal.aborted, true);
+  assert.equal(calls.oauthTimeout, 10);
+  assert.deepEqual(calls.lockQueryTimeouts, [10, 10]);
+  assert.equal(isLockHeld(), false);
+
+  const retryResult = await service.syncConnection(7);
+  assert.equal(retryResult.inProgress, undefined);
+  assert.equal(historyAttempts, 2);
   assert.equal(isLockHeld(), false);
 });
 
@@ -621,6 +703,59 @@ test('a Pnet alert with explicit existing-application context can still be appli
   assert.equal(application.status, 'Rejected');
 });
 
+test('Shoprite outcome email matches Cashier and records Interview to Rejected in history', async () => {
+  const application = {
+    id: 77,
+    company: 'Shoprite',
+    position: 'Cashier',
+    status: 'Interview',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const subject = 'Shoprite Application Outcome – Cashier Position';
+  const raw = Buffer.from([
+    'From: Shoprite Careers <careers@shoprite.co.za>',
+    'To: applyflow@example.com',
+    `Subject: ${subject}`,
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Thank you for attending your Shoprite Cashier interview. We regret to inform you that your application was unsuccessful because Shoprite selected another candidate.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-shoprite-rejection',
+        history: [{ messagesAdded: [{ message: { id: 'shoprite-rejection' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'shoprite-rejection-thread',
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+  const historyRow = processedRows.get('shoprite-rejection');
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(historyRow.subject, subject);
+  assert.equal(historyRow.detectedStatus, 'Rejected');
+  assert.equal(historyRow.outcome, 'updated');
+  assert.equal(application.status, 'Rejected');
+  assert.equal(calls.applicationUpdates, 1);
+});
+
 test('a Gmail API authentication failure remains fatal and releases the connection lock', async () => {
   const { service, isLockHeld, calls } = createTestService({
     historyList: async () => ({
@@ -748,7 +883,9 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
     },
     async connect() {
       return {
-        async query(sql, params = []) {
+        async query(query, params = []) {
+          const sql = typeof query === 'string' ? query : query.text;
+          if (typeof query !== 'string') params = query.values || [];
           if (sql.includes('pg_try_advisory_lock')) {
             lockHeld = true;
             return { rowCount: 1, rows: [{ acquired: true }] };
