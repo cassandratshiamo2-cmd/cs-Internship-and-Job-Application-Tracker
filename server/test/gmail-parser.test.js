@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { simpleParser } = require('mailparser');
 const {
   classifyApplicationEmail,
   extractInterviewDateTime,
@@ -62,6 +63,76 @@ test('extracts the date and time from the Shoprite interview invitation wording'
     ambiguous: false,
     hasUnsupportedTimezone: false,
   });
+});
+
+test('extracts interview time when MIME line breaks separate the date and time phrase', () => {
+  const variants = [
+    'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026\nAT 08:30',
+    'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026 AT\n08:30',
+  ];
+
+  for (const text of variants) {
+    assert.equal(extractInterviewDateTime({ text }).interviewDate, '2026-10-09');
+    assert.equal(extractInterviewDateTime({ text }).interviewTime, '08:30');
+  }
+});
+
+test('does not treat a closing signature after a wrapped time as a timezone', () => {
+  const extracted = extractInterviewDateTime({
+    text: 'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026 AT 08:30\n\nKind regards\n\nShoprite',
+  });
+
+  assert.equal(extracted.interviewDate, '2026-10-09');
+  assert.equal(extracted.interviewTime, '08:30');
+});
+
+test('extracts interview time from hard-wrapped plain-text MIME', async () => {
+  const rawEmail = [
+    'From: recruiter@example.test',
+    'To: candidate@example.test',
+    'Subject: INTERVIEW INVITATION',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026',
+    'AT 08:30',
+  ].join('\r\n');
+  const parsed = await simpleParser(Buffer.from(rawEmail));
+  const extracted = extractInterviewDateTime({ subject: parsed.subject, text: parsed.text });
+
+  assert.equal(extracted.interviewDate, '2026-10-09');
+  assert.equal(extracted.interviewTime, '08:30');
+});
+
+test('extracts interview time from HTML paragraph and break MIME formatting', async () => {
+  const bodies = [
+    '<p>YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026</p><p>AT 08:30</p>',
+    'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026<br>AT 08:30',
+  ];
+
+  for (const body of bodies) {
+    const rawEmail = [
+      'From: recruiter@example.test',
+      'To: candidate@example.test',
+      'Subject: INTERVIEW INVITATION',
+      'Content-Type: text/html; charset=utf-8',
+      '',
+      body,
+    ].join('\r\n');
+    const parsed = await simpleParser(Buffer.from(rawEmail));
+    const extracted = extractInterviewDateTime({ subject: parsed.subject, text: parsed.text });
+
+    assert.equal(extracted.interviewDate, '2026-10-09');
+    assert.equal(extracted.interviewTime, '08:30');
+  }
+});
+
+test('does not capture a time from an unrelated later sentence', () => {
+  const extracted = extractInterviewDateTime({
+    text: 'The interview is scheduled for 09 October 2026. The office opens at 08:30.',
+  });
+
+  assert.equal(extracted.interviewDate, '2026-10-09');
+  assert.equal(extracted.interviewTime, null);
 });
 
 test('saves an unambiguous date without inventing a time', () => {

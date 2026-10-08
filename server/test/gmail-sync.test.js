@@ -236,18 +236,30 @@ test('sync applies the Shoprite interview date and time without replacing an exi
     application_link: null,
     interview_email: null,
   };
+  const processed = {};
   const rawEmail = Buffer.from([
     'From: Shoprite Careers <careers@shoprite.co.za>',
     'To: applyflow@example.com',
     'Subject: INTERVIEW INVITATION',
     'Date: Thu, 08 Oct 2026 08:00:00 +0200',
-    'Content-Type: text/plain; charset="UTF-8"',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/alternative; boundary="applyflow-boundary"',
     '',
-    'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026 AT 08:30',
+    '--applyflow-boundary',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026',
+    'AT 08:30',
     '',
     'Kind regards',
     '',
     'Shoprite',
+    '--applyflow-boundary',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    '<p>YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026</p>',
+    '<p>AT 08:30</p><p>Kind regards</p><p>Shoprite</p>',
+    '--applyflow-boundary--',
   ].join('\r\n')).toString('base64url');
   let lockHeld = false;
   const pool = {
@@ -276,6 +288,12 @@ test('sync applies the Shoprite interview date and time without replacing an exi
           if (sql.startsWith('INSERT INTO gmail_processed_messages')) {
             assert.equal(params[8], '2026-10-09');
             assert.equal(params[9], '08:30');
+            Object.assign(processed, {
+              status: params[7],
+              interview_date: params[8],
+              interview_time: params[9],
+              interview_type: params[10],
+            });
             return { rowCount: 1, rows: [{ id: 500 }] };
           }
           if (sql.startsWith('SELECT id, company, position, status, updated_at, interview_date')) {
@@ -340,6 +358,10 @@ test('sync applies the Shoprite interview date and time without replacing an exi
   const result = await service.syncConnection(7);
 
   assert.deepEqual(result.outcomes, ['updated']);
+  assert.deepEqual(
+    [processed.status, processed.interview_date, processed.interview_time, processed.interview_type],
+    ['Interview', '2026-10-09', '08:30', null]
+  );
   assert.deepEqual(
     [application.status, application.interview_date, application.interview_time, application.interview_type],
     ['Interview', '2026-10-09', '08:30', 'Panel']

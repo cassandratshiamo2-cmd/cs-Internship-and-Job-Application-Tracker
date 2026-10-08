@@ -162,6 +162,12 @@ function getSentenceBounds(text, start, end) {
   return { start: sentenceStart, end: sentenceEnd };
 }
 
+function getSentenceEnd(text, start) {
+  let sentenceEnd = start;
+  while (sentenceEnd < text.length && !/[.!?]/.test(text[sentenceEnd])) sentenceEnd += 1;
+  return sentenceEnd;
+}
+
 function interviewDateIsExplicitlyAssociated(prefix) {
   const recentPrefix = prefix.slice(-120);
   return (
@@ -268,10 +274,11 @@ function extractInterviewDateTime({ subject = '', text = '' }) {
       const prefix = content.slice(bounds.start, match.index);
       if (!interviewDateIsExplicitlyAssociated(prefix)) continue;
 
-      const suffix = content.slice(pattern.regex.lastIndex, Math.min(bounds.end, pattern.regex.lastIndex + 80));
+      const suffixEnd = getSentenceEnd(content, pattern.regex.lastIndex);
+      const suffix = content.slice(pattern.regex.lastIndex, Math.min(suffixEnd, pattern.regex.lastIndex + 80));
       const timeMatch = /^\s*(?:at|from|@|,)\s*(\d{1,2})(?::(\d{2}))?(?:\s*([ap]\.?(?:m)\.?))?/i.exec(suffix);
       const zoneMatch = timeMatch
-        ? /^\s*\(?\s*((?:UTC|GMT)[+-]\d{1,2}(?::?\d{2})?|[A-Z]{1,5})\s*\)?/.exec(suffix.slice(timeMatch[0].length))
+        ? /^\s*\(?\s*((?:UTC|GMT)[+-]\d{1,2}(?::?\d{2})?|[A-Z]{1,5})\b\s*\)?/.exec(suffix.slice(timeMatch[0].length))
         : null;
       const parsedTime = timeMatch
         ? parseTime(timeMatch, zoneMatch?.[1])
