@@ -38,6 +38,7 @@ const allowedOrigins = [
   CLIENT_URL,
   'http://localhost:3000',
   'https://my-app-kp67.vercel.app',
+  'https://my-app-cassandra5.vercel.app',
   'https://my-app-mu-ecru-96.vercel.app',
 ];
 
