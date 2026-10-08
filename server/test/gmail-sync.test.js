@@ -34,11 +34,13 @@ function createTestService({
     releases: 0,
     discardedClients: 0,
     applicationUpdates: 0,
+    notifications: [],
     oauthTimeout: null,
     lockQueryTimeouts: [],
   };
   const processedRows = new Map();
   let nextProcessedId = 100;
+  let nextNotificationId = 1;
   if (existingMessage) {
     processedRows.set('already-processed', {
       id: 99,
@@ -124,6 +126,34 @@ function createTestService({
             return { rowCount: 1, rows: [{ pg_advisory_unlock: true }] };
           }
           if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rowCount: 1, rows: [] };
+          if (sql.startsWith('INSERT INTO notification_jobs')) {
+            const [userId, applicationId, notificationType, channel, company, position, status, previousStatus, newStatus, eventKey] = params;
+            const exists = calls.notifications.some((notification) =>
+              notification.user_id === userId &&
+              notification.application_id === applicationId &&
+              notification.notification_type === notificationType &&
+              notification.channel === channel &&
+              notification.event_key === eventKey
+            );
+            if (exists) return { rowCount: 0, rows: [] };
+
+            const notification = {
+              id: nextNotificationId++,
+              user_id: userId,
+              application_id: applicationId,
+              notification_type: notificationType,
+              channel,
+              company,
+              position,
+              status,
+              read: false,
+              previous_status: previousStatus,
+              new_status: newStatus,
+              event_key: eventKey,
+            };
+            calls.notifications.push(notification);
+            return { rowCount: 1, rows: [{ id: notification.id }] };
+          }
           if (sql.startsWith('INSERT INTO gmail_processed_messages')) {
             const messageId = String(params[2]);
             if (sql.includes('review_reason, processed_at')) {
@@ -322,6 +352,11 @@ test('an existing review message is re-evaluated and updated in place when a str
   assert.equal(processedRows.get('already-processed').outcome, 'updated');
   assert.equal(calls.applicationUpdates, 1);
   assert.equal(application.status, 'Interview');
+  assert.deepEqual(calls.notifications.map(({ read, previous_status, new_status }) => ({
+    read,
+    previous_status,
+    new_status,
+  })), [{ read: false, previous_status: 'Applied', new_status: 'Interview' }]);
 });
 
 test('a connection lock prevents a second sync from calling Gmail concurrently', async () => {
@@ -1051,6 +1086,39 @@ test('scenarios 1-7: status transitions run through matching, persistence, and a
     assert.deepEqual(result.outcomes, [scenario.expected], `scenario ${index + 1}`);
     assert.equal(application.status, scenario.expectedStatus, `scenario ${index + 1} status`);
     assert.equal(calls.applicationUpdates, scenario.expected === 'updated' ? 1 : 0, `scenario ${index + 1} write count`);
+    const shouldNotify = scenario.expected === 'updated' && scenario.current !== scenario.detected;
+    assert.equal(calls.notifications.length, shouldNotify ? 1 : 0, `scenario ${index + 1} notification count`);
+    if (shouldNotify) {
+      assert.deepEqual(
+        calls.notifications.map(({ user_id, application_id, notification_type, channel, company, position, status, read, previous_status, new_status, event_key }) => ({
+          user_id,
+          application_id,
+          notification_type,
+          channel,
+          company,
+          position,
+          status,
+          read,
+          previous_status,
+          new_status,
+          event_key,
+        })),
+        [{
+          user_id: 4,
+          application_id: String(application.id),
+          notification_type: 'Status Update',
+          channel: 'In-app',
+          company: 'Shoprite',
+          position: 'Cashier',
+          status: 'sent',
+          read: false,
+          previous_status: scenario.current,
+          new_status: scenario.detected,
+          event_key: `status-change:${application.id}:status-scenario-${index}`,
+        }],
+        `scenario ${index + 1} notification contents`
+      );
+    }
     if (scenario.interview && scenario.expected === 'updated') {
       assert.equal(application.interview_date, '2026-10-09', `scenario ${index + 1} date`);
       assert.equal(application.interview_time, '08:30', `scenario ${index + 1} time`);

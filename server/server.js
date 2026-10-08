@@ -119,8 +119,8 @@ async function ensureDatabase() {
       'recipient_phone VARCHAR(16), ' +
       'company VARCHAR(255) NOT NULL, ' +
       'position VARCHAR(255) NOT NULL, ' +
-      'interview_date DATE NOT NULL, ' +
-      'interview_time TIME NOT NULL, ' +
+      'interview_date DATE, ' +
+      'interview_time TIME, ' +
       'interview_at TIMESTAMPTZ, ' +
       'application_link TEXT, ' +
       'scheduled_for TIMESTAMPTZ NOT NULL, ' +
@@ -134,12 +134,56 @@ async function ensureDatabase() {
       'processed_at TIMESTAMPTZ, ' +
       'last_error TEXT, ' +
       'read BOOLEAN NOT NULL DEFAULT FALSE, ' +
+      'previous_status VARCHAR(32), ' +
+      'new_status VARCHAR(32), ' +
+      'event_key VARCHAR(255), ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
       'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
       'UNIQUE (' +
-        'user_id, application_id, notification_type, channel' +
+        'user_id, application_id, notification_type, channel, event_key' +
       ')' +
       ')'
+  );
+
+  await pool.query(
+    'ALTER TABLE notification_jobs ' +
+      'ADD COLUMN IF NOT EXISTS previous_status VARCHAR(32)'
+  );
+
+  await pool.query(
+    'ALTER TABLE notification_jobs ' +
+      'ADD COLUMN IF NOT EXISTS new_status VARCHAR(32)'
+  );
+
+  await pool.query(
+    'ALTER TABLE notification_jobs ' +
+      'ADD COLUMN IF NOT EXISTS event_key VARCHAR(255)'
+  );
+
+  await pool.query(
+    'UPDATE notification_jobs ' +
+      'SET event_key = COALESCE(event_key, \'legacy:\' || id::text) ' +
+      'WHERE event_key IS NULL'
+  );
+
+  await pool.query(
+    'ALTER TABLE notification_jobs ' +
+      'ALTER COLUMN interview_date DROP NOT NULL'
+  );
+
+  await pool.query(
+    'ALTER TABLE notification_jobs ' +
+      'ALTER COLUMN interview_time DROP NOT NULL'
+  );
+
+  await pool.query(
+    'ALTER TABLE notification_jobs ' +
+      'DROP CONSTRAINT IF EXISTS notification_jobs_user_id_application_id_notification_type_channel_key'
+  );
+
+  await pool.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS notification_jobs_event_key_unique_idx ' +
+      'ON notification_jobs (user_id, application_id, notification_type, channel, event_key)'
   );
 
   await pool.query(
@@ -410,6 +454,77 @@ function normalizeNotificationChannels(channels) {
   return normalized;
 }
 
+async function createStatusChangeNotification({
+  userId,
+  applicationId,
+  company,
+  position,
+  previousStatus,
+  newStatus,
+  gmailMessageId,
+  client,
+}) {
+  const eventKey = `status-change:${applicationId}:${gmailMessageId || Date.now()}`;
+  const ownsTransaction = !client;
+  const db = client || await pool.connect();
+
+  try {
+    if (ownsTransaction) {
+      await db.query('BEGIN');
+    }
+
+    const result = await db.query(
+      'INSERT INTO notification_jobs (' +
+        'user_id, ' +
+        'application_id, ' +
+        'notification_type, ' +
+        'channel, ' +
+        'company, ' +
+        'position, ' +
+        'interview_date, ' +
+        'interview_time, ' +
+        'interview_at, ' +
+        'application_link, ' +
+        'scheduled_for, ' +
+        'status, ' +
+        'read, ' +
+        'previous_status, ' +
+        'new_status, ' +
+        'event_key' +
+      ') VALUES (' +
+        '$1, $2, $3, $4, $5, $6, NULL, NULL, NULL, NULL, NOW(), $7, FALSE, $8, $9, $10' +
+      ') ON CONFLICT (user_id, application_id, notification_type, channel, event_key) DO NOTHING RETURNING id',
+      [
+        userId,
+        String(applicationId),
+        'Status Update',
+        'In-app',
+        company,
+        position,
+        'sent',
+        previousStatus || null,
+        newStatus || null,
+        eventKey,
+      ]
+    );
+
+    if (ownsTransaction) {
+      await db.query('COMMIT');
+    }
+
+    return result.rowCount > 0;
+  } catch (error) {
+    if (ownsTransaction) {
+      await db.query('ROLLBACK');
+    }
+    throw error;
+  } finally {
+    if (ownsTransaction) {
+      db.release();
+    }
+  }
+}
+
 async function replaceInterviewNotificationJobs(data) {
   const channels =
     normalizeNotificationChannels(
@@ -481,6 +596,7 @@ async function replaceInterviewNotificationJobs(data) {
     const jobs = [];
 
     for (const channel of channels) {
+      const eventKey = `interview:${data.userId}:${data.applicationId}:${channel}`;
       const result = await client.query(
         'INSERT INTO notification_jobs (' +
           'user_id, ' +
@@ -495,15 +611,16 @@ async function replaceInterviewNotificationJobs(data) {
           'interview_time, ' +
           'interview_at, ' +
           'application_link, ' +
-          'scheduled_for' +
+          'scheduled_for, ' +
+          'event_key' +
         ') ' +
         'VALUES (' +
           "$1, $2, 'Interview Reminder', $3, " +
           '$4, $5, $6, $7, $8, $9, $10, $11, ' +
-          'GREATEST($12::timestamptz, clock_timestamp())' +
+          'GREATEST($12::timestamptz, clock_timestamp()), $13' +
         ') ' +
         'ON CONFLICT (' +
-          'user_id, application_id, notification_type, channel' +
+          'user_id, application_id, notification_type, channel, event_key' +
         ') ' +
         'DO UPDATE SET ' +
           'recipient_email = EXCLUDED.recipient_email, ' +
@@ -519,6 +636,7 @@ async function replaceInterviewNotificationJobs(data) {
             'AND notification_jobs.interview_at = EXCLUDED.interview_at ' +
             'THEN notification_jobs.scheduled_for ' +
             'ELSE GREATEST(EXCLUDED.scheduled_for, clock_timestamp()) END, ' +
+          'event_key = EXCLUDED.event_key, ' +
           'read = CASE ' +
             "WHEN notification_jobs.status = 'sent' " +
             'AND notification_jobs.interview_at = EXCLUDED.interview_at ' +
@@ -562,6 +680,7 @@ async function replaceInterviewNotificationJobs(data) {
           data.interviewAt,
           data.applicationLink || null,
           reminderSchedule.scheduledAt,
+          eventKey,
         ]
       );
 
@@ -816,6 +935,7 @@ async function pruneExpiredNotificationJobs() {
   await pool.query(
     'DELETE FROM notification_jobs ' +
       "WHERE status IN ('pending', 'processing', 'sent', 'failed') " +
+      "AND notification_type <> 'Status Update' " +
       'AND (' +
         '(interview_at IS NULL AND scheduled_for < NOW()) ' +
         'OR interview_at <= NOW()' +
@@ -1031,6 +1151,7 @@ app.get(
         'DELETE FROM notification_jobs ' +
           'WHERE user_id = $1 ' +
           "AND channel = 'In-app' " +
+          "AND notification_type <> 'Status Update' " +
           "AND status <> 'cancelled' " +
           'AND (' +
             '(interview_at IS NULL AND scheduled_for < NOW()) ' +
@@ -1054,6 +1175,8 @@ app.get(
             'scheduled_for, ' +
             'read, ' +
             'status, ' +
+            'previous_status, ' +
+            'new_status, ' +
             'created_at ' +
           'FROM notification_jobs ' +
           'WHERE ' +
@@ -1061,7 +1184,8 @@ app.get(
             "AND channel = 'In-app' " +
             "AND status <> 'cancelled' " +
             'AND (' +
-              'scheduled_for >= NOW() ' +
+              "notification_type = 'Status Update' " +
+              'OR scheduled_for >= NOW() ' +
               'OR (' +
                 'interview_at > NOW() ' +
                 'AND (' +
@@ -1076,38 +1200,34 @@ app.get(
 
       const notifications =
         result.rows.map(function (notification) {
-          return {
-            id: String(notification.id),
-            title:
-              'Interview coming up at ' +
-              notification.company,
-            type:
-              notification.notification_type,
-            message:
-              notification.position +
+          const isStatusUpdate = notification.notification_type === 'Status Update';
+          const title = isStatusUpdate
+            ? 'Status update: ' + notification.company
+            : 'Interview coming up at ' + notification.company;
+          const message = isStatusUpdate
+            ? `Your ${notification.position} application status changed from ${notification.previous_status || 'Unknown'} to ${notification.new_status || 'Unknown'}.`
+            : notification.position +
               ' is scheduled for ' +
               notification.interview_date +
               ' at ' +
               String(
                 notification.interview_time
               ).slice(0, 5) +
-              '.',
-            date:
-              notification.interview_date,
-            interviewTime:
-              String(notification.interview_time).slice(0, 5),
-            interviewAt:
-              notification.interview_at,
-            scheduledFor:
-              notification.scheduled_for,
-            read:
-              notification.read,
-            applicationId:
-              notification.application_id,
-            applicationLink:
-              notification.application_link,
-            status:
-              notification.status,
+              '.';
+
+          return {
+            id: String(notification.id),
+            title: title,
+            type: notification.notification_type,
+            message: message,
+            date: notification.interview_date || notification.created_at,
+            interviewTime: notification.interview_time ? String(notification.interview_time).slice(0, 5) : undefined,
+            interviewAt: notification.interview_at,
+            scheduledFor: notification.scheduled_for,
+            read: notification.read,
+            applicationId: notification.application_id,
+            applicationLink: notification.application_link,
+            status: notification.status,
           };
         });
 

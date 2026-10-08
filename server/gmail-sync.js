@@ -262,6 +262,52 @@ function createGmailSyncService({
     };
   }
 
+  async function createStatusChangeNotification({
+    client,
+    userId,
+    applicationId,
+    company,
+    position,
+    previousStatus,
+    newStatus,
+    gmailMessageId,
+  }) {
+    const eventKey = `status-change:${applicationId}:${gmailMessageId || Date.now()}`;
+    const result = await client.query(
+      'INSERT INTO notification_jobs (' +
+        'user_id, ' +
+        'application_id, ' +
+        'notification_type, ' +
+        'channel, ' +
+        'company, ' +
+        'position, ' +
+        'application_link, ' +
+        'scheduled_for, ' +
+        'status, ' +
+        'read, ' +
+        'previous_status, ' +
+        'new_status, ' +
+        'event_key' +
+      ') VALUES (' +
+        '$1, $2, $3, $4, $5, $6, NULL, NOW(), $7, FALSE, $8, $9, $10' +
+      ') ON CONFLICT (user_id, application_id, notification_type, channel, event_key) DO NOTHING RETURNING id',
+      [
+        userId,
+        String(applicationId),
+        'Status Update',
+        'In-app',
+        company,
+        position,
+        'sent',
+        previousStatus || null,
+        newStatus || null,
+        eventKey,
+      ]
+    );
+
+    return result.rowCount > 0;
+  }
+
   async function recordMessage(connection, email, classification, match, interviewDetails) {
     const client = await pool.connect();
     try {
@@ -433,6 +479,19 @@ function createGmailSyncService({
         application: updatedApplication,
         client,
       });
+
+      if (application.status !== classification.status) {
+        await createStatusChangeNotification({
+          client,
+          userId: connection.user_id,
+          applicationId: application.id,
+          company: updatedApplication.company,
+          position: updatedApplication.position,
+          previousStatus: application.status,
+          newStatus: classification.status,
+          gmailMessageId: email.id,
+        });
+      }
 
       await client.query(
         "UPDATE gmail_processed_messages SET outcome = 'updated', application_id = $2, previous_status = $3, new_status = $4, processed_at = NOW() WHERE id = $1",
