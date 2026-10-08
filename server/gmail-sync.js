@@ -23,6 +23,15 @@ const QUOTA_COOLDOWN_BASE_SECONDS = 60;
 const QUOTA_COOLDOWN_MAX_SECONDS = 3600;
 const DEFAULT_GMAIL_REQUEST_TIMEOUT_MS = 30000;
 const MAX_GMAIL_REQUEST_TIMEOUT_MS = 120000;
+const UNCLASSIFIED_EMAIL_REVIEW_REASON = 'No supported application status rule matched.';
+const IGNORED_MESSAGE_REPROCESS_DAYS = 30;
+const IGNORED_MESSAGE_REPROCESS_LIMIT = 25;
+
+function isRetryableIgnoredMessage(message) {
+  return message?.outcome === 'ignored' &&
+    !message.detected_status &&
+    message.review_reason === UNCLASSIFIED_EMAIL_REVIEW_REASON;
+}
 
 function getGmailRequestTimeoutMs(env) {
   const configuredTimeout = Number(env.GMAIL_SYNC_REQUEST_TIMEOUT_MS);
@@ -344,16 +353,15 @@ function createGmailSyncService({
             'WHERE connection_id = $1 AND gmail_message_id = $2 FOR UPDATE',
           [connection.id, email.id]
         );
-          const existingMessage = existing.rows[0];
-          const canReprocessIgnored = existingMessage?.outcome === 'ignored' &&
-            !existingMessage.detected_status &&
-            existingMessage.review_reason === 'No supported application status rule matched.';
-          if (!existingMessage || (existingMessage.outcome !== 'review' && !canReprocessIgnored)) {
+        const existingMessage = existing.rows[0];
+        if (!existingMessage || (
+          existingMessage.outcome !== 'review' && !isRetryableIgnoredMessage(existingMessage)
+        )) {
           await client.query('ROLLBACK');
           return 'duplicate';
         }
 
-          messageRowId = existingMessage.id;
+        messageRowId = existingMessage.id;
         await client.query(
           'UPDATE gmail_processed_messages SET ' +
             'sender = $2, subject = $3, received_at = $4, detected_status = $5, ' +
@@ -517,10 +525,9 @@ function createGmailSyncService({
       [connection.id, messageId]
     );
     const existingMessage = existing.rows[0];
-    const canReprocessIgnored = existingMessage?.outcome === 'ignored' &&
-      !existingMessage.detected_status &&
-      existingMessage.review_reason === 'No supported application status rule matched.';
-    if (existingMessage && existingMessage.outcome !== 'review' && !canReprocessIgnored) return 'duplicate';
+    if (existingMessage && existingMessage.outcome !== 'review' && !isRetryableIgnoredMessage(existingMessage)) {
+      return 'duplicate';
+    }
 
     const email = await fetchMessage(gmail, messageId);
     if (!email) return 'ignored';
@@ -795,7 +802,7 @@ function createGmailSyncService({
           try {
             syncResult = await syncHistory(connection, gmail);
           } catch (error) {
-            if (error.code !== 404 && error.response?.status !== 404) throw error;
+            if (getGmailErrorStatus(error) !== 404) throw error;
             const profile = (await withQuotaRetry(() => withGmailRequestTimeout(
               (requestOptions) => gmail.users.getProfile({ userId: 'me', ...requestOptions }),
               'Gmail profile fetch'
@@ -820,10 +827,15 @@ function createGmailSyncService({
               'WHERE connection_id = $1 ' +
                 "AND outcome = 'ignored' " +
                 'AND detected_status IS NULL ' +
-                "AND review_reason = 'No supported application status rule matched.' " +
-                "AND received_at >= NOW() - INTERVAL '30 days' " +
-              'ORDER BY received_at DESC LIMIT 25',
-            [connection.id]
+                'AND review_reason = $2 ' +
+                "AND received_at >= NOW() - ($3::int * INTERVAL '1 day') " +
+              'ORDER BY received_at DESC LIMIT $4',
+            [
+              connection.id,
+              UNCLASSIFIED_EMAIL_REVIEW_REASON,
+              IGNORED_MESSAGE_REPROCESS_DAYS,
+              IGNORED_MESSAGE_REPROCESS_LIMIT,
+            ]
           );
           if (ignoredMessages.rows.length) {
             const retryBatch = await processMessagesIndividually(
@@ -834,7 +846,6 @@ function createGmailSyncService({
             syncResult.processed += ignoredMessages.rows.length;
             syncResult.outcomes.push(...retryBatch.outcomes);
             syncResult.warnings.push(...retryBatch.warnings);
-            syncResult.warningsPersisted = syncResult.warningsPersisted && retryBatch.warningsPersisted;
           }
         }
 

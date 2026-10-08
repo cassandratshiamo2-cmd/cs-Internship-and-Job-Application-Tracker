@@ -19,6 +19,7 @@ function createTestService({
   failLockAcquisition = false,
   requestTimeoutMs = 30000,
   messageGet,
+  messageList,
   parseMessage,
   applications = [],
   existingMessages = [],
@@ -29,12 +30,16 @@ function createTestService({
   const calls = {
     profile: 0,
     history: 0,
+    list: 0,
     get: 0,
     delays: [],
     unlocks: 0,
     releases: 0,
     discardedClients: 0,
     applicationUpdates: 0,
+    historyResets: 0,
+    historyCursorUpdates: [],
+    initialSyncCursorUpdates: [],
     notifications: [],
     oauthTimeout: null,
     lockQueryTimeouts: [],
@@ -98,7 +103,7 @@ function createTestService({
       if (sql.startsWith('SELECT gmail_message_id FROM gmail_processed_messages')) {
         const rows = Array.from(processedRows.entries())
           .filter(([, row]) => row.outcome === 'ignored' && !row.detectedStatus &&
-            row.reviewReason === 'No supported application status rule matched.')
+            row.reviewReason === params[1])
           .map(([gmailMessageId]) => ({ gmail_message_id: gmailMessageId }));
         return { rowCount: rows.length, rows };
       }
@@ -108,6 +113,22 @@ function createTestService({
       if (sql.startsWith('UPDATE gmail_connections SET quota_failure_count')) {
         coolingDown = cooldownAfterQuota;
         return { rowCount: 1, rows: [{ retry_after_seconds: 60 }] };
+      }
+      if (sql.startsWith('UPDATE gmail_connections SET history_id = NULL')) {
+        calls.historyResets += 1;
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.startsWith('UPDATE gmail_connections SET initial_sync_history_id = $2')) {
+        calls.initialSyncCursorUpdates.push(params[1]);
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.startsWith('UPDATE gmail_connections SET initial_sync_page_token = $2')) {
+        calls.initialSyncCursorUpdates.push(params[2]);
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.startsWith('UPDATE gmail_connections SET history_id = $2, last_sync_at')) {
+        calls.historyCursorUpdates.push(params[1]);
+        return { rowCount: 1, rows: [] };
       }
       if (sql.startsWith('UPDATE gmail_connections')) {
         return { rowCount: 1, rows: [] };
@@ -292,6 +313,10 @@ function createTestService({
             },
           },
           messages: {
+            list: async (options) => {
+              calls.list += 1;
+              return messageList ? messageList(options) : { data: { messages: [] } };
+            },
             get: async ({ id }) => {
               calls.get += 1;
               return messageGet ? messageGet(id) : { data: {} };
@@ -486,12 +511,33 @@ test('a hanging Gmail request times out, releases its lock, and recovers on retr
   assert.equal(timedOutSignal.aborted, true);
   assert.equal(calls.oauthTimeout, 10);
   assert.deepEqual(calls.lockQueryTimeouts, [10, 10]);
+  assert.deepEqual(calls.historyCursorUpdates, []);
   assert.equal(isLockHeld(), false);
 
   const retryResult = await service.syncConnection(7);
   assert.equal(retryResult.inProgress, undefined);
   assert.equal(historyAttempts, 2);
   assert.equal(isLockHeld(), false);
+  assert.deepEqual(calls.historyCursorUpdates, ['history-after-timeout']);
+});
+
+test('an expired Gmail history cursor resets and falls back to initial message sync', async () => {
+  const { calls, service } = createTestService({
+    historyList: async () => {
+      const error = new Error('History ID is too old');
+      error.response = { status: 404 };
+      throw error;
+    },
+    messageList: async () => ({ data: { messages: [] } }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.equal(calls.historyResets, 1);
+  assert.equal(calls.profile, 1);
+  assert.equal(calls.list, 1);
+  assert.equal(result.initialSyncComplete, true);
+  assert.deepEqual(calls.initialSyncCursorUpdates, ['initial-history', 'initial-history']);
 });
 
 test('scenario 13: malformed message records a warning and the next valid email still applies', async () => {
@@ -898,6 +944,11 @@ test('Hitech rejection email with a misspelling updates the matching application
     new_status: 'Rejected',
     event_key: 'status-change:78:hitech-rejection',
   }]);
+
+  const retryResult = await service.syncConnection(7, { reprocessIgnored: true });
+  assert.deepEqual(retryResult.outcomes, []);
+  assert.equal(calls.get, 1);
+  assert.equal(calls.notifications.length, 1);
 });
 
 test('a Gmail API authentication failure remains fatal and releases the connection lock', async () => {

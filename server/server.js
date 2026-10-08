@@ -182,6 +182,20 @@ async function ensureDatabase() {
   );
 
   await pool.query(
+    'DO $$ ' +
+      'DECLARE legacy_constraint RECORD; ' +
+      'BEGIN ' +
+        'FOR legacy_constraint IN ' +
+          "SELECT conname FROM pg_constraint WHERE conrelid = 'notification_jobs'::regclass " +
+            "AND contype = 'u' " +
+            "AND pg_get_constraintdef(oid) = 'UNIQUE (user_id, application_id, notification_type, channel)' " +
+        'LOOP ' +
+          "EXECUTE format('ALTER TABLE notification_jobs DROP CONSTRAINT %I', legacy_constraint.conname); " +
+        'END LOOP; ' +
+      'END $$'
+  );
+
+  await pool.query(
     'CREATE UNIQUE INDEX IF NOT EXISTS notification_jobs_event_key_unique_idx ' +
       'ON notification_jobs (user_id, application_id, notification_type, channel, event_key)'
   );
