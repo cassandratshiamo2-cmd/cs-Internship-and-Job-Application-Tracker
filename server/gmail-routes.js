@@ -126,7 +126,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
 
   router.post('/sync', authenticateRequest, async (req, res) => {
     try {
-      const result = await syncService.syncUser(req.user.id);
+      const result = await syncService.syncUser(req.user.id, { reprocessIgnored: true });
       if (result.quotaLimited) {
         const retryAfterSeconds = Math.max(1, Number(result.retryAfterSeconds || 60));
         res.set('Retry-After', String(retryAfterSeconds));

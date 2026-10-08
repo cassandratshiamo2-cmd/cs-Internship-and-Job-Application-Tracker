@@ -1202,10 +1202,10 @@ app.get(
         result.rows.map(function (notification) {
           const isStatusUpdate = notification.notification_type === 'Status Update';
           const title = isStatusUpdate
-            ? 'Status update: ' + notification.company
+            ? 'Application Status Changed'
             : 'Interview coming up at ' + notification.company;
           const message = isStatusUpdate
-            ? `Your ${notification.position} application status changed from ${notification.previous_status || 'Unknown'} to ${notification.new_status || 'Unknown'}.`
+            ? `${notification.company} — ${notification.position}\nYour application status changed from ${notification.previous_status || 'Unknown'} to ${notification.new_status || 'Unknown'}.`
             : notification.position +
               ' is scheduled for ' +
               notification.interview_date +

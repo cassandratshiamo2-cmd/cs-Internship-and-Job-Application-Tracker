@@ -10,6 +10,7 @@ const STATUS_RULES = [
       /application.{0,20}rejected/i,
       /not progressing/i,
       /we have decided not to/i,
+      /decided not to carry o(?:n)? with your application/i,
     ],
   },
   {

@@ -340,16 +340,20 @@ function createGmailSyncService({
       let messageRowId;
       if (inserted.rowCount === 0) {
         const existing = await client.query(
-          'SELECT id, outcome FROM gmail_processed_messages ' +
+          'SELECT id, outcome, detected_status, review_reason FROM gmail_processed_messages ' +
             'WHERE connection_id = $1 AND gmail_message_id = $2 FOR UPDATE',
           [connection.id, email.id]
         );
-        if (!existing.rows[0] || existing.rows[0].outcome !== 'review') {
+          const existingMessage = existing.rows[0];
+          const canReprocessIgnored = existingMessage?.outcome === 'ignored' &&
+            !existingMessage.detected_status &&
+            existingMessage.review_reason === 'No supported application status rule matched.';
+          if (!existingMessage || (existingMessage.outcome !== 'review' && !canReprocessIgnored)) {
           await client.query('ROLLBACK');
           return 'duplicate';
         }
 
-        messageRowId = existing.rows[0].id;
+          messageRowId = existingMessage.id;
         await client.query(
           'UPDATE gmail_processed_messages SET ' +
             'sender = $2, subject = $3, received_at = $4, detected_status = $5, ' +
@@ -509,10 +513,14 @@ function createGmailSyncService({
 
   async function processMessage(connection, gmail, messageId) {
     const existing = await pool.query(
-      'SELECT outcome FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
+      'SELECT outcome, detected_status, review_reason FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
       [connection.id, messageId]
     );
-    if (existing.rowCount > 0 && existing.rows[0]?.outcome !== 'review') return 'duplicate';
+    const existingMessage = existing.rows[0];
+    const canReprocessIgnored = existingMessage?.outcome === 'ignored' &&
+      !existingMessage.detected_status &&
+      existingMessage.review_reason === 'No supported application status rule matched.';
+    if (existingMessage && existingMessage.outcome !== 'review' && !canReprocessIgnored) return 'duplicate';
 
     const email = await fetchMessage(gmail, messageId);
     if (!email) return 'ignored';
@@ -727,7 +735,7 @@ function createGmailSyncService({
     };
   }
 
-  async function syncConnection(connectionId) {
+  async function syncConnection(connectionId, { reprocessIgnored = false } = {}) {
     let lockClient;
     let hasLock = false;
     let lockAcquisitionAttempted = false;
@@ -803,6 +811,30 @@ function createGmailSyncService({
               initial_sync_history_id: null,
               initial_sync_page_token: null,
             }, gmail, profile);
+          }
+        }
+
+        if (reprocessIgnored) {
+          const ignoredMessages = await pool.query(
+            'SELECT gmail_message_id FROM gmail_processed_messages ' +
+              'WHERE connection_id = $1 ' +
+                "AND outcome = 'ignored' " +
+                'AND detected_status IS NULL ' +
+                "AND review_reason = 'No supported application status rule matched.' " +
+                "AND received_at >= NOW() - INTERVAL '30 days' " +
+              'ORDER BY received_at DESC LIMIT 25',
+            [connection.id]
+          );
+          if (ignoredMessages.rows.length) {
+            const retryBatch = await processMessagesIndividually(
+              connection,
+              gmail,
+              ignoredMessages.rows.map((row) => row.gmail_message_id)
+            );
+            syncResult.processed += ignoredMessages.rows.length;
+            syncResult.outcomes.push(...retryBatch.outcomes);
+            syncResult.warnings.push(...retryBatch.warnings);
+            syncResult.warningsPersisted = syncResult.warningsPersisted && retryBatch.warningsPersisted;
           }
         }
 
@@ -889,7 +921,7 @@ function createGmailSyncService({
     }
   }
 
-  async function syncUser(userId) {
+  async function syncUser(userId, options) {
     const result = await pool.query(
       'SELECT id FROM gmail_connections WHERE user_id = $1 AND is_connected = TRUE',
       [userId]
@@ -899,7 +931,7 @@ function createGmailSyncService({
       error.code = 'GMAIL_NOT_CONNECTED';
       throw error;
     }
-    return syncConnection(result.rows[0].id);
+    return syncConnection(result.rows[0].id, options);
   }
 
   async function syncAllConnected() {

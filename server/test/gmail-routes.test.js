@@ -82,11 +82,14 @@ test('manual sync returns a retryable response for Gmail quota cooldowns', async
 });
 
 test('manual sync reports an existing per-user sync without starting another', async (t) => {
+  let syncOptions;
   const baseUrl = await withGmailReviewServer(t, {
     message: {},
     application: {},
     syncService: {
-      async syncUser() {
+      async syncUser(userId, options) {
+        assert.equal(userId, 7);
+        syncOptions = options;
         return { inProgress: true, processed: 0 };
       },
     },
@@ -98,6 +101,7 @@ test('manual sync reports an existing per-user sync without starting another', a
   assert.equal(response.status, 200);
   assert.equal(payload.inProgress, true);
   assert.equal(payload.processed, 0);
+  assert.deepEqual(syncOptions, { reprocessIgnored: true });
 });
 
 test('review endpoint fills an already-Interview application and schedules its complete in-app reminder', async (t) => {

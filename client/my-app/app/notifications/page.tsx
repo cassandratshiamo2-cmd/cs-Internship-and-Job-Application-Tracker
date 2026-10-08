@@ -147,7 +147,7 @@ export default function NotificationsPage() {
                     ) : null}
                   </div>
                   <p className="text-lg font-semibold text-slate-800">{notification.title}</p>
-                  <p className="mt-1 text-sm text-slate-600">{formatNotificationMessage(notification.message)}</p>
+                  <p className="mt-1 whitespace-pre-line text-sm text-slate-600">{formatNotificationMessage(notification.message)}</p>
                 </div>
                 <div className="flex shrink-0 flex-col items-start gap-2 sm:items-end">
                   <p className="text-xs font-medium text-slate-500">

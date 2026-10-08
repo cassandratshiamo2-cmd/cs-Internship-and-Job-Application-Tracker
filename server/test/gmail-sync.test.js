@@ -21,6 +21,7 @@ function createTestService({
   messageGet,
   parseMessage,
   applications = [],
+  existingMessages = [],
   scheduleInterviewReminder,
   wait = async () => {},
   random = () => 0.5,
@@ -45,6 +46,14 @@ function createTestService({
     processedRows.set('already-processed', {
       id: 99,
       outcome: typeof existingMessage === 'string' ? existingMessage : 'updated',
+    });
+  }
+  for (const message of existingMessages) {
+    processedRows.set(message.messageId, {
+      id: message.id,
+      outcome: message.outcome,
+      detectedStatus: message.detectedStatus || null,
+      reviewReason: message.reviewReason || null,
     });
   }
   const connection = {
@@ -75,12 +84,23 @@ function createTestService({
           rows: coolingDown ? [{ retry_after_seconds: 90 }] : [],
         };
       }
-      if (sql.startsWith('SELECT outcome FROM gmail_processed_messages')) {
+      if (sql.startsWith('SELECT outcome, detected_status')) {
         const row = processedRows.get(String(params[1]));
         return {
           rowCount: row ? 1 : 0,
-          rows: row ? [{ outcome: row.outcome }] : [],
+          rows: row ? [{
+            outcome: row.outcome,
+            detected_status: row.detectedStatus,
+            review_reason: row.reviewReason,
+          }] : [],
         };
+      }
+      if (sql.startsWith('SELECT gmail_message_id FROM gmail_processed_messages')) {
+        const rows = Array.from(processedRows.entries())
+          .filter(([, row]) => row.outcome === 'ignored' && !row.detectedStatus &&
+            row.reviewReason === 'No supported application status rule matched.')
+          .map(([gmailMessageId]) => ({ gmail_message_id: gmailMessageId }));
+        return { rowCount: rows.length, rows };
       }
       if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
         return { rowCount: applications.length, rows: applications };
@@ -178,13 +198,22 @@ function createTestService({
             });
             return { rowCount: 1, rows: [{ id }] };
           }
-          if (sql.startsWith('SELECT id, outcome FROM gmail_processed_messages')) {
+          if (sql.startsWith('SELECT id, outcome')) {
             const row = processedRows.get(String(params[1]));
-            return { rowCount: row ? 1 : 0, rows: row ? [row] : [] };
+            return { rowCount: row ? 1 : 0, rows: row ? [{
+              id: row.id,
+              outcome: row.outcome,
+              detected_status: row.detectedStatus,
+              review_reason: row.reviewReason,
+            }] : [] };
           }
           if (sql.startsWith('UPDATE gmail_processed_messages SET sender =')) {
             const row = Array.from(processedRows.values()).find((item) => item.id === params[0]);
-            if (row) row.outcome = 'processing';
+            if (row) {
+              row.outcome = 'processing';
+              row.detectedStatus = params[4];
+              row.reviewReason = null;
+            }
             return { rowCount: 1, rows: [] };
           }
           if (sql.startsWith('SELECT id, company, position, status, updated_at, interview_date')) {
@@ -791,6 +820,86 @@ test('Shoprite outcome email matches Cashier and records Interview to Rejected i
   assert.equal(calls.applicationUpdates, 1);
 });
 
+test('Hitech rejection email with a misspelling updates the matching application and creates an unread notification', async () => {
+  const application = {
+    id: 78,
+    company: 'Hitech',
+    position: 'Juniour developer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const subject = 'Responds to an application made';
+  const raw = Buffer.from([
+    'From: Tshiamo Malefo <tshiamomalefo0@gmail.com>',
+    'To: applyflow@example.com',
+    `Subject: ${subject}`,
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Dear Cassandra',
+    '',
+    'After a serious competition of large numbers of applicants we unfortunately decided not to carry o with your application',
+    '',
+    'Best of luch with your career',
+    '',
+    'Kind regards',
+    '',
+    'Hitech recruiment team',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    existingMessages: [{
+      id: 88,
+      messageId: 'hitech-rejection',
+      outcome: 'ignored',
+      reviewReason: 'No supported application status rule matched.',
+    }],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-hitech-rejection',
+        history: [],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'hitech-rejection-thread',
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7, { reprocessIgnored: true });
+  const historyRow = processedRows.get('hitech-rejection');
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(historyRow.detectedStatus, 'Rejected');
+  assert.equal(historyRow.outcome, 'updated');
+  assert.equal(application.status, 'Rejected');
+  assert.equal(calls.applicationUpdates, 1);
+  assert.deepEqual(calls.notifications, [{
+    id: 1,
+    user_id: 4,
+    application_id: '78',
+    notification_type: 'Status Update',
+    channel: 'In-app',
+    company: 'Hitech',
+    position: 'Juniour developer',
+    status: 'sent',
+    read: false,
+    previous_status: 'Applied',
+    new_status: 'Rejected',
+    event_key: 'status-change:78:hitech-rejection',
+  }]);
+});
+
 test('a Gmail API authentication failure remains fatal and releases the connection lock', async () => {
   const { service, isLockHeld, calls } = createTestService({
     historyList: async () => ({
@@ -909,7 +1018,7 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
     async query(sql) {
       if (sql.startsWith('SELECT * FROM gmail_connections')) return { rowCount: 1, rows: [connection] };
       if (sql.startsWith('SELECT CEIL(EXTRACT(EPOCH FROM (quota_backoff_until')) return { rowCount: 0, rows: [] };
-      if (sql.startsWith('SELECT outcome FROM gmail_processed_messages')) return { rowCount: 0, rows: [] };
+      if (sql.startsWith('SELECT outcome, detected_status')) return { rowCount: 0, rows: [] };
       if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
         return { rowCount: 1, rows: [application] };
       }
