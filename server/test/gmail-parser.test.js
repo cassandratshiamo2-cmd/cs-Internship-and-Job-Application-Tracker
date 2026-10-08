@@ -31,6 +31,50 @@ test('does not classify unrelated email content', () => {
   );
 });
 
+test('scenario 8: generic Pnet job recommendations are ignored, not review actions', () => {
+  const email = {
+    from: 'alerts@pnet.co.za',
+    subject: 'Pnet Job Alert: Interview opportunities',
+    text: 'We regret to inform you about a recommended role. 6 other companies are looking for candidates like you.',
+  };
+
+  const classification = classifyApplicationEmail(email);
+  assert.equal(classification.status, null);
+  assert.equal(classification.ignored, true);
+});
+
+test('scenario 9: LinkedIn job alerts are ignored, not review actions', () => {
+  const email = {
+    from: 'jobs-noreply@linkedin.com',
+    subject: 'LinkedIn Job Alerts',
+    text: 'You have been shortlisted for these recommended roles.',
+  };
+
+  const classification = classifyApplicationEmail(email);
+  assert.equal(classification.status, null);
+  assert.equal(classification.ignored, true);
+});
+
+test('ignores newsletters and generic multi-company job recommendations', () => {
+  for (const email of [
+    { subject: 'Weekly careers newsletter', text: 'Interview invitation stories and job openings.' },
+    { subject: 'Werkie and 6 other companies are looking for candidates like you', text: 'Your profile matches these roles.' },
+  ]) {
+    assert.equal(classifyApplicationEmail(email).status, null);
+    assert.equal(classifyApplicationEmail(email).ignored, true);
+  }
+});
+
+test('does not suppress a transactional interview email from a job platform', () => {
+  const email = {
+    from: 'recruiter@linkedin.com',
+    subject: 'Interview invitation for your Shoprite application',
+    text: 'Shoprite invites you to an interview for the Cashier position.',
+  };
+
+  assert.equal(classifyApplicationEmail(email).status, 'Interview');
+});
+
 test('extracts a clearly associated date and time in supported formats', () => {
   const examples = [
     ['Your interview is scheduled for 15 October 2026 at 10:00.', '2026-10-15', '10:00'],

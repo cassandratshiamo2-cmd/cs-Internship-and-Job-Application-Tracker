@@ -2,6 +2,14 @@ const STOP_WORDS = new Set([
   'and', 'at', 'for', 'inc', 'job', 'jobs', 'ltd', 'limited', 'of', 'the',
   'company', 'corporation', 'corp', 'group', 'pty', 'llc', 'plc',
 ]);
+const ROLE_WORD_ALIASES = {
+  dev: 'developer',
+  eng: 'engineer',
+  jnr: 'junior',
+  jr: 'junior',
+  snr: 'senior',
+  sr: 'senior',
+};
 
 function normalizeText(value) {
   return String(value || '')
@@ -18,9 +26,20 @@ function meaningfulWords(value) {
     .filter((word) => word.length > 2 && !STOP_WORDS.has(word));
 }
 
+function normalizeRoleText(value) {
+  return normalizeText(value)
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => ROLE_WORD_ALIASES[word] || word)
+    .join(' ');
+}
+
 function senderDomain(from) {
   const address = String(from || '').match(/[a-z0-9._%+-]+@([a-z0-9.-]+\.[a-z]{2,})/i);
-  return address ? normalizeText(address[1].split('.').slice(0, -1).join(' ')) : '';
+  if (!address) return '';
+  const domain = address[1].toLowerCase();
+  if (/\b(?:gmail|googlemail|outlook|hotmail|yahoo|live|linkedin|pnet)\./i.test(domain)) return '';
+  return normalizeText(domain.split('.').slice(0, -1).join(' '));
 }
 
 function exactPhraseRanges(normalizedText, phrase) {
@@ -57,57 +76,59 @@ function companyMatchIsOnlyNested(application, applications, normalizedMessage) 
 }
 
 function scoreApplicationMatch(email, application) {
-  const normalizedMessage = normalizeText(
-    `${email.subject || ''} ${email.text || ''} ${email.from || ''}`
-  );
+  const normalizedSubject = normalizeText(email.subject || '');
+  const normalizedBody = normalizeText(email.text || '');
+  const normalizedMessage = `${normalizedSubject} ${normalizedBody}`.trim();
+  const normalizedRoleMessage = normalizeRoleText(`${email.subject || ''} ${email.text || ''}`);
   const company = normalizeText(application.company);
   const companyWords = meaningfulWords(application.company);
-  const domain = senderDomain(email.from);
-  const companyTextMatch = Boolean(company && exactPhraseRanges(normalizedMessage, company).length);
-  const companyWordMatches = companyWords.filter((word) => normalizedMessage.includes(word));
-  const domainMatch = companyWords.some((word) => domain.includes(word));
-  const position = normalizeText(application.position);
+  const domainWords = meaningfulWords(senderDomain(email.from));
+  const companySubjectMatch = Boolean(company && exactPhraseRanges(normalizedSubject, company).length);
+  const companyBodyMatch = Boolean(company && exactPhraseRanges(normalizedBody, company).length);
+  const companyTextMatch = companySubjectMatch || companyBodyMatch;
+  const messageWords = new Set(normalizedMessage.split(/\s+/).filter(Boolean));
+  const companyWordMatches = companyWords.filter((word) => messageWords.has(word));
+  const companyWordRatio = companyWords.length
+    ? companyWordMatches.length / companyWords.length
+    : 0;
+  const domainMatch = companyWords.some((word) => domainWords.includes(word));
+  const position = normalizeRoleText(application.position);
   const positionWords = meaningfulWords(application.position);
-  const exactPositionMatch = Boolean(position && normalizedMessage.includes(position));
-  const matchedPositionWords = positionWords.filter((word) => normalizedMessage.includes(word));
+  const exactPositionMatch = Boolean(position && exactPhraseRanges(normalizedRoleMessage, position).length);
+  const roleMessageWords = new Set(normalizedRoleMessage.split(/\s+/).filter(Boolean));
+  const matchedPositionWords = positionWords.filter((word) => roleMessageWords.has(ROLE_WORD_ALIASES[word] || word));
   const positionRatio = positionWords.length
     ? matchedPositionWords.length / positionWords.length
     : 0;
   const positionMatch = exactPositionMatch || (positionWords.length > 0 && positionRatio >= 0.6);
-
-  if (!companyTextMatch && companyWordMatches.length === 0 && !domainMatch) {
-    return { score: 0, companyMatch: false, positionMatch: false };
-  }
-
-  if (positionWords.length >= 2 && positionRatio === 0 && !exactPositionMatch) {
-    return { score: 0, companyMatch: true, positionMatch: false };
-  }
-
-  const companyPhraseScore = companyTextMatch
-    ? 0.75 + Math.min(Math.max(companyWords.length - 1, 0) * 0.05, 0.15)
-    : companyWordMatches.length
-      ? 0.3
-      : 0;
-  const score =
-    companyPhraseScore +
-    (domainMatch ? 0.35 : 0) +
-    (exactPositionMatch ? 0.4 : positionMatch ? 0.25 : 0);
+  const companyEvidence = companySubjectMatch
+    ? 0.79
+    : companyBodyMatch
+      ? 0.72
+      : companyWordRatio >= 0.75
+        ? 0.58
+        : companyWordMatches.length
+          ? 0.25
+          : 0;
+  const senderEvidence = domainMatch ? (companyTextMatch ? 0.04 : 0.75) : 0;
+  const positionEvidence = exactPositionMatch ? 0.28 : positionMatch ? 0.14 : 0;
+  const score = Math.min(companyEvidence + senderEvidence + positionEvidence, 1);
 
   return {
     score: Math.min(score, 1),
     companyMatch: companyTextMatch || companyWordMatches.length > 0 || domainMatch,
+    companySubjectMatch,
+    companyBodyMatch,
     positionMatch,
+    exactPositionMatch,
   };
 }
 
 function matchApplication(email, applications, options = {}) {
-  const minimumConfidence = options.minimumConfidence ?? 0.75;
+  const minimumConfidence = options.minimumConfidence ?? 0.72;
   const minimumGap = options.minimumGap ?? 0.2;
-  const normalizedMessage = normalizeText(
-    `${email.subject || ''} ${email.text || ''} ${email.from || ''}`
-  );
-  const sourceText = `${email.subject || ''} ${email.text || ''}`;
-  const hasExplicitRoleContext = /\b(?:interview|position|role|job title)\b/i.test(sourceText);
+  const normalizedMessage = normalizeText(`${email.subject || ''} ${email.text || ''}`);
+  const normalizedSubject = normalizeText(email.subject || '');
   const candidates = applications
     .map((application) => {
       const match = scoreApplicationMatch(email, application);
@@ -116,40 +137,31 @@ function matchApplication(email, applications, options = {}) {
         applications,
         normalizedMessage
       );
-      const company = normalizeText(application.company);
-      const hasExactCompanyPhrase = exactPhraseRanges(normalizedMessage, company).length > 0;
-      const exactSubjectCompanyMatch = exactPhraseRanges(
-        normalizeText(email.subject || ''),
-        company
-      ).length > 0;
-      const companyWords = meaningfulWords(application.company);
-      const companyOnlyConfidence =
-        0.75 + Math.min(Math.max(companyWords.length - 1, 0) * 0.05, 0.15);
-      const score = shadowedCompanyMatch
-        ? 0
-        : match.score || (hasExactCompanyPhrase && !hasExplicitRoleContext
-          ? companyOnlyConfidence
-          : exactSubjectCompanyMatch
-            ? companyOnlyConfidence
-            : 0);
+      const sameCompanyApplications = applications.filter((candidate) =>
+        normalizeText(candidate.company) === normalizeText(application.company)
+      );
+      const requiresRoleEvidence =
+        sameCompanyApplications.length > 1 &&
+        !match.exactPositionMatch;
+      const requiresPositionMatch = options.requirePositionMatch && !match.positionMatch;
+      const score = shadowedCompanyMatch || requiresRoleEvidence || requiresPositionMatch ? 0 : match.score;
       return {
         application,
         ...match,
         score,
-        rankingScore: score + (exactSubjectCompanyMatch ? 0.3 : 0),
       };
     })
     .filter((candidate) => candidate.score > 0)
-    .sort((left, right) => right.rankingScore - left.rankingScore);
+    .sort((left, right) => right.score - left.score);
 
   const top = candidates[0];
   const next = candidates[1];
-  const unique = !next || top.rankingScore - next.rankingScore >= minimumGap;
+  const unique = !next || top.score - next.score >= minimumGap;
   const genericMultiCompanyAlert = /\band\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|several|many)\s+(?:other|more)\s+companies\b/i.test(
     `${email.subject || ''} ${email.text || ''}`
   );
 
-  if (top && top.score >= minimumConfidence && unique && !genericMultiCompanyAlert) {
+  if (top && top.score >= minimumConfidence && unique && (!genericMultiCompanyAlert || options.allowMultiCompanyAlert)) {
     return {
       outcome: 'matched',
       application: top.application,
@@ -181,53 +193,101 @@ function canAdvanceStatus(currentStatus, nextStatus) {
   return STATUS_TRANSITIONS[currentStatus]?.has(nextStatus) || false;
 }
 
-function getEmailUpdateDecision({
+const STATUS_ORDER = {
+  Saved: 0,
+  Applied: 1,
+  Assessment: 2,
+  Shortlisted: 3,
+  Interview: 4,
+  Offer: 5,
+  Rejected: 5,
+  Withdrawn: 6,
+};
+
+function decideApplicationEmailUpdate({
   currentStatus,
-  nextStatus,
+  detectedStatus,
   updatedAt,
   receivedAt,
-  interviewDetailsToFill,
+  interviewDetailsDetected = false,
+  interviewDetailsChanged = false,
+  manual = false,
 }) {
-  const canCompleteExistingInterview = Boolean(
-    currentStatus === 'Interview' &&
-    nextStatus === 'Interview' &&
-    (interviewDetailsToFill?.interviewDate ||
-      interviewDetailsToFill?.interviewTime ||
-      interviewDetailsToFill?.interviewType)
+  if (!detectedStatus) {
+    return {
+      action: 'ignore',
+      applyStatus: false,
+      applyInterviewDetails: false,
+      alreadyUpToDate: false,
+      requiresReview: false,
+      isBackward: false,
+      isStale: false,
+      reason: 'No supported application status was detected.',
+    };
+  }
+
+  if (currentStatus === detectedStatus) {
+    const applyInterviewDetails = Boolean(
+      detectedStatus === 'Interview' &&
+      interviewDetailsDetected &&
+      interviewDetailsChanged
+    );
+    return {
+      action: applyInterviewDetails ? 'apply' : 'already_up_to_date',
+      applyStatus: false,
+      applyInterviewDetails,
+      alreadyUpToDate: !applyInterviewDetails,
+      requiresReview: false,
+      isBackward: false,
+      isStale: false,
+      reason: null,
+    };
+  }
+
+  const allowedTransition = canAdvanceStatus(currentStatus, detectedStatus);
+  const isBackward = !allowedTransition &&
+    STATUS_ORDER[detectedStatus] !== undefined &&
+    STATUS_ORDER[currentStatus] !== undefined &&
+    STATUS_ORDER[detectedStatus] < STATUS_ORDER[currentStatus];
+  const isStale = Boolean(
+    !manual &&
+    updatedAt &&
+    receivedAt &&
+    new Date(updatedAt).getTime() > new Date(receivedAt).getTime()
   );
-  const statusTransitionAllowed =
-    canAdvanceStatus(currentStatus, nextStatus) || canCompleteExistingInterview;
-  const emailIsStale = new Date(updatedAt).getTime() > new Date(receivedAt).getTime();
+
+  if (!allowedTransition || isStale) {
+    return {
+      action: 'manual_review',
+      applyStatus: false,
+      applyInterviewDetails: false,
+      alreadyUpToDate: false,
+      requiresReview: true,
+      isBackward,
+      isStale,
+      reason: isBackward
+        ? 'The email would move the application to an earlier status.'
+        : isStale
+          ? 'The application was updated after this email arrived.'
+          : 'The status transition is not allowed.',
+    };
+  }
 
   return {
-    allowed: statusTransitionAllowed && (!emailIsStale || canCompleteExistingInterview),
-    preserveStatus: canCompleteExistingInterview,
-  };
-}
-
-function getReviewedEmailUpdateDecision({
-  currentStatus,
-  nextStatus,
-  interviewDetailsToFill,
-}) {
-  const preserveStatus = Boolean(
-    currentStatus === 'Interview' &&
-    nextStatus === 'Interview' &&
-    (interviewDetailsToFill?.interviewDate ||
-      interviewDetailsToFill?.interviewTime ||
-      interviewDetailsToFill?.interviewType)
-  );
-
-  return {
-    allowed: canAdvanceStatus(currentStatus, nextStatus) || preserveStatus,
-    preserveStatus,
+    action: 'apply',
+    applyStatus: true,
+    applyInterviewDetails: detectedStatus === 'Interview' && interviewDetailsDetected,
+    alreadyUpToDate: false,
+    requiresReview: false,
+    isBackward: false,
+    isStale: false,
+    reason: null,
   };
 }
 
 module.exports = {
   canAdvanceStatus,
-  getEmailUpdateDecision,
-  getReviewedEmailUpdateDecision,
+  decideApplicationEmailUpdate,
   matchApplication,
   normalizeText,
   scoreApplicationMatch,

@@ -142,7 +142,7 @@ test('review endpoint fills an already-Interview application and schedules its c
   assert.equal(reminderCall.interviewTime, '10:00');
 });
 
-test('review endpoint still rejects an already-Interview application when the email has no new details', async (t) => {
+test('review endpoint marks an already-Interview application with no new details as up to date', async (t) => {
   const application = {
     id: 13,
     company: 'Test Company',
@@ -174,8 +174,8 @@ test('review endpoint still rejects an already-Interview application when the em
   });
   const payload = await response.json();
 
-  assert.equal(response.status, 409);
-  assert.equal(payload.message, 'This status would not advance the selected application.');
+  assert.equal(response.status, 200);
+  assert.equal(payload.message, 'Application is already up to date.');
   assert.equal(application.status, 'Interview');
   assert.equal(application.interview_date, null);
   assert.equal(application.interview_time, null);

@@ -7,7 +7,7 @@ const {
   getInterviewDetailsToFill,
   getInterviewDetailsToUpdate,
 } = require('./gmail-parser');
-const { getEmailUpdateDecision, matchApplication } = require('./gmail-matcher');
+const { decideApplicationEmailUpdate, matchApplication } = require('./gmail-matcher');
 const { createOAuthClient, decryptToken, encryptToken } = require('./gmail-oauth');
 const { scheduleInterviewReminderIfReady } = require('./gmail-interview');
 
@@ -34,7 +34,15 @@ function emailAddress(value) {
 }
 
 function getGmailErrorStatus(error) {
-  return Number(error?.response?.status || error?.status || error?.statusCode || 0);
+  return Number(
+    error?.response?.status ||
+    error?.status ||
+    error?.statusCode ||
+    error?.cause?.response?.status ||
+    error?.cause?.status ||
+    error?.cause?.statusCode ||
+    0
+  );
 }
 
 function getSafeSyncErrorDetails(error) {
@@ -58,10 +66,11 @@ function getSafeSyncErrorDetails(error) {
 }
 
 function getGmailErrorReasons(error) {
-  const responseError = error?.response?.data?.error;
+  const responseError = error?.response?.data?.error || error?.cause?.response?.data?.error;
   const errors = [
     ...(Array.isArray(error?.errors) ? error.errors : []),
     ...(Array.isArray(responseError?.errors) ? responseError.errors : []),
+    ...(Array.isArray(error?.cause?.errors) ? error.cause.errors : []),
   ];
   return errors.map((item) => String(item?.reason || '').toLowerCase());
 }
@@ -100,6 +109,7 @@ function createGmailSyncService({
   pool,
   scheduleInterviewReminder,
   env = process.env,
+  parseMessage = simpleParser,
   oauthClientFactory = createOAuthClient,
   gmailClientFactory = (auth) => google.gmail({ version: 'v1', auth }),
   wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
@@ -161,16 +171,36 @@ function createGmailSyncService({
   }
 
   async function fetchMessage(gmail, messageId) {
-    const result = await withQuotaRetry(() => gmail.users.messages.get({
-      userId: 'me',
-      id: messageId,
-      format: 'raw',
-    }));
+    let result;
+    try {
+      result = await withQuotaRetry(() => gmail.users.messages.get({
+        userId: 'me',
+        id: messageId,
+        format: 'raw',
+      }));
+    } catch (error) {
+      if (getGmailErrorStatus(error) === 404) {
+        const missingMessageError = new Error('Gmail message no longer exists.');
+        missingMessageError.code = 'GMAIL_MESSAGE_NOT_FOUND';
+        missingMessageError.cause = error;
+        throw missingMessageError;
+      }
+      error.gmailApiFailure = true;
+      throw error;
+    }
     if ((result.data.labelIds || []).includes('SENT')) return null;
     const raw = result.data.raw;
     if (!raw) return null;
 
-    const parsed = await simpleParser(Buffer.from(raw, 'base64url'));
+    let parsed;
+    try {
+      parsed = await parseMessage(Buffer.from(raw, 'base64url'));
+    } catch (error) {
+      const parseError = new Error('Gmail message MIME could not be parsed.');
+      parseError.code = 'GMAIL_MESSAGE_PARSE';
+      parseError.cause = error;
+      throw parseError;
+    }
     return {
       id: messageId,
       threadId: result.data.threadId || null,
@@ -250,8 +280,8 @@ function createGmailSyncService({
 
       if (!classification.status) {
         await client.query(
-          "UPDATE gmail_processed_messages SET outcome = 'ignored', review_reason = 'No supported application status rule matched.', processed_at = NOW() WHERE id = $1",
-          [messageRowId]
+          "UPDATE gmail_processed_messages SET outcome = 'ignored', review_reason = $2, processed_at = NOW() WHERE id = $1",
+          [messageRowId, classification.reason || 'No supported application status rule matched.']
         );
         await client.query('COMMIT');
         return 'ignored';
@@ -285,45 +315,42 @@ function createGmailSyncService({
         interviewDetails?.interviewTime ||
         interviewDetails?.interviewType
       );
-      const hasInterviewDetailsToFill = Boolean(
-        classification.status === 'Interview' &&
-        (
-          detailsToFill.interviewDate ||
-          detailsToFill.interviewTime ||
-          detailsToFill.interviewType ||
-          (isExistingInterview && interviewDetailsWereDetected)
-        )
+      const interviewDetailsChanged = Boolean(
+        detailsToFill.interviewDate || detailsToFill.interviewTime || detailsToFill.interviewType
       );
-      const updateDecision = application
-        ? getEmailUpdateDecision({
-            currentStatus: application.status,
-            nextStatus: classification.status,
-            updatedAt: application.updated_at,
-            receivedAt: email.receivedAt,
-            interviewDetailsToFill: hasInterviewDetailsToFill
-              ? (isExistingInterview ? interviewDetails : detailsToFill)
-              : null,
-          })
-        : { allowed: false, preserveStatus: false };
-      if (
-        !application ||
-        !updateDecision.allowed
-      ) {
+      const updateDecision = decideApplicationEmailUpdate({
+        currentStatus: application?.status,
+        detectedStatus: classification.status,
+        updatedAt: application?.updated_at,
+        receivedAt: email.receivedAt,
+        interviewDetailsDetected: interviewDetailsWereDetected,
+        interviewDetailsChanged,
+      });
+      if (updateDecision.action === 'manual_review' || !application) {
         await client.query(
-          "UPDATE gmail_processed_messages SET outcome = 'review', application_id = $2, review_reason = 'Application status is newer or does not permit this automatic transition.', processed_at = NOW() WHERE id = $1",
-          [messageRowId, application ? application.id : null]
+          'UPDATE gmail_processed_messages SET outcome = \'review\', application_id = $2, review_reason = $3, processed_at = NOW() WHERE id = $1',
+          [messageRowId, application ? application.id : null, updateDecision.reason || 'No confident application match was found.']
         );
         await client.query('COMMIT');
         return 'review';
       }
 
+      if (updateDecision.action === 'already_up_to_date') {
+        await client.query(
+          "UPDATE gmail_processed_messages SET outcome = 'updated', application_id = $2, previous_status = $3, new_status = $3, review_reason = NULL, processed_at = NOW() WHERE id = $1",
+          [messageRowId, application.id, application.status]
+        );
+        await client.query('COMMIT');
+        return 'already_up_to_date';
+      }
+
       const updated = await client.query(
-        'UPDATE applications SET status = CASE WHEN $8::boolean THEN status ELSE $3 END, updated_at = NOW() ' +
-          ', interview_date = CASE WHEN $8::boolean THEN COALESCE($6::date, interview_date) ELSE COALESCE(interview_date, $6::date) END, ' +
-          'interview_time = CASE WHEN $8::boolean THEN COALESCE($7::time, interview_time) ELSE COALESCE(interview_time, $7::time) END, ' +
-          'interview_type = CASE WHEN $8::boolean THEN COALESCE($9, interview_type) ELSE COALESCE(interview_type, $9) END ' +
+        'UPDATE applications SET status = CASE WHEN $8::boolean THEN $3 ELSE status END, updated_at = NOW() ' +
+          ', interview_date = CASE WHEN $10::boolean THEN COALESCE($6::date, interview_date) ELSE COALESCE(interview_date, $6::date) END, ' +
+          'interview_time = CASE WHEN $10::boolean THEN COALESCE($7::time, interview_time) ELSE COALESCE(interview_time, $7::time) END, ' +
+          'interview_type = CASE WHEN $10::boolean THEN COALESCE($9, interview_type) ELSE COALESCE(interview_type, $9) END ' +
           'WHERE id = $1 AND user_id = $2 AND status = $4 ' +
-          'AND (updated_at <= $5 OR $8::boolean) ' +
+          'AND (updated_at <= $5 OR NOT $8::boolean) ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
           'interview_time::text AS interview_time, interview_type, notification_channels, application_link, interview_email',
         [
@@ -334,8 +361,9 @@ function createGmailSyncService({
           email.receivedAt,
           classification.status === 'Interview' ? detailsToFill.interviewDate : null,
           classification.status === 'Interview' ? detailsToFill.interviewTime : null,
-          updateDecision.preserveStatus,
+          updateDecision.applyStatus,
           classification.status === 'Interview' ? detailsToFill.interviewType : null,
+          Boolean(updateDecision.applyInterviewDetails && isExistingInterview),
         ]
       );
 
@@ -373,10 +401,10 @@ function createGmailSyncService({
 
   async function processMessage(connection, gmail, messageId) {
     const existing = await pool.query(
-      'SELECT 1 FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
+      'SELECT outcome FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
       [connection.id, messageId]
     );
-    if (existing.rowCount > 0) return 'duplicate';
+    if (existing.rowCount > 0 && existing.rows[0]?.outcome !== 'review') return 'duplicate';
 
     const email = await fetchMessage(gmail, messageId);
     if (!email) return 'ignored';
@@ -385,24 +413,116 @@ function createGmailSyncService({
       return 'ignored';
     }
 
-    const classification = classifyApplicationEmail(email);
+    let classification;
+    try {
+      classification = classifyApplicationEmail(email);
+    } catch (error) {
+      const classificationError = new Error('Gmail message classification failed.');
+      classificationError.code = 'GMAIL_MESSAGE_CLASSIFY';
+      classificationError.cause = error;
+      throw classificationError;
+    }
+    const applications = classification.status || classification.ignored
+      ? (await pool.query(
+          'SELECT id, company, position, status, updated_at FROM applications WHERE user_id = $1',
+          [connection.user_id]
+        )).rows
+      : [];
+    let match = { outcome: 'ignored', candidateIds: [] };
+    if (classification.ignored && applications.length) {
+      const strongMatch = matchApplication(email, applications, {
+        minimumConfidence: 0.95,
+        requirePositionMatch: true,
+        allowMultiCompanyAlert: true,
+      });
+      const hasTransactionalApplicationContext =
+        /\b(?:your\s+(?:application|interview)|application\s+(?:status|update|for)|update\s+(?:on|about)\s+your\s+application)\b/i.test(
+          `${email.subject || ''}\n${email.text || ''}`
+        );
+      if (strongMatch.outcome === 'matched' && hasTransactionalApplicationContext) {
+        classification = classifyApplicationEmail(email, { allowGenericJobAlert: true });
+        match = classification.status ? strongMatch : { outcome: 'ignored', candidateIds: [] };
+      }
+    }
+
     const interviewDetails = classification.status === 'Interview'
       ? {
           ...extractInterviewDateTime(email),
           interviewType: extractInterviewType(email),
         }
       : null;
-    const applications = classification.status
-      ? (await pool.query(
-          'SELECT id, company, position, status, updated_at FROM applications WHERE user_id = $1',
-          [connection.user_id]
-        )).rows
-      : [];
-    const match = classification.status
-      ? matchApplication(email, applications)
-      : { outcome: 'ignored', candidateIds: [] };
+    if (classification.status) {
+      try {
+        match = matchApplication(email, applications);
+      } catch (error) {
+        const matchingError = new Error('Gmail message application matching failed.');
+        matchingError.code = 'GMAIL_MESSAGE_MATCH';
+        matchingError.cause = error;
+        throw matchingError;
+      }
+    }
 
     return recordMessage(connection, email, classification, match, interviewDetails);
+  }
+
+  async function recordMessageProcessingWarning(connection, messageId) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'INSERT INTO gmail_processed_messages (' +
+          'connection_id, user_id, gmail_message_id, sender, subject, received_at, ' +
+          'confidence, candidate_application_ids, outcome, review_reason, processed_at' +
+        ') VALUES ($1, $2, $3, \'\', \'\', NOW(), 0, \'[]\'::jsonb, \'review\', $4, NOW()) ' +
+        'ON CONFLICT (connection_id, gmail_message_id) DO NOTHING',
+        [
+          connection.id,
+          connection.user_id,
+          messageId,
+          'This email could not be processed automatically. Inspect the original email in Gmail.',
+        ]
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async function processMessagesIndividually(connection, gmail, messageIds) {
+    const outcomes = [];
+    const warnings = [];
+    let warningsPersisted = true;
+
+    for (const messageId of messageIds) {
+      try {
+        outcomes.push(await processMessage(connection, gmail, messageId));
+      } catch (error) {
+        if (
+          error.gmailApiFailure ||
+          isGmailQuotaError(error) ||
+          [401, 403].includes(getGmailErrorStatus(error)) ||
+          !['GMAIL_MESSAGE_NOT_FOUND', 'GMAIL_MESSAGE_PARSE', 'GMAIL_MESSAGE_CLASSIFY', 'GMAIL_MESSAGE_MATCH'].includes(error.code)
+        ) {
+          throw error;
+        }
+
+        console.warn('Gmail message processing warning:', getSafeSyncErrorDetails(error));
+        try {
+          await recordMessageProcessingWarning(connection, messageId);
+        } catch (warningError) {
+          warningsPersisted = false;
+          console.error('Gmail message warning could not be recorded:', getSafeSyncErrorDetails(warningError));
+        }
+        outcomes.push('warning');
+        warnings.push('An email could not be processed automatically.');
+      }
+    }
+
+    return { outcomes, warnings, warningsPersisted };
   }
 
   async function listInitialPage(gmail, pageToken) {
@@ -426,23 +546,28 @@ function createGmailSyncService({
     const response = await listInitialPage(gmail, connection.initial_sync_page_token);
     const messages = response.data.messages || [];
     const ids = messages.map((message) => message.id).filter(Boolean);
-    const outcomes = [];
-    for (const id of ids) {
-      outcomes.push(await processMessage(connection, gmail, id));
-    }
+    const batch = await processMessagesIndividually(connection, gmail, ids);
 
     const nextPageToken = response.data.nextPageToken || null;
-    await pool.query(
-      'UPDATE gmail_connections SET ' +
-        'initial_sync_page_token = $2, ' +
-        'initial_sync_history_id = CASE WHEN $2::text IS NULL THEN NULL ELSE initial_sync_history_id END, ' +
-        'history_id = CASE WHEN $2::text IS NULL THEN $3 ELSE history_id END, ' +
-        'last_sync_at = NOW(), last_sync_error = NULL, updated_at = NOW() ' +
-      'WHERE id = $1',
-      [connection.id, nextPageToken, startingHistoryId]
-    );
+    if (batch.warningsPersisted) {
+      await pool.query(
+        'UPDATE gmail_connections SET ' +
+          'initial_sync_page_token = $2, ' +
+          'initial_sync_history_id = CASE WHEN $2::text IS NULL THEN NULL ELSE initial_sync_history_id END, ' +
+          'history_id = CASE WHEN $2::text IS NULL THEN $3 ELSE history_id END, ' +
+          'last_sync_at = NOW(), last_sync_error = NULL, updated_at = NOW() ' +
+        'WHERE id = $1',
+        [connection.id, nextPageToken, startingHistoryId]
+      );
+    }
 
-    return { processed: ids.length, outcomes, initialSyncComplete: !nextPageToken };
+    return {
+      processed: ids.length,
+      outcomes: batch.outcomes,
+      warnings: batch.warnings,
+      initialSyncComplete: batch.warningsPersisted && !nextPageToken,
+      cursorRetained: !batch.warningsPersisted,
+    };
   }
 
   async function syncHistory(connection, gmail) {
@@ -468,17 +593,22 @@ function createGmailSyncService({
     } while (pageToken);
 
     const orderedIds = Array.from(ids);
-    const outcomes = [];
-    for (const id of orderedIds) {
-      outcomes.push(await processMessage(connection, gmail, id));
-    }
+    const batch = await processMessagesIndividually(connection, gmail, orderedIds);
 
-    await pool.query(
-      'UPDATE gmail_connections SET history_id = $2, last_sync_at = NOW(), ' +
-        'last_sync_error = NULL, updated_at = NOW() WHERE id = $1',
-      [connection.id, latestHistoryId]
-    );
-    return { processed: orderedIds.length, outcomes, initialSyncComplete: true };
+    if (batch.warningsPersisted) {
+      await pool.query(
+        'UPDATE gmail_connections SET history_id = $2, last_sync_at = NOW(), ' +
+          'last_sync_error = NULL, updated_at = NOW() WHERE id = $1',
+        [connection.id, latestHistoryId]
+      );
+    }
+    return {
+      processed: orderedIds.length,
+      outcomes: batch.outcomes,
+      warnings: batch.warnings,
+      initialSyncComplete: batch.warningsPersisted,
+      cursorRetained: !batch.warningsPersisted,
+    };
   }
 
   async function syncConnection(connectionId) {

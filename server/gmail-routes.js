@@ -1,8 +1,8 @@
 const express = require('express');
 const { google } = require('googleapis');
 const { getSafeSyncErrorDetails } = require('./gmail-sync');
-const { getInterviewDetailsToFill } = require('./gmail-parser');
-const { getReviewedEmailUpdateDecision } = require('./gmail-matcher');
+const { decideApplicationEmailUpdate } = require('./gmail-matcher');
+const { getInterviewDetailsToFill, getInterviewDetailsToUpdate } = require('./gmail-parser');
 const { scheduleInterviewReminderIfReady } = require('./gmail-interview');
 const {
   createAuthorizationUrl,
@@ -278,27 +278,46 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         await client.query('ROLLBACK');
         return res.status(404).json({ message: 'Application was not found.' });
       }
-      const detailsToFill = getInterviewDetailsToFill(application, {
+      const interviewDetails = {
         interviewDate: message.detected_interview_date,
         interviewTime: message.detected_interview_time,
         interviewType: message.detected_interview_type,
-      });
-      const updateDecision = getReviewedEmailUpdateDecision({
+      };
+      const isExistingInterview =
+        message.detected_status === 'Interview' && application.status === 'Interview';
+      const detailsToFill = isExistingInterview
+        ? getInterviewDetailsToUpdate(application, interviewDetails)
+        : getInterviewDetailsToFill(application, interviewDetails);
+      const updateDecision = decideApplicationEmailUpdate({
         currentStatus: application.status,
-        nextStatus: message.detected_status,
-        interviewDetailsToFill: detailsToFill,
+        detectedStatus: message.detected_status,
+        interviewDetailsDetected: Boolean(
+          interviewDetails.interviewDate || interviewDetails.interviewTime || interviewDetails.interviewType
+        ),
+        interviewDetailsChanged: Boolean(
+          detailsToFill.interviewDate || detailsToFill.interviewTime || detailsToFill.interviewType
+        ),
+        manual: true,
       });
-      if (!updateDecision.allowed) {
+      if (updateDecision.action === 'manual_review') {
         await client.query('ROLLBACK');
-        return res.status(409).json({ message: 'This status would not advance the selected application.' });
+        return res.status(409).json({ message: updateDecision.reason || 'This status would not advance the selected application.' });
+      }
+      if (updateDecision.action === 'already_up_to_date') {
+        await client.query(
+          "UPDATE gmail_processed_messages SET outcome = 'reviewed', application_id = $2, previous_status = $3, new_status = $3, processed_at = NOW() WHERE id = $1",
+          [message.id, applicationId, application.status]
+        );
+        await client.query('COMMIT');
+        return res.status(200).json({ message: 'Application is already up to date.' });
       }
 
       const updatedResult = await client.query(
         'UPDATE applications SET ' +
-          'status = CASE WHEN $5::boolean THEN status ELSE $3 END, ' +
-          'interview_date = COALESCE(interview_date, $4::date), ' +
-          'interview_time = COALESCE(interview_time, $6::time), ' +
-          'interview_type = COALESCE(interview_type, $7), ' +
+          'status = CASE WHEN $5::boolean THEN $3 ELSE status END, ' +
+          'interview_date = CASE WHEN $8::boolean THEN COALESCE($4::date, interview_date) ELSE COALESCE(interview_date, $4::date) END, ' +
+          'interview_time = CASE WHEN $8::boolean THEN COALESCE($6::time, interview_time) ELSE COALESCE(interview_time, $6::time) END, ' +
+          'interview_type = CASE WHEN $8::boolean THEN COALESCE($7, interview_type) ELSE COALESCE(interview_type, $7) END, ' +
           'updated_at = NOW() ' +
           'WHERE id = $1 AND user_id = $2 ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
@@ -308,9 +327,10 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           req.user.id,
           message.detected_status,
           detailsToFill.interviewDate,
-          updateDecision.preserveStatus,
+          updateDecision.applyStatus,
           detailsToFill.interviewTime,
           detailsToFill.interviewType,
+          Boolean(updateDecision.applyInterviewDetails && isExistingInterview),
         ]
       );
       await scheduleInterviewReminderIfReady({

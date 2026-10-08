@@ -63,7 +63,35 @@ const STATUS_RULES = [
   },
 ];
 
-function classifyApplicationEmail({ subject = '', text = '' }) {
+const GENERIC_JOB_ALERT_PATTERNS = [
+  /\b(?:pnet|linkedin)\b[^\n]{0,50}\bjob alerts?\b/i,
+  /\b(?:job alerts?|linkedin job recommendations?)\b/i,
+  /\b\d+\s+(?:other\s+)?companies are looking for candidates like you\b/i,
+  /\b(?:jobs|roles|opportunities) (?:you may be interested in|recommended for you|matching your profile)\b/i,
+  /\b(?:weekly|monthly)\s+(?:job|career|vacancy)?\s*newsletter\b/i,
+  /\bnewsletter\b/i,
+];
+
+function isGenericJobAlert({ subject = '', text = '', from = '' }) {
+  const searchable = `${subject}\n${text}`.slice(0, 100000);
+  if (GENERIC_JOB_ALERT_PATTERNS.some((pattern) => pattern.test(searchable))) return true;
+
+  const senderIsJobPlatform = /\b(?:pnet|linkedin)\b/i.test(String(from));
+  return senderIsJobPlatform &&
+    /\b(?:recommended|recommendations|job matches|jobs for you|candidates like you|profile match)\b/i.test(searchable);
+}
+
+function classifyApplicationEmail({ subject = '', text = '', from = '' }, { allowGenericJobAlert = false } = {}) {
+  if (!allowGenericJobAlert && isGenericJobAlert({ subject, text, from })) {
+    return {
+      status: null,
+      confidence: 0,
+      matchedRule: null,
+      ignored: true,
+      reason: 'Generic job alert or newsletter.',
+    };
+  }
+
   const searchableText = `${subject}\n${text}`.slice(0, 100000);
 
   for (const rule of STATUS_RULES) {
@@ -333,6 +361,7 @@ function extractInterviewDateTime({ subject = '', text = '' }) {
 
 module.exports = {
   classifyApplicationEmail,
+  isGenericJobAlert,
   extractInterviewDateTime,
   extractInterviewType,
   getInterviewDetailsToFill,

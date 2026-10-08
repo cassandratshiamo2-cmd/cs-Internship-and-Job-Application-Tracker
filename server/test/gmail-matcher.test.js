@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { canAdvanceStatus, getEmailUpdateDecision, matchApplication } = require('../gmail-matcher');
+const { canAdvanceStatus, decideApplicationEmailUpdate, matchApplication } = require('../gmail-matcher');
 const {
   classifyApplicationEmail,
   extractInterviewDateTime,
@@ -13,7 +13,7 @@ const applications = [
   { id: '12', company: 'Acme Technology', position: 'Data Analyst Intern', status: 'Applied' },
 ];
 
-test('matches a unique employer and role confidently', () => {
+test('scenario 10: exact company and position match uniquely and confidently', () => {
   const result = matchApplication({
     from: 'recruiting@acme.com',
     subject: 'Interview invitation: Junior Software Engineer',
@@ -22,6 +22,20 @@ test('matches a unique employer and role confidently', () => {
 
   assert.equal(result.outcome, 'matched');
   assert.equal(result.application.id, '11');
+});
+
+test('matches punctuation variants and abbreviated position titles using exact tokens', () => {
+  const result = matchApplication({
+    from: 'careers@acme.com',
+    subject: 'Interview invitation - ACME, Inc. - Sr. Software Engineer',
+    text: 'Acme Inc. invites you to interview for the Sr Software Engineer position.',
+  }, [
+    { id: '16', company: 'Acme, Inc.', position: 'Senior Software Engineer', status: 'Applied' },
+    { id: '17', company: 'Acme Inc', position: 'Junior Software Engineer', status: 'Applied' },
+  ]);
+
+  assert.equal(result.outcome, 'matched');
+  assert.equal(result.application.id, '16');
 });
 
 test('queues an email when multiple applications at the same company are plausible', () => {
@@ -53,6 +67,49 @@ test('only permits forward status transitions', () => {
   assert.equal(canAdvanceStatus('Withdrawn', 'Applied'), false);
 });
 
+const transitionScenarios = [
+  ['scenario 1: Applied to Interview applies status and details', 'Applied', 'Interview', true, true, 'apply', true, false],
+  ['scenario 2: Applied to Rejected applies status', 'Applied', 'Rejected', false, false, 'apply', true, false],
+  ['scenario 3: Shortlisted to Interview applies status and details', 'Shortlisted', 'Interview', true, true, 'apply', true, false],
+  ['scenario 4: Interview to Offer applies the forward status', 'Interview', 'Offer', false, false, 'apply', true, false],
+  ['scenario 5: Interview to Interview applies changed details and preserves status', 'Interview', 'Interview', true, true, 'apply', false, false],
+  ['scenario 6: Rejected to Interview requires review as backward', 'Rejected', 'Interview', true, true, 'manual_review', false, true],
+  ['scenario 7: Offer to Interview requires review as backward', 'Offer', 'Interview', true, true, 'manual_review', false, true],
+];
+
+for (const [name, currentStatus, detectedStatus, detailsDetected, detailsChanged, action, applyStatus, isBackward] of transitionScenarios) {
+  test(name, () => {
+    const decision = decideApplicationEmailUpdate({
+      currentStatus,
+      detectedStatus,
+      updatedAt: new Date('2026-10-07T08:00:00Z'),
+      receivedAt: new Date('2026-10-08T08:00:00Z'),
+      interviewDetailsDetected: detailsDetected,
+      interviewDetailsChanged: detailsChanged,
+    });
+
+    assert.equal(decision.action, action);
+    assert.equal(decision.applyStatus, applyStatus);
+    assert.equal(decision.isBackward, isBackward);
+    if (currentStatus === 'Interview' && detectedStatus === 'Interview' && action === 'apply') {
+      assert.equal(decision.applyInterviewDetails, true);
+    }
+  });
+}
+
+test('scenario 5 repeat with no changed interview details is already up to date', () => {
+  const decision = decideApplicationEmailUpdate({
+    currentStatus: 'Interview',
+    detectedStatus: 'Interview',
+    interviewDetailsDetected: true,
+    interviewDetailsChanged: false,
+  });
+
+  assert.equal(decision.action, 'already_up_to_date');
+  assert.equal(decision.alreadyUpToDate, true);
+  assert.equal(decision.requiresReview, false);
+});
+
 test('fills a missing schedule on an existing Interview application without changing its status', () => {
   const email = {
     subject: 'Interview Invitation- Test Company',
@@ -71,40 +128,44 @@ test('fills a missing schedule on an existing Interview application without chan
   const match = matchApplication(email, [application]);
   const extracted = extractInterviewDateTime(email);
   const fieldsToFill = getInterviewDetailsToFill(application, extracted);
-  const decision = getEmailUpdateDecision({
+  const decision = decideApplicationEmailUpdate({
     currentStatus: application.status,
-    nextStatus: classification.status,
+    detectedStatus: classification.status,
     updatedAt: application.updated_at,
     receivedAt: new Date('2026-10-07T10:00:00Z'),
-    interviewDetailsToFill: fieldsToFill,
+    interviewDetailsDetected: true,
+    interviewDetailsChanged: true,
   });
 
   assert.equal(classification.status, 'Interview');
   assert.equal(match.outcome, 'matched');
   assert.equal(match.application.id, application.id);
   assert.deepEqual(fieldsToFill, { interviewDate: '2026-10-15', interviewTime: '10:00', interviewType: null });
-  assert.deepEqual(decision, { allowed: true, preserveStatus: true });
+  assert.equal(decision.action, 'apply');
+  assert.equal(decision.applyStatus, false);
+  assert.equal(decision.applyInterviewDetails, true);
   assert.equal(application.status, 'Interview');
 });
 
 test('does not relax stale-email or status transition safety for other statuses', () => {
-  const staleAppliedUpdate = getEmailUpdateDecision({
+  const staleAppliedUpdate = decideApplicationEmailUpdate({
     currentStatus: 'Applied',
-    nextStatus: 'Interview',
+    detectedStatus: 'Interview',
     updatedAt: new Date('2026-10-07T11:00:00Z'),
     receivedAt: new Date('2026-10-07T10:00:00Z'),
     interviewDetailsToFill: { interviewDate: '2026-10-15', interviewTime: '10:00' },
   });
-  const interviewWithoutDetails = getEmailUpdateDecision({
+  const interviewWithoutDetails = decideApplicationEmailUpdate({
     currentStatus: 'Interview',
-    nextStatus: 'Interview',
+    detectedStatus: 'Interview',
     updatedAt: new Date('2026-10-07T09:00:00Z'),
     receivedAt: new Date('2026-10-07T10:00:00Z'),
     interviewDetailsToFill: { interviewDate: null, interviewTime: null },
   });
 
-  assert.deepEqual(staleAppliedUpdate, { allowed: false, preserveStatus: false });
-  assert.deepEqual(interviewWithoutDetails, { allowed: false, preserveStatus: false });
+  assert.equal(staleAppliedUpdate.action, 'manual_review');
+  assert.equal(staleAppliedUpdate.isStale, true);
+  assert.equal(interviewWithoutDetails.action, 'already_up_to_date');
 });
 
 test('prefers an exact longer company name over a shorter nested application name', () => {
@@ -119,9 +180,9 @@ test('prefers an exact longer company name over a shorter nested application nam
   ];
   const classification = classifyApplicationEmail(email);
   const match = matchApplication(email, applications);
-  const decision = getEmailUpdateDecision({
+  const decision = decideApplicationEmailUpdate({
     currentStatus: match.application.status,
-    nextStatus: classification.status,
+    detectedStatus: classification.status,
     updatedAt: new Date('2026-10-06T09:00:00Z'),
     receivedAt: new Date('2026-10-07T09:00:00Z'),
   });
@@ -131,10 +192,10 @@ test('prefers an exact longer company name over a shorter nested application nam
   assert.equal(match.application.id, '22');
   assert.ok(match.confidence >= 0.75);
   assert.deepEqual(match.candidateIds, ['22']);
-  assert.equal(decision.allowed, true);
+  assert.equal(decision.action, 'apply');
 });
 
-test('subject exact company match beats unrelated exact company phrases in the email body', () => {
+test('requires review when the subject and body name different plausible companies', () => {
   const email = {
     subject: 'Rejected Test Company - Application Outcome',
     text: 'We regret to inform you about the outcome of your application. The position is no longer available. Valterra Platinum.',
@@ -147,18 +208,11 @@ test('subject exact company match beats unrelated exact company phrases in the e
   ];
   const classification = classifyApplicationEmail(email);
   const match = matchApplication(email, applications);
-  const decision = getEmailUpdateDecision({
-    currentStatus: match.application.status,
-    nextStatus: classification.status,
-    updatedAt: new Date('2026-10-06T09:00:00Z'),
-    receivedAt: new Date('2026-10-07T09:00:00Z'),
-  });
 
   assert.equal(classification.status, 'Rejected');
-  assert.equal(match.outcome, 'matched');
-  assert.equal(match.application.id, '23');
-  assert.equal(match.confidence, 0.8);
-  assert.equal(decision.allowed, true);
+  assert.equal(match.outcome, 'review');
+  assert.equal(match.application, null);
+  assert.deepEqual(match.candidateIds, ['23', '22']);
 });
 
 test('keeps a shorter company as a candidate when it is separately mentioned', () => {
@@ -172,10 +226,10 @@ test('keeps a shorter company as a candidate when it is separately mentioned', (
   ]);
 
   assert.equal(result.outcome, 'review');
-  assert.deepEqual(result.candidateIds, ['23', '21']);
+  assert.deepEqual(result.candidateIds, ['21', '23']);
 });
 
-test('keeps emails that explicitly name multiple applications in review', () => {
+test('scenario 11: multiple named company matches require manual review', () => {
   const result = matchApplication({
     subject: 'Application update for Acme Technology and Beta Systems',
     text: 'Both companies have sent an application update.',
@@ -233,9 +287,9 @@ test('exact company matching does not bypass terminal status transition protecti
   };
   const classification = classifyApplicationEmail(email);
   const match = matchApplication(email, [application]);
-  const decision = getEmailUpdateDecision({
+  const decision = decideApplicationEmailUpdate({
     currentStatus: application.status,
-    nextStatus: classification.status,
+    detectedStatus: classification.status,
     updatedAt: new Date('2026-10-06T09:00:00Z'),
     receivedAt: new Date('2026-10-07T09:00:00Z'),
   });
@@ -243,7 +297,7 @@ test('exact company matching does not bypass terminal status transition protecti
   assert.equal(match.outcome, 'matched');
   assert.equal(match.application.id, application.id);
   assert.equal(classification.status, 'Rejected');
-  assert.equal(decision.allowed, false);
+  assert.equal(decision.action, 'manual_review');
 });
 
 test('matches the Shoprite interview invitation and fills status, date, and time', () => {
@@ -269,17 +323,19 @@ test('matches the Shoprite interview invitation and fills status, date, and time
     interviewType: extractInterviewType(email),
   };
   const detailsToFill = getInterviewDetailsToFill(application, interviewDetails);
-  const decision = getEmailUpdateDecision({
+  const decision = decideApplicationEmailUpdate({
     currentStatus: application.status,
-    nextStatus: classification.status,
+    detectedStatus: classification.status,
     updatedAt: application.updated_at,
     receivedAt: new Date('2026-10-08T08:00:00Z'),
-    interviewDetailsToFill: detailsToFill,
+    interviewDetailsDetected: true,
+    interviewDetailsChanged: true,
   });
 
   assert.equal(match.outcome, 'matched');
   assert.equal(match.application.id, '42');
-  assert.equal(decision.allowed, true);
+  assert.equal(decision.action, 'apply');
+  assert.equal(decision.applyStatus, true);
   assert.equal(classification.status, 'Interview');
   assert.deepEqual(detailsToFill, {
     interviewDate: '2026-10-09',
