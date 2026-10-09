@@ -5,9 +5,11 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const { createApplicationRouter } = require('./application-routes');
 const { createGmailRouter } = require('./gmail-routes');
 const { createNotificationRouter } = require('./notification-routes');
 const { createGmailSyncService, startGmailSyncWorker } = require('./gmail-sync');
+const { ensureNotificationJobDeliverable } = require('./notification-job-guard');
 const {
   calculateInterviewReminderSchedule,
   interviewDateTimeToInstant,
@@ -873,6 +875,10 @@ async function markNotificationJobFailed(
 
 async function processNotificationJob(job) {
   try {
+    if (!await ensureNotificationJobDeliverable(pool, job)) {
+      return;
+    }
+
     let result;
 
     if (job.channel === 'Email') {
@@ -1592,43 +1598,9 @@ app.put(
   }
 );
 
-app.delete(
-  '/api/applications/:id',
-  authenticateRequest,
-  async function (req, res) {
-    const applicationId = Number(req.params.id);
-
-    if (!Number.isInteger(applicationId) || applicationId <= 0) {
-      return res.status(400).json({
-        message: 'A valid application ID is required.',
-      });
-    }
-
-    try {
-      const result = await pool.query(
-        'DELETE FROM applications ' +
-        'WHERE id = $1 AND user_id = $2 ' +
-        'RETURNING id',
-        [applicationId, req.user.id]
-      );
-
-      if (result.rowCount === 0) {
-        return res.status(404).json({
-          message: 'Application not found.',
-        });
-      }
-
-      return res.status(200).json({
-        message: 'Application deleted successfully.',
-        deleted: true,
-      });
-    } catch (error) {
-      console.error('Deleting application failed:', error.message);
-      return res.status(500).json({
-        message: 'Unable to delete application.',
-      });
-    }
-  }
+app.use(
+  '/api/applications',
+  createApplicationRouter({ pool, authenticateRequest })
 );
 
 app.post(
