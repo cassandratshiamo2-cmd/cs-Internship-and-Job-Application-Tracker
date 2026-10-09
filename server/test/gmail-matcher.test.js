@@ -150,6 +150,38 @@ test('scenario 5 repeat with no changed interview details is already up to date'
   assert.equal(decision.requiresReview, false);
 });
 
+test('a stale same-status interview email cannot update changed interview details', () => {
+  const decision = decideApplicationEmailUpdate({
+    currentStatus: 'Interview',
+    detectedStatus: 'Interview',
+    updatedAt: new Date('2026-10-08T09:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+    interviewDetailsDetected: true,
+    interviewDetailsChanged: true,
+  });
+
+  assert.equal(decision.action, 'manual_review');
+  assert.equal(decision.applyInterviewDetails, false);
+  assert.equal(decision.isStale, true);
+  assert.match(decision.reason, /updated after this email/i);
+});
+
+test('a newer same-status interview email can update changed interview details', () => {
+  const decision = decideApplicationEmailUpdate({
+    currentStatus: 'Interview',
+    detectedStatus: 'Interview',
+    updatedAt: new Date('2026-10-08T07:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+    interviewDetailsDetected: true,
+    interviewDetailsChanged: true,
+  });
+
+  assert.equal(decision.action, 'apply');
+  assert.equal(decision.applyStatus, false);
+  assert.equal(decision.applyInterviewDetails, true);
+  assert.equal(decision.isStale, false);
+});
+
 test('fills a missing schedule on an existing Interview application without changing its status', () => {
   const email = {
     subject: 'Interview Invitation- Test Company',
@@ -160,7 +192,7 @@ test('fills a missing schedule on an existing Interview application without chan
     company: 'Test Company',
     position: 'Software Developer',
     status: 'Interview',
-    updated_at: new Date('2026-10-07T11:00:00Z'),
+    updated_at: new Date('2026-10-07T09:00:00Z'),
     interview_date: null,
     interview_time: null,
   };
@@ -211,7 +243,7 @@ test('does not relax stale-email or status transition safety for other statuses'
 test('prefers an exact longer company name over a shorter nested application name', () => {
   const email = {
     subject: 'Application Update - Rejected Test Company',
-    text: '',
+    text: 'We regret to inform you that your application was not selected.',
     from: '',
   };
   const applications = [
@@ -316,7 +348,7 @@ test('does not auto-match a status keyword when no company can be identified', (
 test('exact company matching does not bypass terminal status transition protection', () => {
   const email = {
     subject: 'Application Update - Rejected Test Company',
-    text: 'Your application status has changed.',
+    text: 'We regret to inform you that your application was not selected.',
     from: '',
   };
   const application = {

@@ -5,6 +5,7 @@ const {
   createGmailSyncService,
   getRetryAfterMs,
   isGmailQuotaError,
+  startGmailSyncWorker,
 } = require('../gmail-sync');
 const { encryptToken } = require('../gmail-oauth');
 
@@ -26,6 +27,10 @@ function createTestService({
   scheduleInterviewReminder,
   wait = async () => {},
   random = () => 0.5,
+  leaseStore = new Map(),
+  scheduleLeaseRenewal,
+  cancelLeaseRenewal,
+  failLeaseRenewal = false,
 } = {}) {
   const calls = {
     profile: 0,
@@ -38,11 +43,14 @@ function createTestService({
     discardedClients: 0,
     applicationUpdates: 0,
     historyResets: 0,
+    leaseRenewals: 0,
     historyCursorUpdates: [],
     initialSyncCursorUpdates: [],
     notifications: [],
     oauthTimeout: null,
     lockQueryTimeouts: [],
+    connectionUpdates: [],
+    locks: 0,
   };
   const processedRows = new Map();
   let nextProcessedId = 100;
@@ -73,7 +81,7 @@ function createTestService({
     initial_sync_history_id: null,
     initial_sync_page_token: null,
   };
-  let lockHeld = false;
+  const heldLocks = leaseStore;
   let coolingDown = false;
   let shouldFailUnlock = failUnlock;
   let shouldReturnFalseOnUnlock = unlockReturnsFalse;
@@ -81,8 +89,72 @@ function createTestService({
 
   const pool = {
     async query(sql, params = []) {
+      if (sql.startsWith('INSERT INTO gmail_sync_leases')) {
+        calls.locks += 1;
+        const [lockKey, ownerToken] = params;
+        const currentLease = heldLocks.get(lockKey);
+        if (shouldFailLockAcquisition) {
+          shouldFailLockAcquisition = false;
+          heldLocks.set(lockKey, { ownerToken, expiresAt: Date.now() + 180000 });
+          throw new Error('Synthetic sync lease acquisition response failure');
+        }
+        if (currentLease && currentLease.expiresAt > Date.now()) {
+          return { rowCount: 0, rows: [] };
+        }
+        heldLocks.set(lockKey, { ownerToken, expiresAt: Date.now() + 180000 });
+        return { rowCount: 1, rows: [{ owner_token: ownerToken }] };
+      }
+      if (sql.startsWith('UPDATE gmail_sync_leases SET')) {
+        calls.leaseRenewals += 1;
+        if (failLeaseRenewal) {
+          failLeaseRenewal = false;
+          throw new Error('Synthetic sync lease renewal failure');
+        }
+        const lease = heldLocks.get(params[0]);
+        if (!lease || lease.ownerToken !== params[1] || lease.expiresAt <= Date.now()) {
+          return { rowCount: 0, rows: [] };
+        }
+        lease.expiresAt = Date.now() + 180000;
+        return { rowCount: 1, rows: [{ owner_token: params[1] }] };
+      }
+      if (sql.startsWith('DELETE FROM gmail_sync_leases')) {
+        calls.unlocks += 1;
+        if (shouldFailUnlock) {
+          shouldFailUnlock = false;
+          throw new Error('Synthetic sync lease release failure');
+        }
+        if (shouldReturnFalseOnUnlock) {
+          shouldReturnFalseOnUnlock = false;
+          return { rowCount: 0, rows: [] };
+        }
+        const lease = heldLocks.get(params[0]);
+        if (!lease || lease.ownerToken !== params[1]) return { rowCount: 0, rows: [] };
+        heldLocks.delete(params[0]);
+        return { rowCount: 1, rows: [{ lock_key: params[0] }] };
+      }
+      if (sql.startsWith('SELECT id FROM gmail_connections WHERE is_connected = TRUE ORDER BY id')) {
+        return { rowCount: 1, rows: [{ id: connection.id }] };
+      }
       if (sql.startsWith('SELECT * FROM gmail_connections')) {
         return { rowCount: 1, rows: [connection] };
+      }
+      if (sql.startsWith('SELECT message.id, message.gmail_message_id')) {
+        const entry = Array.from(processedRows.entries())
+          .find(([, row]) => row.id === params[0]);
+        if (!entry || params[1] !== connection.user_id) return { rowCount: 0, rows: [] };
+        const [gmailMessageId, row] = entry;
+        return {
+          rowCount: 1,
+          rows: [{
+            id: row.id,
+            gmail_message_id: gmailMessageId,
+            outcome: row.outcome,
+            detected_status: row.detectedStatus,
+            review_reason: row.reviewReason,
+            reprocess_version: row.reprocessVersion || 0,
+            connection_id: connection.id,
+          }],
+        };
       }
       if (sql.startsWith('SELECT CEIL(EXTRACT(EPOCH FROM (quota_backoff_until')) {
         return {
@@ -113,6 +185,7 @@ function createTestService({
         return { rowCount: applications.length, rows: applications };
       }
       if (sql.startsWith('UPDATE gmail_connections SET quota_failure_count')) {
+        calls.connectionUpdates.push(sql);
         coolingDown = cooldownAfterQuota;
         return { rowCount: 1, rows: [{ retry_after_seconds: 60 }] };
       }
@@ -133,40 +206,19 @@ function createTestService({
         return { rowCount: 1, rows: [] };
       }
       if (sql.startsWith('UPDATE gmail_connections')) {
+        calls.connectionUpdates.push(sql);
         return { rowCount: 1, rows: [] };
       }
       throw new Error(`Unexpected pool query: ${sql}`);
     },
     async connect() {
+      let ownedLockKey;
       return {
         async query(query, params = []) {
           const sql = typeof query === 'string' ? query : query.text;
           if (typeof query !== 'string') {
             params = query.values || [];
             calls.lockQueryTimeouts.push(query.query_timeout);
-          }
-          if (sql.includes('pg_try_advisory_lock')) {
-            if (shouldFailLockAcquisition) {
-              shouldFailLockAcquisition = false;
-              lockHeld = true;
-              throw new Error('Synthetic advisory lock acquisition response failure');
-            }
-            const acquired = !lockHeld;
-            if (acquired) lockHeld = true;
-            return { rowCount: 1, rows: [{ acquired }] };
-          }
-          if (sql.includes('pg_advisory_unlock')) {
-            calls.unlocks += 1;
-            if (shouldFailUnlock) {
-              shouldFailUnlock = false;
-              throw new Error('Synthetic advisory unlock failure');
-            }
-            if (shouldReturnFalseOnUnlock) {
-              shouldReturnFalseOnUnlock = false;
-              return { rowCount: 1, rows: [{ pg_advisory_unlock: false }] };
-            }
-            lockHeld = false;
-            return { rowCount: 1, rows: [{ pg_advisory_unlock: true }] };
           }
           if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rowCount: 1, rows: [] };
           if (sql.startsWith('INSERT INTO notification_jobs')) {
@@ -237,7 +289,7 @@ function createTestService({
               row.outcome = 'processing';
               row.detectedStatus = params[4];
               row.reviewReason = null;
-              if (params[10]) row.reprocessVersion = params[11];
+              if (params[10]) row.reprocessVersion = (row.reprocessVersion || 0) + 1;
             }
             return { rowCount: 1, rows: [] };
           }
@@ -276,7 +328,7 @@ function createTestService({
           calls.releases += 1;
           if (error) {
             calls.discardedClients += 1;
-            lockHeld = false;
+            if (ownedLockKey) heldLocks.delete(ownedLockKey);
           }
         },
       };
@@ -339,9 +391,26 @@ function createTestService({
       await wait(milliseconds);
     },
     random,
+    scheduleLeaseRenewal,
+    cancelLeaseRenewal,
   });
 
-  return { calls, service, isLockHeld: () => lockHeld, processedRows };
+  return {
+    calls,
+    service,
+    isLockHeld: (lockKey = 'connection:7') => {
+      const lease = heldLocks.get(String(lockKey));
+      return Boolean(lease && lease.expiresAt > Date.now());
+    },
+    expireLock: (lockKey = 'connection:7') => {
+      const lease = heldLocks.get(String(lockKey));
+      if (lease) lease.expiresAt = 0;
+    },
+    setStaleLock: (lockKey = 'connection:7') => {
+      heldLocks.set(String(lockKey), { ownerToken: 'abandoned-owner', expiresAt: 0 });
+    },
+    processedRows,
+  };
 }
 
 test('incremental sync skips stored messages before fetching their bodies', async () => {
@@ -362,6 +431,183 @@ test('incremental sync skips stored messages before fetching their bodies', asyn
   assert.equal(calls.profile, 0);
   assert.equal(calls.history, 1);
   assert.equal(calls.get, 0);
+});
+
+test('the exact Nova assessment email is classified, matched, and updates the application', async () => {
+  const application = {
+    id: 73,
+    company: 'Nova',
+    position: 'Graduate Trainee',
+    status: 'Applied',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: Tshiamo Malefo <tshiamomalefo0@gmail.com>',
+    'To: cassandratshiamo2@gmail.com',
+    'Subject: Nova application',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Dear Cassandra',
+    'You are invited for an assesment',
+    'Kind regard',
+    'Nova recruitment team',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-nova-assessment',
+        history: [{ messagesAdded: [{ message: { id: 'nova-assessment-message' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'nova-thread',
+        internalDate: String(Date.now()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(calls.get, 1);
+  assert.equal(application.status, 'Assessment');
+  assert.equal(processedRows.get('nova-assessment-message').detectedStatus, 'Assessment');
+  assert.equal(processedRows.get('nova-assessment-message').applicationId, 73);
+  assert.deepEqual(calls.notifications.map((item) => [item.previous_status, item.new_status]), [
+    ['Applied', 'Assessment'],
+  ]);
+});
+
+test('a previously ignored Nova email can be explicitly retried in place without duplicate notifications', async () => {
+  const application = {
+    id: 74,
+    company: 'Nova',
+    position: 'Graduate Trainee',
+    status: 'Applied',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: Tshiamo Malefo <tshiamomalefo0@gmail.com>',
+    'To: cassandratshiamo2@gmail.com',
+    'Subject: Nova application',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Dear Cassandra',
+    'You are invited for an assesment',
+    'Kind regard',
+    'Nova recruitment team',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    existingMessages: [{
+      id: 812,
+      messageId: 'nova-previously-ignored',
+      outcome: 'ignored',
+      reviewReason: 'No supported application status rule matched.',
+      reprocessVersion: 1,
+    }],
+    historyList: async () => ({ data: { historyId: 'history-retry', history: [] } }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'nova-thread',
+        internalDate: String(Date.now()),
+      },
+    }),
+  });
+
+  await assert.rejects(
+    service.retryProcessedMessage(5, 812),
+    (error) => error.code === 'GMAIL_MESSAGE_NOT_RETRYABLE'
+  );
+  const firstResult = await service.retryProcessedMessage(4, 812);
+
+  assert.deepEqual(firstResult.outcomes, ['updated']);
+  assert.equal(calls.get, 1);
+  assert.equal(application.status, 'Assessment');
+  assert.equal(processedRows.get('nova-previously-ignored').id, 812);
+  assert.equal(processedRows.get('nova-previously-ignored').reprocessVersion, 2);
+  assert.equal(calls.notifications.length, 1);
+  await assert.rejects(
+    service.retryProcessedMessage(4, 812),
+    (error) => error.code === 'GMAIL_MESSAGE_NOT_RETRYABLE'
+  );
+  assert.equal(calls.get, 1);
+  assert.equal(calls.notifications.length, 1);
+});
+
+test('automatic retry does not double-count an ignored email also returned by Gmail history', async () => {
+  const application = {
+    id: 75,
+    company: 'Nova',
+    position: 'Graduate Trainee',
+    status: 'Applied',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: recruiter@nova.example',
+    'To: applyflow@example.com',
+    'Subject: Nova application',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'You are invited for an assessment.',
+    'Nova recruitment team',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    existingMessages: [{
+      id: 813,
+      messageId: 'nova-overlapping-history',
+      outcome: 'ignored',
+      reviewReason: 'No supported application status rule matched.',
+    }],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-overlapping-retry',
+        history: [{ messagesAdded: [{ message: { id: 'nova-overlapping-history' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'nova-overlapping-thread',
+        internalDate: String(Date.now()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7, { reprocessIgnored: true });
+
+  assert.equal(result.processed, 1);
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(calls.get, 1);
+  assert.equal(processedRows.get('nova-overlapping-history').id, 813);
+  assert.equal(application.status, 'Assessment');
+  assert.equal(calls.notifications.length, 1);
 });
 
 test('an existing review message is re-evaluated and updated in place when a strong match is available', async () => {
@@ -443,7 +689,276 @@ test('a connection lock prevents a second sync from calling Gmail concurrently',
   await firstSync;
 });
 
-test('a failed Gmail sync releases the advisory lock for the next attempt', async () => {
+test('an active connection lease is renewed while Gmail work is still running', async () => {
+  let releaseHistory;
+  let startedHistory;
+  let renewLease;
+  const historyStarted = new Promise((resolve) => { startedHistory = resolve; });
+  const { calls, service } = createTestService({
+    historyList: async () => {
+      startedHistory();
+      return new Promise((resolve) => { releaseHistory = resolve; });
+    },
+    scheduleLeaseRenewal(callback) {
+      renewLease = callback;
+      return { unref() {} };
+    },
+    cancelLeaseRenewal() {},
+  });
+
+  const runningSync = service.syncConnection(7);
+  await historyStarted;
+  assert.equal(calls.leaseRenewals, 1);
+  renewLease();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls.leaseRenewals, 2);
+  releaseHistory({ data: { historyId: 'history-after-renewal', history: [] } });
+  await runningSync;
+});
+
+test('per-connection leases coordinate manual syncs across service instances', async () => {
+  let releaseHistory;
+  let startedHistory;
+  const historyStarted = new Promise((resolve) => { startedHistory = resolve; });
+  const leaseStore = new Map();
+  const first = createTestService({
+    leaseStore,
+    historyList: async () => {
+      startedHistory();
+      return new Promise((resolve) => { releaseHistory = resolve; });
+    },
+  });
+  const second = createTestService({ leaseStore });
+
+  const firstSync = first.service.syncConnection(7);
+  await historyStarted;
+  const secondResult = await second.service.syncConnection(7);
+
+  assert.equal(secondResult.inProgress, true);
+  assert.equal(second.calls.history, 0);
+  releaseHistory({ data: { historyId: 'history-cross-instance', history: [] } });
+  await firstSync;
+  assert.equal(first.isLockHeld(), false);
+});
+
+test('a background sweep and a manual sync cannot process one Gmail connection simultaneously', async () => {
+  let releaseHistory;
+  let startedHistory;
+  const historyStarted = new Promise((resolve) => { startedHistory = resolve; });
+  const { calls, service, isLockHeld } = createTestService({
+    historyList: async () => {
+      startedHistory();
+      return new Promise((resolve) => { releaseHistory = resolve; });
+    },
+  });
+
+  const workerSweep = service.syncAllConnected();
+  await historyStarted;
+  const manualResult = await service.syncConnection(7);
+
+  assert.equal(manualResult.inProgress, true);
+  assert.equal(calls.history, 1);
+  assert.equal(isLockHeld('worker:worker'), true);
+
+  releaseHistory({ data: { historyId: 'history-after-worker', history: [] } });
+  await workerSweep;
+  assert.equal(isLockHeld('worker:worker'), false);
+  assert.equal(isLockHeld(), false);
+});
+
+test('an older status email is reviewed instead of overwriting a newer application state', async () => {
+  const application = {
+    id: 81,
+    company: 'Acme Technology',
+    position: 'Junior Software Engineer',
+    status: 'Interview',
+    updated_at: new Date('2026-10-08T10:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: recruiting@acme.example',
+    'To: applyflow@example.com',
+    'Subject: Application update - Acme Technology - Junior Software Engineer',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We regret to inform you that your application was not selected for the Junior Software Engineer position at Acme Technology.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-stale-email',
+        history: [{ messagesAdded: [{ message: { id: 'stale-status-email' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'stale-status-thread',
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['review']);
+  assert.equal(application.status, 'Interview');
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(processedRows.get('stale-status-email').outcome, 'review');
+});
+
+test('worker sweeps use a database lock shared by separate service instances', async () => {
+  const heldLocks = new Map();
+  let releaseConnectionList;
+  let startedConnectionList;
+  const connectionListStarted = new Promise((resolve) => { startedConnectionList = resolve; });
+  let connectionListCalls = 0;
+
+  function createWorkerOnlyService() {
+    const pool = {
+      async query(sql, params = []) {
+        if (sql.startsWith('INSERT INTO gmail_sync_leases')) {
+          const existing = heldLocks.get(params[0]);
+          if (existing && existing.expiresAt > Date.now()) return { rowCount: 0, rows: [] };
+          heldLocks.set(params[0], { ownerToken: params[1], expiresAt: Date.now() + 180000 });
+          return { rowCount: 1, rows: [{ owner_token: params[1] }] };
+        }
+        if (sql.startsWith('UPDATE gmail_sync_leases SET')) {
+          const existing = heldLocks.get(params[0]);
+          if (!existing || existing.ownerToken !== params[1]) return { rowCount: 0, rows: [] };
+          existing.expiresAt = Date.now() + 180000;
+          return { rowCount: 1, rows: [{ owner_token: params[1] }] };
+        }
+        if (sql.startsWith('DELETE FROM gmail_sync_leases')) {
+          const existing = heldLocks.get(params[0]);
+          if (!existing || existing.ownerToken !== params[1]) return { rowCount: 0, rows: [] };
+          heldLocks.delete(params[0]);
+          return { rowCount: 1, rows: [{ lock_key: params[0] }] };
+        }
+        if (sql.startsWith('SELECT id FROM gmail_connections WHERE is_connected = TRUE ORDER BY id')) {
+          connectionListCalls += 1;
+          startedConnectionList();
+          return new Promise((resolve) => { releaseConnectionList = resolve; });
+        }
+        throw new Error(`Unexpected worker pool query: ${sql}`);
+      },
+    };
+    return createGmailSyncService({ pool, env: {} });
+  }
+
+  const firstService = createWorkerOnlyService();
+  const secondService = createWorkerOnlyService();
+  const firstSweep = firstService.syncAllConnected();
+  await connectionListStarted;
+  const secondSweep = await secondService.syncAllConnected();
+
+  assert.deepEqual(secondSweep, []);
+  assert.equal(connectionListCalls, 1);
+  assert.equal(heldLocks.has('worker:worker'), true);
+
+  releaseConnectionList({ rowCount: 0, rows: [] });
+  assert.deepEqual(await firstSweep, []);
+  assert.equal(heldLocks.has('worker:worker'), false);
+});
+
+test('the worker releases its database lock when loading connections fails', async () => {
+  const heldLocks = new Map();
+  const pool = {
+    async query(sql, params = []) {
+      if (sql.startsWith('INSERT INTO gmail_sync_leases')) {
+        heldLocks.set(params[0], { ownerToken: params[1], expiresAt: Date.now() + 180000 });
+        return { rowCount: 1, rows: [{ owner_token: params[1] }] };
+      }
+      if (sql.startsWith('UPDATE gmail_sync_leases SET')) {
+        const existing = heldLocks.get(params[0]);
+        if (!existing || existing.ownerToken !== params[1]) return { rowCount: 0, rows: [] };
+        existing.expiresAt = Date.now() + 180000;
+        return { rowCount: 1, rows: [{ owner_token: params[1] }] };
+      }
+      if (sql.startsWith('DELETE FROM gmail_sync_leases')) {
+        heldLocks.delete(params[0]);
+        return { rowCount: 1, rows: [{ lock_key: params[0] }] };
+      }
+      throw new Error('Synthetic Gmail connection list failure');
+    },
+  };
+  const service = createGmailSyncService({ pool, env: {} });
+
+  await assert.rejects(service.syncAllConnected(), /Synthetic Gmail connection list failure/);
+  assert.equal(heldLocks.has('worker:worker'), false);
+});
+
+test('the Gmail worker waits for its first interval and does not overlap local sweeps', async () => {
+  let runWorker;
+  let scheduledInterval;
+  let workerCalls = 0;
+  let releaseFirstSweep;
+  let startedFirstSweep;
+  const firstSweepStarted = new Promise((resolve) => { startedFirstSweep = resolve; });
+  const firstSweep = new Promise((resolve) => { releaseFirstSweep = resolve; });
+  const timer = { timer: true };
+
+  const returnedTimer = startGmailSyncWorker({
+    async syncAllConnected() {
+      workerCalls += 1;
+      if (workerCalls === 1) {
+        startedFirstSweep();
+        await firstSweep;
+      }
+    },
+  }, { GMAIL_SYNC_INTERVAL_MS: '60000' }, (callback, intervalMs) => {
+    runWorker = callback;
+    scheduledInterval = intervalMs;
+    return timer;
+  });
+
+  assert.equal(returnedTimer, timer);
+  assert.equal(scheduledInterval, 60000);
+  assert.equal(workerCalls, 0);
+
+  const firstTick = runWorker();
+  await firstSweepStarted;
+  await runWorker();
+  assert.equal(workerCalls, 1);
+
+  releaseFirstSweep();
+  await firstTick;
+  await runWorker();
+  assert.equal(workerCalls, 2);
+});
+
+test('the Gmail worker clamps short intervals and defaults invalid intervals', () => {
+  let shortInterval;
+  startGmailSyncWorker({ async syncAllConnected() {} }, { GMAIL_SYNC_INTERVAL_MS: '1000' }, (_run, intervalMs) => {
+    shortInterval = intervalMs;
+  });
+  assert.equal(shortInterval, 30000);
+
+  const originalWarn = console.warn;
+  let warningCount = 0;
+  let invalidInterval;
+  console.warn = () => { warningCount += 1; };
+  try {
+    startGmailSyncWorker({ async syncAllConnected() {} }, { GMAIL_SYNC_INTERVAL_MS: 'invalid' }, (_run, intervalMs) => {
+      invalidInterval = intervalMs;
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(invalidInterval, 120000);
+  assert.equal(warningCount, 1);
+});
+
+test('a failed Gmail sync releases its database lease for the next attempt', async () => {
   let failOnce = true;
   const { calls, service, isLockHeld } = createTestService({
     historyList: async () => {
@@ -465,35 +980,56 @@ test('a failed Gmail sync releases the advisory lock for the next attempt', asyn
   assert.equal(isLockHeld(), false);
 });
 
-test('an advisory unlock failure discards its database session', async () => {
-  const { calls, service, isLockHeld } = createTestService({ failUnlock: true });
+test('a lease release failure reports an error and the lease expires safely', async () => {
+  const { service, isLockHeld, expireLock } = createTestService({ failUnlock: true });
 
-  await assert.rejects(service.syncConnection(7), /Synthetic advisory unlock failure/);
-  assert.equal(calls.discardedClients, 1);
+  await assert.rejects(service.syncConnection(7), /Synthetic sync lease release failure/);
+  assert.equal(isLockHeld(), true);
+  assert.equal((await service.syncConnection(7)).inProgress, true);
+  expireLock();
+  const retryResult = await service.syncConnection(7);
+  assert.equal(retryResult.inProgress, undefined);
   assert.equal(isLockHeld(), false);
+});
+
+test('a lease release that is not confirmed remains protected until expiry', async () => {
+  const { service, isLockHeld, expireLock } = createTestService({ unlockReturnsFalse: true });
+
+  await assert.rejects(service.syncConnection(7), /lease release could not be confirmed/);
+  assert.equal(isLockHeld(), true);
+  assert.equal((await service.syncConnection(7)).inProgress, true);
+  expireLock();
 
   const retryResult = await service.syncConnection(7);
   assert.equal(retryResult.inProgress, undefined);
   assert.equal(isLockHeld(), false);
 });
 
-test('an unlock-false result discards the session and permits a later sync', async () => {
-  const { calls, service, isLockHeld } = createTestService({ unlockReturnsFalse: true });
+test('an expired lease left by a crashed sync can be acquired by the next attempt', async () => {
+  const { calls, service, isLockHeld, setStaleLock } = createTestService();
+  setStaleLock();
+  const recovered = await service.syncConnection(7);
 
-  await assert.rejects(service.syncConnection(7), /lock release could not be confirmed/);
-  assert.equal(calls.discardedClients, 1);
-  assert.equal(isLockHeld(), false);
-
-  const retryResult = await service.syncConnection(7);
-  assert.equal(retryResult.inProgress, undefined);
+  assert.equal(recovered.inProgress, undefined);
+  assert.equal(calls.locks, 1);
   assert.equal(isLockHeld(), false);
 });
 
-test('an ambiguous lock acquisition failure discards its session', async () => {
-  const { calls, service, isLockHeld } = createTestService({ failLockAcquisition: true });
+test('a lost lease renewal stops Gmail work and releases only the current owner lease', async () => {
+  const { calls, service, isLockHeld } = createTestService({ failLeaseRenewal: true });
 
-  await assert.rejects(service.syncConnection(7), /Synthetic advisory lock acquisition response failure/);
-  assert.equal(calls.discardedClients, 1);
+  await assert.rejects(service.syncConnection(7), /Synthetic sync lease renewal failure/);
+
+  assert.equal(calls.profile, 0);
+  assert.equal(calls.get, 0);
+  assert.equal(calls.unlocks, 1);
+  assert.equal(isLockHeld(), false);
+});
+
+test('an ambiguous lease acquisition failure is cleaned up by its owner token', async () => {
+  const { service, isLockHeld } = createTestService({ failLockAcquisition: true });
+
+  await assert.rejects(service.syncConnection(7), /Synthetic sync lease acquisition response failure/);
   assert.equal(isLockHeld(), false);
 
   const retryResult = await service.syncConnection(7);
@@ -519,7 +1055,7 @@ test('a hanging Gmail request times out, releases its lock, and recovers on retr
   await assert.rejects(service.syncConnection(7), /Gmail sync failed/);
   assert.equal(timedOutSignal.aborted, true);
   assert.equal(calls.oauthTimeout, 10);
-  assert.deepEqual(calls.lockQueryTimeouts, [10, 10]);
+  assert.deepEqual(calls.lockQueryTimeouts, []);
   assert.deepEqual(calls.historyCursorUpdates, []);
   assert.equal(isLockHeld(), false);
 
@@ -681,7 +1217,7 @@ test('scenario 15: an interview date without a time preserves existing time and 
     company: 'Acme Technology',
     position: 'Junior Software Engineer',
     status: 'Interview',
-    updated_at: new Date('2026-10-08T09:00:00Z'),
+    updated_at: new Date('2026-10-08T05:00:00Z'),
     interview_date: null,
     interview_time: '07:30:00',
     interview_type: 'Panel',
@@ -1145,6 +1681,9 @@ test('a Gmail API authentication failure remains fatal and releases the connecti
   await assert.rejects(service.syncConnection(7), /Reconnect Gmail/);
   assert.equal(calls.unlocks, 1);
   assert.equal(isLockHeld(), false);
+  assert.ok(calls.connectionUpdates.some((sql) =>
+    sql.includes('last_sync_at = NOW(), last_sync_error = $2')
+  ));
 });
 
 test('quota errors use bounded exponential retry and then a persisted cooldown', async () => {
@@ -1207,7 +1746,7 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
     company: 'Shoprite',
     position: 'Cashier',
     status: 'Interview',
-    updated_at: new Date('2026-10-08T09:00:00Z'),
+    updated_at: new Date('2026-10-08T05:00:00Z'),
     interview_date: '2026-10-09',
     interview_time: '07:30:00',
     interview_type: 'Panel',
@@ -1242,7 +1781,19 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
   ].join('\r\n')).toString('base64url');
   let lockHeld = false;
   const pool = {
-    async query(sql) {
+    async query(sql, params = []) {
+      if (sql.startsWith('INSERT INTO gmail_sync_leases')) {
+        if (lockHeld) return { rowCount: 0, rows: [] };
+        lockHeld = true;
+        return { rowCount: 1, rows: [{ owner_token: params[1] }] };
+      }
+      if (sql.startsWith('UPDATE gmail_sync_leases SET')) {
+        return { rowCount: lockHeld ? 1 : 0, rows: lockHeld ? [{ owner_token: params[1] }] : [] };
+      }
+      if (sql.startsWith('DELETE FROM gmail_sync_leases')) {
+        lockHeld = false;
+        return { rowCount: 1, rows: [{ lock_key: params[0] }] };
+      }
       if (sql.startsWith('SELECT * FROM gmail_connections')) return { rowCount: 1, rows: [connection] };
       if (sql.startsWith('SELECT CEIL(EXTRACT(EPOCH FROM (quota_backoff_until')) return { rowCount: 0, rows: [] };
       if (sql.startsWith('SELECT outcome, detected_status')) return { rowCount: 0, rows: [] };
@@ -1257,14 +1808,6 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
         async query(query, params = []) {
           const sql = typeof query === 'string' ? query : query.text;
           if (typeof query !== 'string') params = query.values || [];
-          if (sql.includes('pg_try_advisory_lock')) {
-            lockHeld = true;
-            return { rowCount: 1, rows: [{ acquired: true }] };
-          }
-          if (sql.includes('pg_advisory_unlock')) {
-            lockHeld = false;
-            return { rowCount: 1, rows: [{ pg_advisory_unlock: true }] };
-          }
           if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rowCount: 1, rows: [] };
           if (sql.startsWith('INSERT INTO gmail_processed_messages')) {
             assert.equal(params[8], '2026-10-09');
@@ -1354,6 +1897,59 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
     ['Interview', '2026-10-09', '08:30', 'Panel']
   );
   assert.equal(lockHeld, false);
+});
+
+test('a stale same-status interview email is sent for review without changing newer details', async () => {
+  const application = {
+    id: 93,
+    company: 'Shoprite',
+    position: 'Cashier',
+    status: 'Interview',
+    updated_at: new Date('2026-10-08T07:00:00Z'),
+    interview_date: '2026-10-10',
+    interview_time: '09:30:00',
+    interview_type: 'Panel',
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: Shoprite Careers <careers@shoprite.co.za>',
+    'To: applyflow@example.com',
+    'Subject: Interview invitation - Shoprite Cashier',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Shoprite invites you to interview for the Cashier position.',
+    'Your interview is scheduled for 11 October 2026 at 08:30.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-stale-interview-details',
+        history: [{ messagesAdded: [{ message: { id: 'stale-interview-details' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'stale-interview-thread',
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['review']);
+  assert.equal(calls.applicationUpdates, 0);
+  assert.deepEqual(
+    [application.status, application.interview_date, application.interview_time, application.interview_type],
+    ['Interview', '2026-10-10', '09:30:00', 'Panel']
+  );
+  assert.equal(processedRows.get('stale-interview-details').outcome, 'review');
 });
 
 test('scenarios 1-7: status transitions run through matching, persistence, and application updates', async () => {

@@ -13,9 +13,12 @@ test('classifies supported application status email language', () => {
   const cases = [
     ['Application received', 'Thank you for applying for the role.', 'Applied'],
     ['Online assessment invitation', 'Please complete the coding challenge.', 'Assessment'],
+    ['Nova application', 'Dear Cassandra\nYou are invited for an assesment\nKind regard\nNova recruitment team', 'Assessment'],
+    ['Nova application', 'You are invited for an assessment.', 'Assessment'],
+    ['Nova application', 'Please complete an assessment for the role.', 'Assessment'],
     ['You have been shortlisted', 'Your application was shortlisted.', 'Shortlisted'],
     ['Interview invitation', 'We would like to interview you.', 'Interview'],
-    ['You have been shortlisted for an interview', 'Please confirm your availability.', 'Interview'],
+    ['Interview invitation', 'You have been shortlisted for an interview. Please confirm your availability.', 'Interview'],
     ['Offer of employment', 'We are pleased to offer you the position.', 'Offer'],
     ['Position selected', 'You have been selected for the position of Analyst.', 'Offer'],
     ['Application update', 'We regret to inform you that you were not selected.', 'Rejected'],
@@ -25,6 +28,30 @@ test('classifies supported application status email language', () => {
 
   for (const [subject, text, expectedStatus] of cases) {
     assert.equal(classifyApplicationEmail({ subject, text }).status, expectedStatus);
+  }
+});
+
+test('does not classify an isolated assessment mention as an application outcome', () => {
+  assert.equal(classifyApplicationEmail({
+    subject: 'Monthly newsletter',
+    text: 'Our assessment of the job market will be in next month newsletter.',
+  }).status, null);
+});
+
+test('status wording in a subject alone is not enough to classify a message', () => {
+  const cases = [
+    ['Interview invitation', 'Here is our quarterly careers newsletter.'],
+    ['Offer of employment', 'Please see the company news update below.'],
+    ['Application received', 'This is a general account notification.'],
+    ['You have been shortlisted', 'We are sharing this months opportunities.'],
+    ['Application rejected', 'Please review the attached company update.'],
+    ['Application withdrawn', 'This is an automated mailbox notification.'],
+    ['Assessment invitation', 'Our assessment of industry trends is attached.'],
+    ['Application saved', 'This email confirms your preference settings.'],
+  ];
+
+  for (const [subject, text] of cases) {
+    assert.equal(classifyApplicationEmail({ subject, text }).status, null, subject);
   }
 });
 
@@ -148,6 +175,7 @@ test('extracts interview time from hard-wrapped plain-text MIME', async () => {
   const parsed = await simpleParser(Buffer.from(rawEmail));
   const extracted = extractInterviewDateTime({ subject: parsed.subject, text: parsed.text });
 
+  assert.equal(classifyApplicationEmail({ subject: parsed.subject, text: parsed.text }).status, 'Interview');
   assert.equal(extracted.interviewDate, '2026-10-09');
   assert.equal(extracted.interviewTime, '08:30');
 });
@@ -170,6 +198,7 @@ test('extracts interview time from HTML paragraph and break MIME formatting', as
     const parsed = await simpleParser(Buffer.from(rawEmail));
     const extracted = extractInterviewDateTime({ subject: parsed.subject, text: parsed.text });
 
+    assert.equal(classifyApplicationEmail({ subject: parsed.subject, text: parsed.text }).status, 'Interview');
     assert.equal(extracted.interviewDate, '2026-10-09');
     assert.equal(extracted.interviewTime, '08:30');
   }

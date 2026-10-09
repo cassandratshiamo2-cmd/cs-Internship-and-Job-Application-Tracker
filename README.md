@@ -88,7 +88,7 @@ Create `server/.env` for backend settings and `client/my-app/.env.local` for fro
 | Variable | Application | Description |
 | --- | --- | --- |
 | `DATABASE_URL` | Backend | PostgreSQL connection string. Required for the API and notification queue. |
-| `JWT_SECRET` | Backend | Secret used to sign and verify authentication tokens. Set a strong value for local use; do not rely on the development fallback outside local development. |
+| `JWT_SECRET` | Backend | Secret used to sign and verify authentication tokens. The development fallback is only for local use; production startup requires an explicitly configured strong value. |
 | `PORT` | Backend | Optional API port. Defaults to `5000`. |
 | `CLIENT_URL` | Backend | Optional allowed frontend origin for CORS. Defaults to `http://localhost:3000`. |
 | `NEXT_PUBLIC_API_URL` | Frontend | Optional backend base URL. Defaults to `http://localhost:5000`. |
@@ -98,7 +98,7 @@ Create `server/.env` for backend settings and `client/my-app/.env.local` for fro
 | `GOOGLE_CLIENT_SECRET` | Backend | Google OAuth client secret. Keep it server-side. |
 | `GOOGLE_REDIRECT_URI` | Backend | Exact callback URL registered in Google Cloud, ending in `/api/gmail/oauth/callback`. |
 | `GMAIL_TOKEN_ENCRYPTION_KEY` | Backend | Base64-encoded 32-byte key used to encrypt Gmail tokens at rest. |
-| `GMAIL_SYNC_INTERVAL_MS` | Backend | Optional Gmail polling interval in milliseconds. Defaults to `120000`. |
+| `GMAIL_SYNC_INTERVAL_MS` | Backend | Optional Gmail polling interval in milliseconds. Defaults to `120000`; values below `30000` are clamped to 30 seconds. |
 | `GMAIL_INITIAL_SYNC_DAYS` | Backend | Optional recent-message window used for initial sync. Defaults to `30`. |
 
 ## Gmail Integration Setup
@@ -109,7 +109,9 @@ Create `server/.env` for backend settings and `client/my-app/.env.local` for fro
 4. While the OAuth app is in Testing, add the Gmail accounts you will use as test users. Google may require verification for the restricted Gmail read scope before general release.
 5. Start the backend and frontend, log in to ApplyFlow, open Gmail in the navigation, and connect the account. ApplyFlow requests `gmail.readonly` only; it does not ask for Gmail passwords or store Gmail tokens in browser storage.
 
-The first sync scans recent incoming messages (30 days by default) in pages. Later syncs use Gmail history and run on a separate backend poller (2 minutes by default). Processed messages are skipped before their bodies are fetched, and syncs for one Gmail account are serialized across backend instances. Quota responses use bounded exponential retries and a persisted per-account cooldown. Clear, unique matches can update only the application status. Uncertain matches are placed in the Gmail review queue without being repeatedly re-downloaded. Interview status emails do not create interview details or reminders; those remain managed through the existing application edit flow.
+The first sync scans recent incoming messages (30 days by default) in pages. Later syncs use Gmail history and run on a separate backend poller (2 minutes by default); the poller waits one interval after backend startup before its first sweep. Sync coordination uses atomically acquired, expiring rows in the `gmail_sync_leases` PostgreSQL table, renewed while work continues. Manual sync waits up to 15 seconds for an active connection lease to finish, then reports a retryable in-progress result rather than starting a competing sync. Expired leases can be safely reclaimed after a crashed process, with the owner token preventing one process from renewing or releasing another process's lease. This works across backend instances and does not depend on session affinity, so Neon transaction-pooling connections can coordinate safely. The table is created additively during backend startup; no existing application records are reset. Processed messages are skipped before their bodies are fetched. Status classification is based on message-body content rather than a status phrase in the subject alone. Eligible ignored or review messages can be retried from Gmail history without creating a second history row; repeated retries are bounded, and existing status-transition checks still prevent stale emails from overwriting newer application data. Quota responses use bounded exponential retries and a persisted per-account cooldown. Clear, unique matches can update the application status, and supported interview emails may also fill detected date, time, and type without replacing existing details. Uncertain matches are placed in the Gmail review queue without being repeatedly re-downloaded. Status changes create in-app notifications, and interview reminders continue through the existing scheduling flow.
+
+For Render or another multi-instance backend deployment, keep all backend instances pointed at the same PostgreSQL database so their Gmail lease coordination and notification queue are shared. The Gmail poller does not require a separate worker service or a new environment variable; its polling interval can be set with `GMAIL_SYNC_INTERVAL_MS`. Set `DATABASE_URL` and a strong `JWT_SECRET` in the Render backend, `NEXT_PUBLIC_API_URL` in the Vercel frontend to the public backend base URL, and the exact public callback URL in `GOOGLE_REDIRECT_URI` and the Google Cloud OAuth client's authorized redirect URI. The backend now refuses to start without `DATABASE_URL`, and production also requires `JWT_SECRET`.
 
 ## Application Workflow
 

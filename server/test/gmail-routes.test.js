@@ -4,7 +4,7 @@ const express = require('express');
 const http = require('node:http');
 const { createGmailRouter } = require('../gmail-routes');
 
-function createTestPool({ message, application, history = [] }) {
+function createTestPool({ message, application, history = [], notifications }) {
   const client = {
     async query(sql, params = []) {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
@@ -18,11 +18,15 @@ function createTestPool({ message, application, history = [] }) {
       }
       if (sql.startsWith('UPDATE applications SET')) {
         const [, , nextStatus, nextDate, preserveStatus, nextTime, nextType] = params;
-        application.status = preserveStatus ? application.status : nextStatus;
+        application.status = preserveStatus ? nextStatus : application.status;
         application.interview_date = application.interview_date || nextDate;
         application.interview_time = application.interview_time || nextTime;
         application.interview_type = application.interview_type || nextType;
         return { rowCount: 1, rows: [{ ...application }] };
+      }
+      if (sql.startsWith('INSERT INTO notification_jobs')) {
+        notifications?.push(params);
+        return { rowCount: 1, rows: [{ id: 901 }] };
       }
       if (sql.startsWith('UPDATE gmail_processed_messages SET outcome = \'reviewed\'')) {
         return { rowCount: 1, rows: [] };
@@ -101,7 +105,94 @@ test('manual sync reports an existing per-user sync without starting another', a
   assert.equal(response.status, 200);
   assert.equal(payload.inProgress, true);
   assert.equal(payload.processed, 0);
-  assert.deepEqual(syncOptions, { reprocessIgnored: true });
+  assert.match(payload.message, /already running.*try again shortly/i);
+  assert.deepEqual(syncOptions, { reprocessIgnored: true, waitForActiveMs: 15000 });
+});
+
+test('authenticated email retry is scoped to the signed-in user and existing history id', async (t) => {
+  let retryArguments;
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    syncService: {
+      async retryProcessedMessage(userId, processedMessageId) {
+        retryArguments = [userId, processedMessageId];
+        return { processed: 1, outcomes: ['updated'] };
+      },
+    },
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/messages/812/retry`, { method: 'POST' });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(retryArguments, [7, 812]);
+  assert.equal(payload.processed, 1);
+  assert.deepEqual(payload.outcomes, ['updated']);
+});
+
+test('email retry reports a concurrent sync instead of claiming success', async (t) => {
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    syncService: {
+      async retryProcessedMessage() {
+        return { inProgress: true, processed: 0, outcomes: [] };
+      },
+    },
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/messages/812/retry`, { method: 'POST' });
+  const payload = await response.json();
+
+  assert.equal(response.status, 409);
+  assert.equal(payload.inProgress, true);
+  assert.match(payload.message, /another Gmail sync is still running/i);
+});
+
+test('manual sync returns checked-message outcomes only after the sync page completes', async (t) => {
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    syncService: {
+      async syncUser() {
+        return {
+          processed: 3,
+          outcomes: ['updated', 'review', 'duplicate'],
+          initialSyncComplete: true,
+        };
+      },
+    },
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/sync`, { method: 'POST' });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.message, 'Gmail sync completed.');
+  assert.equal(payload.processed, 3);
+  assert.deepEqual(payload.outcomes, ['updated', 'review', 'duplicate']);
+  assert.equal(payload.initialSyncComplete, true);
+});
+
+test('manual sync preserves a safe reconnect message for expired Gmail authorization', async (t) => {
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    syncService: {
+      async syncUser() {
+        const error = new Error('Gmail access was denied or expired. Reconnect Gmail and try again.');
+        error.code = 'GMAIL_AUTH_EXPIRED';
+        throw error;
+      },
+    },
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/sync`, { method: 'POST' });
+  const payload = await response.json();
+
+  assert.equal(response.status, 502);
+  assert.match(payload.message, /reconnect Gmail/i);
 });
 
 test('review endpoint fills an already-Interview application and schedules its complete in-app reminder', async (t) => {
@@ -185,6 +276,47 @@ test('review endpoint marks an already-Interview application with no new details
   assert.equal(application.interview_time, null);
 });
 
+test('review endpoint creates one status-change notification transactionally', async (t) => {
+  const application = {
+    id: 14,
+    company: 'Test Company',
+    position: 'Software Developer',
+    status: 'Applied',
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const notifications = [];
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {
+      id: 90,
+      detected_status: 'Shortlisted',
+      detected_interview_date: null,
+      detected_interview_time: null,
+      detected_interview_type: null,
+    },
+    application,
+    notifications,
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/review/90`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'apply', applicationId: '14' }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(application.status, 'Shortlisted');
+  assert.equal(notifications.length, 1);
+  assert.deepEqual(notifications[0].slice(0, 6), [
+    7, '14', 'Status Update', 'In-app', 'Test Company', 'Software Developer',
+  ]);
+  assert.deepEqual(notifications[0].slice(7, 9), ['Applied', 'Shortlisted']);
+});
+
 test('history endpoint returns processed interview details and matched application', async (t) => {
   const history = [{
     id: 88,
@@ -208,5 +340,5 @@ test('history endpoint returns processed interview details and matched applicati
   const payload = await response.json();
 
   assert.equal(response.status, 200);
-  assert.deepEqual(payload.messages, history);
+  assert.deepEqual(payload.messages, history.map((message) => ({ ...message, retryable: false })));
 });

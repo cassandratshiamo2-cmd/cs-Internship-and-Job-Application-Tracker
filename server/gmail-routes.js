@@ -1,9 +1,14 @@
 const express = require('express');
 const { google } = require('googleapis');
-const { getSafeSyncErrorDetails } = require('./gmail-sync');
+const {
+  getSafeSyncErrorDetails,
+  isRetryableProcessedMessage,
+  MAX_REPROCESS_ATTEMPTS,
+} = require('./gmail-sync');
 const { decideApplicationEmailUpdate } = require('./gmail-matcher');
 const { getInterviewDetailsToFill, getInterviewDetailsToUpdate } = require('./gmail-parser');
 const { scheduleInterviewReminderIfReady } = require('./gmail-interview');
+const { createStatusChangeNotification } = require('./gmail-notifications');
 const {
   createAuthorizationUrl,
   createOAuthClient,
@@ -126,7 +131,10 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
 
   router.post('/sync', authenticateRequest, async (req, res) => {
     try {
-      const result = await syncService.syncUser(req.user.id, { reprocessIgnored: true });
+      const result = await syncService.syncUser(req.user.id, {
+        reprocessIgnored: true,
+        waitForActiveMs: 15000,
+      });
       if (result.quotaLimited) {
         const retryAfterSeconds = Math.max(1, Number(result.retryAfterSeconds || 60));
         res.set('Retry-After', String(retryAfterSeconds));
@@ -137,22 +145,23 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       }
       if (result.inProgress) {
         return res.status(200).json({
-          message: 'Gmail sync is already in progress.',
+          message: 'A Gmail sync is already running. Try again shortly.',
           processed: 0,
           inProgress: true,
         });
       }
       return res.status(200).json({
         message: result.initialSyncComplete === false
-          ? 'Gmail sync is continuing in the background.'
+          ? 'This initial sync page finished; remaining pages will be picked up by automatic sync.'
           : 'Gmail sync completed.',
         processed: result.processed,
         outcomes: result.outcomes,
+        initialSyncComplete: result.initialSyncComplete !== false,
       });
     } catch (error) {
       console.error('Manual Gmail sync failed:', getSafeSyncErrorDetails(error));
       return res.status(502).json({
-        message: error.code === 'GMAIL_NOT_CONNECTED'
+        message: error.code === 'GMAIL_NOT_CONNECTED' || error.code === 'GMAIL_AUTH_EXPIRED'
           ? error.message
           : 'Unable to sync Gmail. Please try again later.',
       });
@@ -197,11 +206,17 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
     try {
       const result = await pool.query(
         "SELECT id, gmail_message_id, sender, subject, received_at, detected_status, confidence, " +
+          'reprocess_version, ' +
           "candidate_application_ids, review_reason FROM gmail_processed_messages " +
           "WHERE user_id = $1 AND outcome = 'review' ORDER BY received_at DESC LIMIT 100",
         [req.user.id]
       );
-      return res.status(200).json({ messages: result.rows });
+      return res.status(200).json({
+        messages: result.rows.map((message) => ({
+          ...message,
+          retryable: Number(message.reprocess_version || 0) < MAX_REPROCESS_ATTEMPTS,
+        })),
+      });
     } catch (error) {
       console.error('Loading Gmail review queue failed:', error.message);
       return res.status(500).json({ message: 'Unable to load Gmail review items.' });
@@ -213,6 +228,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       const result = await pool.query(
         "SELECT message.id, message.gmail_message_id, message.sender, message.subject, " +
           'message.received_at, message.processed_at, message.detected_status, ' +
+          'message.reprocess_version, message.review_reason, ' +
           'message.detected_interview_date::text AS detected_interview_date, ' +
           'message.detected_interview_time::text AS detected_interview_time, ' +
           'message.detected_interview_type, message.outcome, ' +
@@ -227,10 +243,55 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         'ORDER BY message.processed_at DESC, message.received_at DESC LIMIT 100',
         [req.user.id]
       );
-      return res.status(200).json({ messages: result.rows });
+      return res.status(200).json({
+        messages: result.rows.map((message) => ({
+          ...message,
+          retryable: isRetryableProcessedMessage(message),
+        })),
+      });
     } catch (error) {
       console.error('Loading Gmail processing history failed:', error.message);
       return res.status(500).json({ message: 'Unable to load Gmail processing history.' });
+    }
+  });
+
+  router.post('/messages/:messageId/retry', authenticateRequest, async (req, res) => {
+    const processedMessageId = Number(req.params.messageId);
+    if (!Number.isSafeInteger(processedMessageId) || processedMessageId <= 0) {
+      return res.status(400).json({ message: 'A valid processed message ID is required.' });
+    }
+
+    try {
+      const result = await syncService.retryProcessedMessage(req.user.id, processedMessageId);
+      if (result.inProgress) {
+        return res.status(409).json({
+          message: 'Another Gmail sync is still running. Retry this email shortly.',
+          inProgress: true,
+        });
+      }
+      if (result.quotaLimited) {
+        const retryAfterSeconds = Math.max(1, Number(result.retryAfterSeconds || 60));
+        res.set('Retry-After', String(retryAfterSeconds));
+        return res.status(429).json({
+          message: `Gmail is temporarily rate-limited. Try again in ${retryAfterSeconds} seconds.`,
+          retryAfterSeconds,
+        });
+      }
+      return res.status(200).json({
+        message: 'Email retry completed.',
+        processed: result.processed,
+        outcomes: result.outcomes,
+      });
+    } catch (error) {
+      if (error.code === 'GMAIL_MESSAGE_NOT_RETRYABLE') {
+        return res.status(409).json({ message: error.message });
+      }
+      console.error('Retrying Gmail message failed:', getSafeSyncErrorDetails(error));
+      return res.status(error.code === 'GMAIL_AUTH_EXPIRED' ? 502 : 500).json({
+        message: error.code === 'GMAIL_AUTH_EXPIRED' || error.code === 'GMAIL_NOT_CONNECTED'
+          ? error.message
+          : 'Unable to retry this email. Please try again later.',
+      });
     }
   });
 
@@ -340,6 +401,18 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         application: updatedResult.rows[0],
         client,
       });
+      if (application.status !== updatedResult.rows[0].status) {
+        await createStatusChangeNotification({
+          client,
+          userId: req.user.id,
+          applicationId,
+          company: updatedResult.rows[0].company,
+          position: updatedResult.rows[0].position,
+          previousStatus: application.status,
+          newStatus: updatedResult.rows[0].status,
+          gmailMessageId: 'review:' + message.id,
+        });
+      }
       await client.query(
         "UPDATE gmail_processed_messages SET outcome = 'reviewed', application_id = $2, " +
           'previous_status = $3, new_status = detected_status, processed_at = NOW() WHERE id = $1',

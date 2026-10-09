@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
@@ -16,9 +16,11 @@ export default function LoginPage() {
   const [cooldownRemaining, setCooldownRemaining] = useState(0);
   const [isBlocked, setIsBlocked] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (submittingRef.current) return;
 
     if (isBlocked) {
       setError("Too many failed attempts. Please wait 5 seconds before trying again.");
@@ -41,6 +43,7 @@ export default function LoginPage() {
     }
 
     setIsSubmitting(true);
+    submittingRef.current = true;
     setError("");
 
     try {
@@ -52,9 +55,16 @@ export default function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => ({})) as { message?: string; token?: string; user?: unknown };
 
       if (!response.ok) {
+        if (response.status !== 401) {
+          setError(data.message || "Login failed. Please try again.");
+          setIsSubmitting(false);
+          submittingRef.current = false;
+          return;
+        }
+
         const nextAttempts = failedAttempts + 1;
         setFailedAttempts(nextAttempts);
 
@@ -62,6 +72,7 @@ export default function LoginPage() {
           setIsBlocked(true);
           setCooldownRemaining(5);
           setError("Too many failed attempts. Please wait 5 seconds before trying again.");
+          setIsSubmitting(false);
 
           const start = Date.now();
           const interval = window.setInterval(() => {
@@ -75,17 +86,25 @@ export default function LoginPage() {
               setFailedAttempts(0);
               setError("");
               setIsSubmitting(false);
+              submittingRef.current = false;
             }
           }, 1000);
 
           return;
         }
 
-        setError(data.message || `Incorrect password. Attempt ${nextAttempts} of 5.`);
+        setError(data.message || `Invalid email or password. Attempt ${nextAttempts} of 5.`);
         setIsSubmitting(false);
+        submittingRef.current = false;
         return;
       }
 
+      if (!data.token || !data.user) {
+        setError("The server returned an invalid login response. Please try again.");
+        setIsSubmitting(false);
+        submittingRef.current = false;
+        return;
+      }
       localStorage.setItem("applyflow_token", data.token);
       localStorage.setItem("applyflow_user", JSON.stringify(data.user));
       setFailedAttempts(0);
@@ -94,6 +113,7 @@ export default function LoginPage() {
     } catch {
       setError("Unable to connect to the server. Please try again.");
       setIsSubmitting(false);
+      submittingRef.current = false;
     }
   };
 

@@ -9,14 +9,35 @@ import {
   getGmailProcessingHistory,
   getGmailReviewQueue,
   getGmailStatus,
+  retryGmailMessage,
   syncGmail,
   type GmailConnectionStatus,
   type GmailProcessedMessage,
   type GmailReviewMessage,
 } from '@/lib/gmail-api';
+import { retryAndRefresh } from '@/lib/gmail-retry';
 import type { Application } from '@/lib/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+
+function formatSyncOutcomeSummary(outcomes: string[] = []) {
+  const labels: Record<string, string> = {
+    updated: 'updated',
+    review: 'sent for review',
+    ignored: 'ignored',
+    duplicate: 'duplicates skipped',
+    already_up_to_date: 'already up to date',
+    warning: 'sent for review with a processing warning',
+  };
+  const counts = new Map<string, number>();
+  for (const outcome of outcomes) {
+    counts.set(outcome, (counts.get(outcome) || 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .map(([outcome, count]) => `${count} ${labels[outcome] || outcome.replaceAll('_', ' ')}`)
+    .join(', ');
+}
 
 export default function GmailIntegrationPage() {
   const [token] = useState(() =>
@@ -119,18 +140,91 @@ export default function GmailIntegrationPage() {
   }
 
   async function handleSync() {
+    if (isWorking) return;
     setIsWorking(true);
     setError('');
     setNotice('');
     try {
       const result = await syncGmail(token);
-      setNotice(result.inProgress
-        ? 'A Gmail sync is already running. Try again shortly.'
-        : `${result.message} ${result.processed} messages checked.`);
-      await refreshData();
+      if (result.inProgress) {
+        setNotice(result.message);
+        try {
+          await refreshData();
+        } catch (refreshError) {
+          setError(
+            `A Gmail sync is already running, but the page could not be refreshed: ${
+              refreshError instanceof Error ? refreshError.message : 'Please try again.'
+            }`
+          );
+        }
+        return;
+      }
+
+      const checkedLabel = `${result.processed} message${result.processed === 1 ? '' : 's'} checked.`;
+      const outcomeSummary = formatSyncOutcomeSummary(result.outcomes);
+      setNotice(
+        `${result.message} ${checkedLabel}${outcomeSummary ? ` Outcomes: ${outcomeSummary}.` : ''}`
+      );
+      try {
+        await refreshData();
+      } catch (refreshError) {
+        setError(
+          `Gmail sync completed, but the page could not be refreshed: ${
+            refreshError instanceof Error ? refreshError.message : 'Please refresh the page.'
+          }`
+        );
+      }
     } catch (syncError) {
-      setError(syncError instanceof Error ? syncError.message : 'Unable to check Gmail.');
-      await refreshData().catch(() => undefined);
+      const message = syncError instanceof Error ? syncError.message : 'Unable to check Gmail.';
+      setError(message);
+      try {
+        await refreshData();
+      } catch (refreshError) {
+        setError(
+          `${message} Gmail status could not be refreshed: ${
+            refreshError instanceof Error ? refreshError.message : 'Please refresh the page.'
+          }`
+        );
+      }
+    } finally {
+      setIsWorking(false);
+    }
+  }
+
+  async function handleRetry(messageId: string) {
+    if (isWorking) return;
+    setIsWorking(true);
+    setError('');
+    setNotice('');
+    try {
+      const { result, refreshFailed, refreshError } = await retryAndRefresh(
+        () => retryGmailMessage(token, messageId),
+        refreshData,
+      );
+      const outcome = result.outcomes[0];
+      setNotice(
+        outcome === 'updated'
+          ? 'Email reprocessed and application status updated.'
+          : outcome === 'review'
+            ? 'Email reprocessed and added to the review queue.'
+            : outcome === 'ignored'
+              ? 'Email reprocessed; no supported application status was detected.'
+              : 'Email retry completed without a duplicate status update.'
+      );
+      if (refreshFailed) {
+        setError(
+          `Email retry completed, but Gmail data could not be refreshed: ${
+            refreshError instanceof Error ? refreshError.message : 'Please refresh the page.'
+          }`
+        );
+      }
+    } catch (retryError) {
+      setError(retryError instanceof Error ? retryError.message : 'Unable to retry this email.');
+      try {
+        await refreshData();
+      } catch {
+        setError((current) => `${current} Gmail data could not be refreshed.`);
+      }
     } finally {
       setIsWorking(false);
     }
@@ -142,6 +236,7 @@ export default function GmailIntegrationPage() {
       setError('Select an application before applying this status update.');
       return;
     }
+
     setIsWorking(true);
     setError('');
     try {
@@ -180,7 +275,7 @@ export default function GmailIntegrationPage() {
                 <>
                   <p className="mt-1 text-sm text-slate-600">Connected as {status.email}</p>
                   <p className="mt-1 text-xs text-slate-500">
-                    Last sync: {status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : 'Not synced yet'}
+                    Last sync attempt: {status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : 'Not synced yet'}
                   </p>
                 </>
               ) : (
@@ -254,6 +349,11 @@ export default function GmailIntegrationPage() {
                       <button type="button" disabled={isWorking} onClick={() => void handleReview(message, 'dismiss')} className="rounded-full border border-[#e7d6dd] bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-60">
                         Dismiss
                       </button>
+                      {message.retryable ? (
+                        <button type="button" disabled={isWorking} onClick={() => void handleRetry(message.id)} className="rounded-full border border-[#b9e7e4] bg-[#f0fbfa] px-4 py-2.5 text-sm font-semibold text-[#0f766e] disabled:opacity-60">
+                          Retry email
+                        </button>
+                      ) : null}
                     </div>
                     {candidateIds.length ? (
                       <p className="mt-2 text-xs text-slate-500">Possible matches: {candidateIds.map((id) => applications.find((application) => application.id === id)?.company || `Application ${id}`).join(', ')}</p>
@@ -293,6 +393,11 @@ export default function GmailIntegrationPage() {
                     <div><dt className="inline font-medium">Interview time: </dt><dd className="inline">{message.detected_interview_time?.slice(0, 5) || message.application_interview_time?.slice(0, 5) || 'Not detected'}</dd></div>
                     <div><dt className="inline font-medium">Interview type: </dt><dd className="inline">{message.detected_interview_type || message.application_interview_type || 'Not specified'}</dd></div>
                   </dl>
+                  {message.retryable ? (
+                    <button type="button" disabled={isWorking} onClick={() => void handleRetry(message.id)} className="mt-4 rounded-full border border-[#b9e7e4] bg-[#f0fbfa] px-4 py-2 text-sm font-semibold text-[#0f766e] disabled:opacity-60">
+                      Retry email
+                    </button>
+                  ) : null}
                 </article>
               ))}
             </div>

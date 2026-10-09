@@ -1,20 +1,26 @@
 require('dotenv').config();
+const { randomUUID } = require('node:crypto');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const { createGmailRouter } = require('./gmail-routes');
+const { createNotificationRouter } = require('./notification-routes');
 const { createGmailSyncService, startGmailSyncWorker } = require('./gmail-sync');
 const {
   calculateInterviewReminderSchedule,
   interviewDateTimeToInstant,
 } = require('./interview-reminder-schedule');
+const { validateApplicationInput } = require('./application-validation');
+const { checkDatabaseHealth } = require('./health-check');
+const { createStatusChangeNotification } = require('./gmail-notifications');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:3000';
 const DATABASE_URL = process.env.DATABASE_URL;
+const JWT_SECRET = process.env.JWT_SECRET || 'applyflow-dev-secret';
 const WORKER_INTERVAL_MS = 30000;
 const WORKER_BATCH_SIZE = 10;
 const MAX_NOTIFICATION_ATTEMPTS = 3;
@@ -28,6 +34,7 @@ if (!DATABASE_URL) {
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: DATABASE_URL ? { rejectUnauthorized: false } : false,
+  statement_timeout: 60000,
 });
 
 pool.on('error', (err) => {
@@ -57,7 +64,10 @@ app.use(express.urlencoded({ extended: true }));
 
 async function ensureDatabase() {
   if (!DATABASE_URL) {
-    return;
+    throw new Error('DATABASE_URL is required to start the ApplyFlow API.');
+  }
+  if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET is required in production.');
   }
 
   await pool.query(
@@ -222,6 +232,15 @@ async function ensureDatabase() {
   );
 
   await pool.query(
+    'CREATE TABLE IF NOT EXISTS gmail_sync_leases (' +
+      'lock_key VARCHAR(255) PRIMARY KEY, ' +
+      'owner_token UUID NOT NULL, ' +
+      'expires_at TIMESTAMPTZ NOT NULL, ' +
+      'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
+      ')'
+  );
+
+  await pool.query(
     'ALTER TABLE gmail_connections ' +
       'ADD COLUMN IF NOT EXISTS quota_backoff_until TIMESTAMPTZ'
   );
@@ -364,22 +383,11 @@ app.get('/', function (req, res) {
 });
 
 app.get('/api/health', async (req, res) => {
-  try {
-    await pool.query('SELECT 1');
-
-    res.status(200).json({
-      status: 'UP',
-      database: 'connected',
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    res.status(200).json({
-      status: 'UP',
-      database: 'disconnected',
-      message: 'Database connection check failed',
-      timestamp: new Date().toISOString(),
-    });
-  }
+  const health = await checkDatabaseHealth(pool, Boolean(DATABASE_URL));
+  return res.status(health.httpStatus).json({
+    ...health.body,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 function isValidEmail(value) {
@@ -496,77 +504,6 @@ function normalizeNotificationChannels(channels) {
   }
 
   return normalized;
-}
-
-async function createStatusChangeNotification({
-  userId,
-  applicationId,
-  company,
-  position,
-  previousStatus,
-  newStatus,
-  gmailMessageId,
-  client,
-}) {
-  const eventKey = `status-change:${applicationId}:${gmailMessageId || Date.now()}`;
-  const ownsTransaction = !client;
-  const db = client || await pool.connect();
-
-  try {
-    if (ownsTransaction) {
-      await db.query('BEGIN');
-    }
-
-    const result = await db.query(
-      'INSERT INTO notification_jobs (' +
-        'user_id, ' +
-        'application_id, ' +
-        'notification_type, ' +
-        'channel, ' +
-        'company, ' +
-        'position, ' +
-        'interview_date, ' +
-        'interview_time, ' +
-        'interview_at, ' +
-        'application_link, ' +
-        'scheduled_for, ' +
-        'status, ' +
-        'read, ' +
-        'previous_status, ' +
-        'new_status, ' +
-        'event_key' +
-      ') VALUES (' +
-        '$1, $2, $3, $4, $5, $6, NULL, NULL, NULL, NULL, NOW(), $7, FALSE, $8, $9, $10' +
-      ') ON CONFLICT (user_id, application_id, notification_type, channel, event_key) DO NOTHING RETURNING id',
-      [
-        userId,
-        String(applicationId),
-        'Status Update',
-        'In-app',
-        company,
-        position,
-        'sent',
-        previousStatus || null,
-        newStatus || null,
-        eventKey,
-      ]
-    );
-
-    if (ownsTransaction) {
-      await db.query('COMMIT');
-    }
-
-    return result.rowCount > 0;
-  } catch (error) {
-    if (ownsTransaction) {
-      await db.query('ROLLBACK');
-    }
-    throw error;
-  } finally {
-    if (ownsTransaction) {
-      db.release();
-    }
-  }
 }
 
 async function replaceInterviewNotificationJobs(data) {
@@ -1233,8 +1170,7 @@ app.get(
               'OR (' +
                 'interview_at > NOW() ' +
                 'AND (' +
-                  "status IN ('pending', 'processing') " +
-                  "OR (status = 'sent' AND read = FALSE)" +
+                  "status IN ('pending', 'processing', 'sent')" +
                 ')' +
               ')' +
             ') ' +
@@ -1293,51 +1229,9 @@ app.get(
   }
 );
 
-app.patch(
-  '/api/notifications/:notificationId/read',
-  authenticateRequest,
-  async function (req, res) {
-    try {
-      const result =
-        await pool.query(
-          'UPDATE notification_jobs ' +
-            'SET ' +
-              'read = TRUE, ' +
-              'updated_at = NOW() ' +
-            'WHERE ' +
-              'id = $1 ' +
-              'AND user_id = $2 ' +
-              "AND channel = 'In-app' " +
-            'RETURNING id',
-          [
-            req.params.notificationId,
-            req.user.id,
-          ]
-        );
-
-      if (result.rowCount === 0) {
-        return res.status(404).json({
-          message:
-            'Notification was not found.',
-        });
-      }
-
-      return res.status(200).json({
-        message:
-          'Notification marked as read.',
-      });
-    } catch (error) {
-      console.error(
-        'Mark notification as read failed:',
-        error.message
-      );
-
-      return res.status(500).json({
-        message:
-          'Unable to update notification.',
-      });
-    }
-  }
+app.use(
+  '/api/notifications',
+  createNotificationRouter({ pool, authenticateRequest })
 );
 
 app.delete(
@@ -1403,13 +1297,13 @@ app.get(
           'id, ' +
           'company, ' +
           'position, ' +
-          'application_date AS date, ' +
+          'application_date::text AS date, ' +
           'type, ' +
           'status, ' +
           'arrangement, ' +
           'notes, ' +
           'application_link AS "applicationLink", ' +
-          'interview_date AS "interviewDate", ' +
+          'interview_date::text AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
           'notification_channels AS "notificationChannels", ' +
@@ -1425,7 +1319,7 @@ app.get(
           id: String(application.id),
           company: application.company,
           position: application.position,
-          date: application.date ? application.date.toISOString().slice(0, 10) : '',
+          date: application.date || '',
           type: application.type,
           status: application.status,
           arrangement: application.arrangement,
@@ -1450,6 +1344,7 @@ app.get(
 );
 
 function serializeDateOnly(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const year = value.getFullYear();
   const month = String(value.getMonth() + 1).padStart(2, '0');
   const day = String(value.getDate()).padStart(2, '0');
@@ -1461,7 +1356,7 @@ function serializeApplication(application) {
     id: String(application.id),
     company: application.company,
     position: application.position,
-    date: application.date ? application.date.toISOString().slice(0, 10) : '',
+    date: application.date ? serializeDateOnly(application.date) : '',
     type: application.type,
     status: application.status,
     arrangement: application.arrangement,
@@ -1493,13 +1388,13 @@ app.get(
           'id, ' +
           'company, ' +
           'position, ' +
-          'application_date AS date, ' +
+          'application_date::text AS date, ' +
           'type, ' +
           'status, ' +
           'arrangement, ' +
           'notes, ' +
           'application_link AS "applicationLink", ' +
-          'interview_date AS "interviewDate", ' +
+          'interview_date::text AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
           'notification_channels AS "notificationChannels", ' +
@@ -1556,23 +1451,11 @@ app.put(
       const notificationChannels = Array.isArray(body.notificationChannels) ? body.notificationChannels : [];
       const normalizedChannels = normalizeNotificationChannels(notificationChannels);
 
-      if (!company || !position || !date || !type || !status || !arrangement || !notes) {
-        return res.status(400).json({
-          message: 'Please complete all required fields.',
-        });
-      }
-
-      if (applicationLink && !/^https?:\/\//i.test(applicationLink)) {
-        return res.status(400).json({
-          message: 'The application link must start with http:// or https://.',
-        });
-      }
-
-      if (status === 'Interview' && (!interviewDate || !interviewTime || !interviewType)) {
-        return res.status(400).json({
-          message: 'Add the interview date, time, and type before saving an interview application.',
-        });
-      }
+      const validationError = validateApplicationInput({
+        company, position, date, type, status, arrangement, notes, applicationLink,
+        interviewDate, interviewTime, interviewType, interviewEmail,
+      });
+      if (validationError) return res.status(400).json({ message: validationError });
 
       let interviewAt;
       if (status === 'Interview') {
@@ -1589,6 +1472,15 @@ app.put(
 
       try {
         await client.query('BEGIN');
+        const currentApplicationResult = await client.query(
+          'SELECT status, company, position FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
+          [applicationId, req.user.id]
+        );
+        const currentApplication = currentApplicationResult.rows[0];
+        if (!currentApplication) {
+          await client.query('ROLLBACK');
+          return res.status(404).json({ message: 'Application not found.' });
+        }
         const result = await client.query(
         'UPDATE applications ' +
           'SET ' +
@@ -1611,13 +1503,13 @@ app.put(
           'id, ' +
           'company, ' +
           'position, ' +
-          'application_date AS date, ' +
+          'application_date::text AS date, ' +
           'type, ' +
           'status, ' +
           'arrangement, ' +
           'notes, ' +
           'application_link AS "applicationLink", ' +
-          'interview_date AS "interviewDate", ' +
+          'interview_date::text AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
           'notification_channels AS "notificationChannels", ' +
@@ -1664,6 +1556,19 @@ app.put(
             client: client,
           });
           notificationSchedule = serializeInterviewNotificationSchedule(schedule);
+        }
+
+        if (currentApplication.status !== result.rows[0].status) {
+          await createStatusChangeNotification({
+            client,
+            userId: req.user.id,
+            applicationId,
+            company: result.rows[0].company,
+            position: result.rows[0].position,
+            previousStatus: currentApplication.status,
+            newStatus: result.rows[0].status,
+            gmailMessageId: 'manual:' + randomUUID(),
+          });
         }
 
         await client.query('COMMIT');
@@ -1748,23 +1653,11 @@ app.post(
       const notificationChannels = Array.isArray(body.notificationChannels) ? body.notificationChannels : [];
       const normalizedChannels = normalizeNotificationChannels(notificationChannels);
 
-      if (!company || !position || !date || !type || !status || !arrangement || !notes) {
-        return res.status(400).json({
-          message: 'Please complete all required fields.',
-        });
-      }
-
-      if (applicationLink && !/^https?:\/\//i.test(applicationLink)) {
-        return res.status(400).json({
-          message: 'The application link must start with http:// or https://.',
-        });
-      }
-
-      if (status === 'Interview' && (!interviewDate || !interviewTime || !interviewType)) {
-        return res.status(400).json({
-          message: 'Add the interview date, time, and type before saving an interview application.',
-        });
-      }
+      const validationError = validateApplicationInput({
+        company, position, date, type, status, arrangement, notes, applicationLink,
+        interviewDate, interviewTime, interviewType, interviewEmail,
+      });
+      if (validationError) return res.status(400).json({ message: validationError });
 
       let interviewAt;
       if (status === 'Interview') {
@@ -1802,13 +1695,13 @@ app.post(
           'id, ' +
           'company, ' +
           'position, ' +
-          'application_date AS date, ' +
+          'application_date::text AS date, ' +
           'type, ' +
           'status, ' +
           'arrangement, ' +
           'notes, ' +
           'application_link AS "applicationLink", ' +
-          'interview_date AS "interviewDate", ' +
+          'interview_date::text AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
           'notification_channels AS "notificationChannels", ' +
@@ -1858,7 +1751,7 @@ app.post(
             id: String(application.id),
             company: application.company,
             position: application.position,
-            date: application.date ? application.date.toISOString().slice(0, 10) : '',
+            date: application.date || '',
             type: application.type,
             status: application.status,
             arrangement: application.arrangement,
@@ -2125,4 +2018,3 @@ ensureDatabase()
     console.error('Failed to initialize database:', error);
     process.exit(1);
   });
-

@@ -104,7 +104,7 @@ export async function refreshUserNotifications(options: { force?: boolean } = {}
   return currentRefresh;
 }
 
-export async function markNotificationAsRead(notificationId: string) {
+export async function setNotificationReadState(notificationId: string, read: boolean) {
   const token = window.localStorage.getItem("applyflow_token");
 
   if (!token) {
@@ -114,7 +114,11 @@ export async function markNotificationAsRead(notificationId: string) {
   try {
     const response = await fetch(`${API_URL}/api/notifications/${encodeURIComponent(notificationId)}/read`, {
       method: "PATCH",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ read }),
     });
     const payload = (await response.json().catch(() => ({}))) as { message?: string };
 
@@ -126,7 +130,7 @@ export async function markNotificationAsRead(notificationId: string) {
       publishNotificationState({
         ...notificationState,
         notifications: notificationState.notifications.map((notification) =>
-          notification.id === notificationId ? { ...notification, read: true } : notification
+          notification.id === notificationId ? { ...notification, read } : notification
         ),
       });
     }
@@ -136,6 +140,10 @@ export async function markNotificationAsRead(notificationId: string) {
   } catch {
     return { ok: false, message: "Unable to connect to the notification server." };
   }
+}
+
+export function markNotificationAsRead(notificationId: string) {
+  return setNotificationReadState(notificationId, true);
 }
 
 function isPastInterviewNotification(notification: {
