@@ -55,6 +55,24 @@ test('status wording in a subject alone is not enough to classify a message', ()
   }
 });
 
+test('assessment invitation subject disambiguates a generic application confirmation', () => {
+  const classification = classifyApplicationEmail({
+    subject: 'Assessment Invitation – Test Company Alpha',
+    text: 'Dear applicant, we have received your application for the Software Developer Intern position. Please keep this confirmation for your records.',
+  });
+
+  assert.equal(classification.status, 'Assessment');
+});
+
+test('assessment invitation subject with unrelated body content is not enough to classify a message', () => {
+  const classification = classifyApplicationEmail({
+    subject: 'Assessment Invitation – Test Company Alpha',
+    text: 'Our assessment of industry trends is attached to this monthly newsletter.',
+  });
+
+  assert.equal(classification.status, null);
+});
+
 test('does not classify unrelated email content', () => {
   assert.equal(
     classifyApplicationEmail({ subject: 'Monthly newsletter', text: 'Here are this month updates.' }).status,

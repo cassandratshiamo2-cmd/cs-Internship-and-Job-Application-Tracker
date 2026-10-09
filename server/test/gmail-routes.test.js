@@ -4,7 +4,9 @@ const express = require('express');
 const http = require('node:http');
 const { createGmailRouter } = require('../gmail-routes');
 
-function createTestPool({ message, application, history = [], notifications }) {
+function createTestPool(options) {
+  const { message, application, history = [], notifications } = options;
+  const applications = options.applications || [application];
   const client = {
     async query(sql, params = []) {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
@@ -14,21 +16,34 @@ function createTestPool({ message, application, history = [], notifications }) {
         return { rowCount: 1, rows: [message] };
       }
       if (sql.startsWith('SELECT id, company, position, status')) {
-        return { rowCount: 1, rows: [{ ...application }] };
+        const selectedApplication = applications.find(
+          (item) => String(item.id) === String(params[0])
+        );
+        return {
+          rowCount: selectedApplication ? 1 : 0,
+          rows: selectedApplication ? [{ ...selectedApplication }] : [],
+        };
       }
       if (sql.startsWith('UPDATE applications SET')) {
         const [, , nextStatus, nextDate, preserveStatus, nextTime, nextType] = params;
-        application.status = preserveStatus ? nextStatus : application.status;
-        application.interview_date = application.interview_date || nextDate;
-        application.interview_time = application.interview_time || nextTime;
-        application.interview_type = application.interview_type || nextType;
-        return { rowCount: 1, rows: [{ ...application }] };
+        const selectedApplication = applications.find(
+          (item) => String(item.id) === String(params[0])
+        );
+        selectedApplication.status = preserveStatus ? nextStatus : selectedApplication.status;
+        selectedApplication.interview_date = selectedApplication.interview_date || nextDate;
+        selectedApplication.interview_time = selectedApplication.interview_time || nextTime;
+        selectedApplication.interview_type = selectedApplication.interview_type || nextType;
+        return { rowCount: 1, rows: [{ ...selectedApplication }] };
       }
       if (sql.startsWith('INSERT INTO notification_jobs')) {
         notifications?.push(params);
         return { rowCount: 1, rows: [{ id: 901 }] };
       }
       if (sql.startsWith('UPDATE gmail_processed_messages SET outcome = \'reviewed\'')) {
+        message.outcome = 'reviewed';
+        message.application_id = params[1];
+        message.previous_status = params[2];
+        message.new_status = message.detected_status;
         return { rowCount: 1, rows: [] };
       }
       throw new Error(`Unexpected test query: ${sql}`);
@@ -315,6 +330,59 @@ test('review endpoint creates one status-change notification transactionally', a
     7, '14', 'Status Update', 'In-app', 'Test Company', 'Software Developer',
   ]);
   assert.deepEqual(notifications[0].slice(7, 9), ['Applied', 'Shortlisted']);
+});
+
+test('applying an assessment review persists status on the selected application and records history', async (t) => {
+  const selectedApplication = {
+    id: 17,
+    company: 'Test Company Alpha',
+    position: 'Software Developer Intern',
+    status: 'Applied',
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const otherApplication = {
+    ...selectedApplication,
+    id: 18,
+    company: 'Test Company Beta',
+    status: 'Applied',
+  };
+  const message = {
+    id: 91,
+    detected_status: 'Assessment',
+    detected_interview_date: null,
+    detected_interview_time: null,
+    detected_interview_type: null,
+  };
+  const notifications = [];
+  const baseUrl = await withGmailReviewServer(t, {
+    message,
+    application: selectedApplication,
+    applications: [selectedApplication, otherApplication],
+    notifications,
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/review/91`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'apply', applicationId: '17' }),
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.message, 'Application status updated.');
+  assert.equal(selectedApplication.status, 'Assessment');
+  assert.equal(otherApplication.status, 'Applied');
+  assert.equal(message.outcome, 'reviewed');
+  assert.equal(message.application_id, 17);
+  assert.equal(message.previous_status, 'Applied');
+  assert.equal(message.new_status, 'Assessment');
+  assert.equal(notifications.length, 1);
+  assert.deepEqual(notifications[0].slice(7, 9), ['Applied', 'Assessment']);
 });
 
 test('history endpoint returns processed interview details and matched application', async (t) => {

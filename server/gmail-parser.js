@@ -121,8 +121,18 @@ function classifyApplicationEmail({ subject = '', text = '', from = '' }, { allo
     return { status: null, confidence: 0, matchedRule: null };
   }
 
+  const hasAssessmentInvitationSubject =
+    /\b(?:asses{1,2}ment\s+(?:invitation|test|task|exercise)|invitation\s+(?:to\s+)?(?:an?\s+)?asses{1,2}ment)\b/i
+      .test(String(subject || '').slice(0, 998));
+  const hasRelevantAssessmentBodyContext =
+    /\b(?:you|your|application|applicant|candidate|role|position|please|complete|take|submit|click|next stage|next step)\b/i
+      .test(searchableText);
+  const classificationText = hasAssessmentInvitationSubject && hasRelevantAssessmentBodyContext
+    ? `${subject}\n${searchableText}`
+    : searchableText;
+
   for (const rule of STATUS_RULES) {
-    const matchedPattern = rule.patterns.find((pattern) => pattern.test(searchableText));
+    const matchedPattern = rule.patterns.find((pattern) => pattern.test(classificationText));
     if (matchedPattern) {
       return {
         status: rule.status,
