@@ -7,8 +7,8 @@ import { getStoredNotifications, syncInterviewNotifications } from "@/lib/mock-d
 import {
   getNotificationState,
   getServerNotificationState,
-  markNotificationAsRead,
   subscribeToNotifications,
+  setNotificationReadState,
 } from "@/lib/notification-api";
 import type { NotificationItem } from "@/lib/types";
 
@@ -95,9 +95,13 @@ export default function NotificationsPage() {
   }, []);
 
   const handleMarkRead = async (notificationId: string) => {
+    return handleSetReadState(notificationId, true);
+  };
+
+  const handleSetReadState = async (notificationId: string, read: boolean) => {
     setMarkingNotificationId(notificationId);
     setActionError("");
-    const result = await markNotificationAsRead(notificationId);
+    const result = await setNotificationReadState(notificationId, read);
     if (!result.ok) {
       setActionError(result.message || "Unable to mark notification as read.");
     }
@@ -173,14 +177,16 @@ export default function NotificationsPage() {
                       ? `Reminder: ${formatReminderDate(notification.scheduledFor)}`
                       : formatDateOnly(notification.date)}
                   </p>
-                  {notification.status === "sent" && !notification.read ? (
+                  {notification.status === "sent" ? (
                     <button
                       type="button"
-                      onClick={() => void handleMarkRead(notification.id)}
+                      onClick={() => void handleSetReadState(notification.id, !notification.read)}
                       disabled={markingNotificationId === notification.id}
                       className="text-sm font-semibold text-[#147d82] underline-offset-2 hover:underline disabled:opacity-60"
                     >
-                      {markingNotificationId === notification.id ? "Marking..." : "Mark as read"}
+                      {markingNotificationId === notification.id
+                        ? "Saving..."
+                        : notification.read ? "Mark as unread" : "Mark as read"}
                     </button>
                   ) : null}
                 </div>

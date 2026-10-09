@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const { createGmailRouter } = require('./gmail-routes');
+const { createNotificationRouter } = require('./notification-routes');
 const { createGmailSyncService, startGmailSyncWorker } = require('./gmail-sync');
 const {
   calculateInterviewReminderSchedule,
@@ -1233,8 +1234,7 @@ app.get(
               'OR (' +
                 'interview_at > NOW() ' +
                 'AND (' +
-                  "status IN ('pending', 'processing') " +
-                  "OR (status = 'sent' AND read = FALSE)" +
+                  "status IN ('pending', 'processing', 'sent')" +
                 ')' +
               ')' +
             ') ' +
@@ -1293,51 +1293,9 @@ app.get(
   }
 );
 
-app.patch(
-  '/api/notifications/:notificationId/read',
-  authenticateRequest,
-  async function (req, res) {
-    try {
-      const result =
-        await pool.query(
-          'UPDATE notification_jobs ' +
-            'SET ' +
-              'read = TRUE, ' +
-              'updated_at = NOW() ' +
-            'WHERE ' +
-              'id = $1 ' +
-              'AND user_id = $2 ' +
-              "AND channel = 'In-app' " +
-            'RETURNING id',
-          [
-            req.params.notificationId,
-            req.user.id,
-          ]
-        );
-
-      if (result.rowCount === 0) {
-        return res.status(404).json({
-          message:
-            'Notification was not found.',
-        });
-      }
-
-      return res.status(200).json({
-        message:
-          'Notification marked as read.',
-      });
-    } catch (error) {
-      console.error(
-        'Mark notification as read failed:',
-        error.message
-      );
-
-      return res.status(500).json({
-        message:
-          'Unable to update notification.',
-      });
-    }
-  }
+app.use(
+  '/api/notifications',
+  createNotificationRouter({ pool, authenticateRequest })
 );
 
 app.delete(
