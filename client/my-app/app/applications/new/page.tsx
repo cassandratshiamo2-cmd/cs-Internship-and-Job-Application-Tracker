@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getStoredApplications, saveApplications } from "@/lib/mock-data";
 import type { Application, InterviewType, NotificationChannel } from "@/lib/types";
@@ -14,9 +14,12 @@ export default function AddApplicationPage() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const savingRef = useRef(false);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (savingRef.current) return;
     const form = new FormData(event.currentTarget);
 
     const company = String(form.get("company") || "").trim();
@@ -48,6 +51,9 @@ export default function AddApplicationPage() {
       return;
     }
 
+    setIsSaving(true);
+    savingRef.current = true;
+    setError("");
     const applications = getStoredApplications();
     const applicationId = `app-${Date.now()}`;
     const defaultInterviewChannels: NotificationChannel[] = ["In-app"];
@@ -104,8 +110,9 @@ export default function AddApplicationPage() {
         notificationNotice = data.notificationSchedule?.message || "";
         saveApplications([...applications, savedApplication]);
       } catch (saveError) {
-        saveApplications([...applications, payload]);
         setError(saveError instanceof Error ? saveError.message : "Unable to save application.");
+        setIsSaving(false);
+        savingRef.current = false;
         return;
       }
     } else {
@@ -119,17 +126,21 @@ export default function AddApplicationPage() {
           window.sessionStorage.setItem("applyflow_delivery_notice", notificationNotice);
         }
       } else {
-        const delivery = await sendExternalInterviewNotifications({
-          applicationId: notificationApplicationId,
-          company,
-          position,
-          interviewDate,
-          interviewTime,
-          interviewType: normalizedInterviewType,
-          applicationLink,
-          notificationChannels: selectedChannels.length ? selectedChannels : defaultInterviewChannels,
-        });
-        window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
+        try {
+          const delivery = await sendExternalInterviewNotifications({
+            applicationId: notificationApplicationId,
+            company,
+            position,
+            interviewDate,
+            interviewTime,
+            interviewType: normalizedInterviewType,
+            applicationLink,
+            notificationChannels: selectedChannels.length ? selectedChannels : defaultInterviewChannels,
+          });
+          window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
+        } catch {
+          window.sessionStorage.setItem("applyflow_delivery_notice", "Application saved, but its reminder could not be scheduled.");
+        }
       }
     }
     router.push("/applications");
@@ -216,8 +227,8 @@ export default function AddApplicationPage() {
             <Link href="/applications" className="inline-flex items-center justify-center rounded-full border border-[#e7d6dd] bg-white px-5 py-3 text-sm font-semibold text-slate-700">
               Cancel
             </Link>
-            <button type="submit" className="rounded-full bg-[#1db7b5] px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-[#169a9a]">
-              Save Application
+            <button type="submit" disabled={isSaving} className="rounded-full bg-[#1db7b5] px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-[#169a9a] disabled:cursor-not-allowed disabled:opacity-60">
+              {isSaving ? "Saving..." : "Save Application"}
             </button>
           </div>
         </form>

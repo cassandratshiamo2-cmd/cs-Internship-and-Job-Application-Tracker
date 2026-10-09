@@ -36,6 +36,8 @@ const STATUS_RULES = [
     status: 'Interview',
     patterns: [
       /invited? you to (?:an? )?interview/i,
+      /invite(?:s|d)?\s+you\s+(?:to|for)\s+(?:an?\s+)?interview/i,
+      /you\s+(?:are|'re)\s+invited?\s+(?:to|for)\s+(?:an?\s+)?interview/i,
       /interview invitation/i,
       /shortlisted.{0,40}interview/i,
       /interview.{0,40}shortlisted/i,
@@ -57,6 +59,9 @@ const STATUS_RULES = [
     status: 'Assessment',
     patterns: [
       /assessment (?:test|task|invitation|exercise|link)/i,
+      /invited?\s+(?:you\s+)?(?:for|to)\s+(?:an?\s+)?asses{1,2}ment\b/i,
+      /invitation\s+to\s+(?:an?\s+)?asses{1,2}ment\b/i,
+      /(?:complete|take|do)\s+(?:an?\s+)?asses{1,2}ment\b/i,
       /complete.{0,30}assessment/i,
       /online assessment/i,
       /coding challenge/i,
@@ -111,7 +116,10 @@ function classifyApplicationEmail({ subject = '', text = '', from = '' }, { allo
     };
   }
 
-  const searchableText = `${subject}\n${text}`.slice(0, 100000);
+  const searchableText = String(text || '').slice(0, 100000);
+  if (!searchableText.trim()) {
+    return { status: null, confidence: 0, matchedRule: null };
+  }
 
   for (const rule of STATUS_RULES) {
     const matchedPattern = rule.patterns.find((pattern) => pattern.test(searchableText));

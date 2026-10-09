@@ -239,12 +239,31 @@ function decideApplicationEmailUpdate({
     };
   }
 
+  const isStale = Boolean(
+    !manual &&
+    updatedAt &&
+    receivedAt &&
+    new Date(updatedAt).getTime() > new Date(receivedAt).getTime()
+  );
+
   if (currentStatus === detectedStatus) {
     const applyInterviewDetails = Boolean(
       detectedStatus === 'Interview' &&
       interviewDetailsDetected &&
       interviewDetailsChanged
     );
+    if (applyInterviewDetails && isStale) {
+      return {
+        action: 'manual_review',
+        applyStatus: false,
+        applyInterviewDetails: false,
+        alreadyUpToDate: false,
+        requiresReview: true,
+        isBackward: false,
+        isStale: true,
+        reason: 'The application was updated after this email arrived.',
+      };
+    }
     return {
       action: applyInterviewDetails ? 'apply' : 'already_up_to_date',
       applyStatus: false,
@@ -262,12 +281,6 @@ function decideApplicationEmailUpdate({
     STATUS_ORDER[detectedStatus] !== undefined &&
     STATUS_ORDER[currentStatus] !== undefined &&
     STATUS_ORDER[detectedStatus] < STATUS_ORDER[currentStatus];
-  const isStale = Boolean(
-    !manual &&
-    updatedAt &&
-    receivedAt &&
-    new Date(updatedAt).getTime() > new Date(receivedAt).getTime()
-  );
 
   if ((!allowedTransition && !allowEmailStatusCorrection) || isStale) {
     return {

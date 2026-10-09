@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { getApplicationById, getStoredApplications, saveApplications } from "@/lib/mock-data";
 import type { Application, InterviewType, NotificationChannel } from "@/lib/types";
@@ -18,6 +18,8 @@ export default function EditApplicationPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const savingRef = useRef(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -75,6 +77,7 @@ export default function EditApplicationPage() {
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (savingRef.current) return;
     if (!application) return;
 
     const form = new FormData(event.currentTarget);
@@ -98,6 +101,8 @@ export default function EditApplicationPage() {
 
     const token = window.localStorage.getItem("applyflow_token");
     let notificationNotice = "";
+    setIsSaving(true);
+    savingRef.current = true;
     setSaveError("");
 
     if (token) {
@@ -129,11 +134,15 @@ export default function EditApplicationPage() {
 
         if (!response.ok) {
           setSaveError(payload.message || "Unable to save application and schedule its reminder.");
+          setIsSaving(false);
+          savingRef.current = false;
           return;
         }
         notificationNotice = payload.notificationSchedule?.message || "";
       } catch (error) {
         setSaveError(error instanceof Error ? error.message : "Unable to connect to the server.");
+        setIsSaving(false);
+        savingRef.current = false;
         return;
       }
     }
@@ -157,24 +166,28 @@ export default function EditApplicationPage() {
     });
     saveApplications(updatedApplications);
 
-    if (nextStatus === "Interview") {
-      if (token) {
-        if (notificationNotice) window.sessionStorage.setItem("applyflow_delivery_notice", notificationNotice);
+    try {
+      if (nextStatus === "Interview") {
+        if (token) {
+          if (notificationNotice) window.sessionStorage.setItem("applyflow_delivery_notice", notificationNotice);
+        } else {
+          const delivery = await sendExternalInterviewNotifications({
+            applicationId: application.id,
+            company: String(form.get("company") || application.company).trim(),
+            position: String(form.get("position") || application.position).trim(),
+            interviewDate,
+            interviewTime,
+            interviewType: normalizedInterviewType,
+            applicationLink,
+            notificationChannels: savedChannels,
+          });
+          window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
+        }
       } else {
-        const delivery = await sendExternalInterviewNotifications({
-          applicationId: application.id,
-          company: String(form.get("company") || application.company).trim(),
-          position: String(form.get("position") || application.position).trim(),
-          interviewDate,
-          interviewTime,
-          interviewType: normalizedInterviewType,
-          applicationLink,
-          notificationChannels: savedChannels,
-        });
-        window.sessionStorage.setItem("applyflow_delivery_notice", delivery.message);
+        await cancelExternalInterviewNotifications(application.id);
       }
-    } else {
-      await cancelExternalInterviewNotifications(application.id);
+    } catch {
+      window.sessionStorage.setItem("applyflow_delivery_notice", "Application saved, but its reminder could not be updated.");
     }
     router.push(`/applications/${application.id}`);
   };
@@ -242,7 +255,7 @@ export default function EditApplicationPage() {
           {saveError ? <div role="alert" className="rounded-2xl border border-[#f8c8d5] bg-[#fff4f7] px-4 py-3 text-sm text-[#b3506e]">{saveError}</div> : null}
           <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <Link href={`/applications/${application.id}`} className="inline-flex items-center justify-center rounded-full border border-[#e7d6dd] bg-white px-5 py-3 text-sm font-semibold text-slate-700">Cancel</Link>
-            <button type="submit" className="rounded-full bg-[#1db7b5] px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-[#169a9a]">Save Changes</button>
+            <button type="submit" disabled={isSaving} className="rounded-full bg-[#1db7b5] px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-[#169a9a] disabled:cursor-not-allowed disabled:opacity-60">{isSaving ? "Saving..." : "Save Changes"}</button>
           </div>
         </form>
       </div>

@@ -17,6 +17,7 @@ export type GmailReviewMessage = {
   received_at: string;
   detected_status: Application['status'] | null;
   confidence: number;
+  retryable: boolean;
   candidate_application_ids: string[];
   review_reason: string | null;
 };
@@ -39,6 +40,7 @@ export type GmailProcessedMessage = {
   application_interview_date: string | null;
   application_interview_time: string | null;
   application_interview_type: string | null;
+  retryable: boolean;
 };
 
 type ApiOptions = RequestInit & { token: string };
@@ -99,6 +101,8 @@ export function syncGmail(token: string) {
     processed: number;
     inProgress?: boolean;
     retryAfterSeconds?: number;
+    outcomes?: string[];
+    initialSyncComplete?: boolean;
   }>('/sync', {
     token,
     method: 'POST',
@@ -115,4 +119,11 @@ export function decideGmailReview(
     method: 'POST',
     body: JSON.stringify(decision),
   });
+}
+
+export function retryGmailMessage(token: string, messageId: string) {
+  return apiRequest<{ message: string; processed: number; outcomes: string[] }>(
+    `/messages/${encodeURIComponent(messageId)}/retry`,
+    { token, method: 'POST' },
+  );
 }
