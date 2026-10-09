@@ -23,6 +23,17 @@ const QUOTA_COOLDOWN_BASE_SECONDS = 60;
 const QUOTA_COOLDOWN_MAX_SECONDS = 3600;
 const DEFAULT_GMAIL_REQUEST_TIMEOUT_MS = 30000;
 const MAX_GMAIL_REQUEST_TIMEOUT_MS = 120000;
+const UNCLASSIFIED_EMAIL_REVIEW_REASON = 'No supported application status rule matched.';
+const IGNORED_MESSAGE_REPROCESS_DAYS = 30;
+const IGNORED_MESSAGE_REPROCESS_LIMIT = 25;
+const IGNORED_MESSAGE_REPROCESS_VERSION = 1;
+
+function isRetryableIgnoredMessage(message) {
+  return message?.outcome === 'ignored' &&
+    !message.detected_status &&
+    message.review_reason === UNCLASSIFIED_EMAIL_REVIEW_REASON &&
+    Number(message.reprocess_version || 0) < IGNORED_MESSAGE_REPROCESS_VERSION;
+}
 
 function getGmailRequestTimeoutMs(env) {
   const configuredTimeout = Number(env.GMAIL_SYNC_REQUEST_TIMEOUT_MS);
@@ -262,6 +273,52 @@ function createGmailSyncService({
     };
   }
 
+  async function createStatusChangeNotification({
+    client,
+    userId,
+    applicationId,
+    company,
+    position,
+    previousStatus,
+    newStatus,
+    gmailMessageId,
+  }) {
+    const eventKey = `status-change:${applicationId}:${gmailMessageId || Date.now()}`;
+    const result = await client.query(
+      'INSERT INTO notification_jobs (' +
+        'user_id, ' +
+        'application_id, ' +
+        'notification_type, ' +
+        'channel, ' +
+        'company, ' +
+        'position, ' +
+        'application_link, ' +
+        'scheduled_for, ' +
+        'status, ' +
+        'read, ' +
+        'previous_status, ' +
+        'new_status, ' +
+        'event_key' +
+      ') VALUES (' +
+        '$1, $2, $3, $4, $5, $6, NULL, NOW(), $7, FALSE, $8, $9, $10' +
+      ') ON CONFLICT (user_id, application_id, notification_type, channel, event_key) DO NOTHING RETURNING id',
+      [
+        userId,
+        String(applicationId),
+        'Status Update',
+        'In-app',
+        company,
+        position,
+        'sent',
+        previousStatus || null,
+        newStatus || null,
+        eventKey,
+      ]
+    );
+
+    return result.rowCount > 0;
+  }
+
   async function recordMessage(connection, email, classification, match, interviewDetails) {
     const client = await pool.connect();
     try {
@@ -294,22 +351,26 @@ function createGmailSyncService({
       let messageRowId;
       if (inserted.rowCount === 0) {
         const existing = await client.query(
-          'SELECT id, outcome FROM gmail_processed_messages ' +
+          'SELECT id, outcome, detected_status, review_reason, reprocess_version FROM gmail_processed_messages ' +
             'WHERE connection_id = $1 AND gmail_message_id = $2 FOR UPDATE',
           [connection.id, email.id]
         );
-        if (!existing.rows[0] || existing.rows[0].outcome !== 'review') {
+        const existingMessage = existing.rows[0];
+        if (!existingMessage || (
+          existingMessage.outcome !== 'review' && !isRetryableIgnoredMessage(existingMessage)
+        )) {
           await client.query('ROLLBACK');
           return 'duplicate';
         }
 
-        messageRowId = existing.rows[0].id;
+        messageRowId = existingMessage.id;
         await client.query(
           'UPDATE gmail_processed_messages SET ' +
             'sender = $2, subject = $3, received_at = $4, detected_status = $5, ' +
             'detected_interview_date = $6::date, detected_interview_time = $7::time, ' +
             'detected_interview_type = $8, confidence = $9, candidate_application_ids = $10::jsonb, outcome = \'processing\', ' +
-            'review_reason = NULL, processed_at = NULL WHERE id = $1',
+            'review_reason = NULL, processed_at = NULL, ' +
+            'reprocess_version = CASE WHEN $11::boolean THEN $12 ELSE reprocess_version END WHERE id = $1',
           [
             messageRowId,
             email.from.slice(0, 998),
@@ -321,6 +382,8 @@ function createGmailSyncService({
             interviewDetails?.interviewType || null,
             classification.confidence,
             JSON.stringify(match.candidateIds || []),
+            isRetryableIgnoredMessage(existingMessage),
+            IGNORED_MESSAGE_REPROCESS_VERSION,
           ]
         );
       } else {
@@ -374,6 +437,7 @@ function createGmailSyncService({
         receivedAt: email.receivedAt,
         interviewDetailsDetected: interviewDetailsWereDetected,
         interviewDetailsChanged,
+        allowEmailStatusCorrection: true,
       });
       if (updateDecision.action === 'manual_review' || !application) {
         await client.query(
@@ -434,6 +498,19 @@ function createGmailSyncService({
         client,
       });
 
+      if (application.status !== classification.status) {
+        await createStatusChangeNotification({
+          client,
+          userId: connection.user_id,
+          applicationId: application.id,
+          company: updatedApplication.company,
+          position: updatedApplication.position,
+          previousStatus: application.status,
+          newStatus: classification.status,
+          gmailMessageId: email.id,
+        });
+      }
+
       await client.query(
         "UPDATE gmail_processed_messages SET outcome = 'updated', application_id = $2, previous_status = $3, new_status = $4, processed_at = NOW() WHERE id = $1",
         [messageRowId, application.id, application.status, classification.status]
@@ -450,10 +527,13 @@ function createGmailSyncService({
 
   async function processMessage(connection, gmail, messageId) {
     const existing = await pool.query(
-      'SELECT outcome FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
+      'SELECT outcome, detected_status, review_reason, reprocess_version FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
       [connection.id, messageId]
     );
-    if (existing.rowCount > 0 && existing.rows[0]?.outcome !== 'review') return 'duplicate';
+    const existingMessage = existing.rows[0];
+    if (existingMessage && existingMessage.outcome !== 'review' && !isRetryableIgnoredMessage(existingMessage)) {
+      return 'duplicate';
+    }
 
     const email = await fetchMessage(gmail, messageId);
     if (!email) return 'ignored';
@@ -668,7 +748,7 @@ function createGmailSyncService({
     };
   }
 
-  async function syncConnection(connectionId) {
+  async function syncConnection(connectionId, { reprocessIgnored = false } = {}) {
     let lockClient;
     let hasLock = false;
     let lockAcquisitionAttempted = false;
@@ -709,6 +789,26 @@ function createGmailSyncService({
         };
       }
 
+      const ignoredMessages = reprocessIgnored
+        ? await pool.query(
+            'SELECT gmail_message_id FROM gmail_processed_messages ' +
+              'WHERE connection_id = $1 ' +
+                "AND outcome = 'ignored' " +
+                'AND detected_status IS NULL ' +
+                'AND review_reason = $2 ' +
+                'AND COALESCE(reprocess_version, 0) < $3 ' +
+                "AND received_at >= NOW() - ($4::int * INTERVAL '1 day') " +
+              'ORDER BY received_at DESC LIMIT $5',
+            [
+              connection.id,
+              UNCLASSIFIED_EMAIL_REVIEW_REASON,
+              IGNORED_MESSAGE_REPROCESS_VERSION,
+              IGNORED_MESSAGE_REPROCESS_DAYS,
+              IGNORED_MESSAGE_REPROCESS_LIMIT,
+            ]
+          )
+        : { rows: [] };
+
       try {
         const gmail = await buildGmailClient(connection);
         let syncResult;
@@ -728,7 +828,7 @@ function createGmailSyncService({
           try {
             syncResult = await syncHistory(connection, gmail);
           } catch (error) {
-            if (error.code !== 404 && error.response?.status !== 404) throw error;
+            if (getGmailErrorStatus(error) !== 404) throw error;
             const profile = (await withQuotaRetry(() => withGmailRequestTimeout(
               (requestOptions) => gmail.users.getProfile({ userId: 'me', ...requestOptions }),
               'Gmail profile fetch'
@@ -744,6 +844,19 @@ function createGmailSyncService({
               initial_sync_history_id: null,
               initial_sync_page_token: null,
             }, gmail, profile);
+          }
+        }
+
+        if (reprocessIgnored) {
+          if (ignoredMessages.rows.length) {
+            const retryBatch = await processMessagesIndividually(
+              connection,
+              gmail,
+              ignoredMessages.rows.map((row) => row.gmail_message_id)
+            );
+            syncResult.processed += ignoredMessages.rows.length;
+            syncResult.outcomes.push(...retryBatch.outcomes);
+            syncResult.warnings.push(...retryBatch.warnings);
           }
         }
 
@@ -830,7 +943,7 @@ function createGmailSyncService({
     }
   }
 
-  async function syncUser(userId) {
+  async function syncUser(userId, options) {
     const result = await pool.query(
       'SELECT id FROM gmail_connections WHERE user_id = $1 AND is_connected = TRUE',
       [userId]
@@ -840,7 +953,7 @@ function createGmailSyncService({
       error.code = 'GMAIL_NOT_CONNECTED';
       throw error;
     }
-    return syncConnection(result.rows[0].id);
+    return syncConnection(result.rows[0].id, options);
   }
 
   async function syncAllConnected() {

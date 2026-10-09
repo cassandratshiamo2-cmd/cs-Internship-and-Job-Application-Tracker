@@ -19,8 +19,10 @@ function createTestService({
   failLockAcquisition = false,
   requestTimeoutMs = 30000,
   messageGet,
+  messageList,
   parseMessage,
   applications = [],
+  existingMessages = [],
   scheduleInterviewReminder,
   wait = async () => {},
   random = () => 0.5,
@@ -28,21 +30,36 @@ function createTestService({
   const calls = {
     profile: 0,
     history: 0,
+    list: 0,
     get: 0,
     delays: [],
     unlocks: 0,
     releases: 0,
     discardedClients: 0,
     applicationUpdates: 0,
+    historyResets: 0,
+    historyCursorUpdates: [],
+    initialSyncCursorUpdates: [],
+    notifications: [],
     oauthTimeout: null,
     lockQueryTimeouts: [],
   };
   const processedRows = new Map();
   let nextProcessedId = 100;
+  let nextNotificationId = 1;
   if (existingMessage) {
     processedRows.set('already-processed', {
       id: 99,
       outcome: typeof existingMessage === 'string' ? existingMessage : 'updated',
+    });
+  }
+  for (const message of existingMessages) {
+    processedRows.set(message.messageId, {
+      id: message.id,
+      outcome: message.outcome,
+      detectedStatus: message.detectedStatus || null,
+      reviewReason: message.reviewReason || null,
+      reprocessVersion: message.reprocessVersion || 0,
     });
   }
   const connection = {
@@ -73,12 +90,24 @@ function createTestService({
           rows: coolingDown ? [{ retry_after_seconds: 90 }] : [],
         };
       }
-      if (sql.startsWith('SELECT outcome FROM gmail_processed_messages')) {
+      if (sql.startsWith('SELECT outcome, detected_status')) {
         const row = processedRows.get(String(params[1]));
         return {
           rowCount: row ? 1 : 0,
-          rows: row ? [{ outcome: row.outcome }] : [],
+          rows: row ? [{
+            outcome: row.outcome,
+            detected_status: row.detectedStatus,
+            review_reason: row.reviewReason,
+            reprocess_version: row.reprocessVersion || 0,
+          }] : [],
         };
+      }
+      if (sql.startsWith('SELECT gmail_message_id FROM gmail_processed_messages')) {
+        const rows = Array.from(processedRows.entries())
+          .filter(([, row]) => row.outcome === 'ignored' && !row.detectedStatus &&
+            row.reviewReason === params[1] && (row.reprocessVersion || 0) < params[2])
+          .map(([gmailMessageId]) => ({ gmail_message_id: gmailMessageId }));
+        return { rowCount: rows.length, rows };
       }
       if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
         return { rowCount: applications.length, rows: applications };
@@ -86,6 +115,22 @@ function createTestService({
       if (sql.startsWith('UPDATE gmail_connections SET quota_failure_count')) {
         coolingDown = cooldownAfterQuota;
         return { rowCount: 1, rows: [{ retry_after_seconds: 60 }] };
+      }
+      if (sql.startsWith('UPDATE gmail_connections SET history_id = NULL')) {
+        calls.historyResets += 1;
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.startsWith('UPDATE gmail_connections SET initial_sync_history_id = $2')) {
+        calls.initialSyncCursorUpdates.push(params[1]);
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.startsWith('UPDATE gmail_connections SET initial_sync_page_token = $2')) {
+        calls.initialSyncCursorUpdates.push(params[2]);
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.startsWith('UPDATE gmail_connections SET history_id = $2, last_sync_at')) {
+        calls.historyCursorUpdates.push(params[1]);
+        return { rowCount: 1, rows: [] };
       }
       if (sql.startsWith('UPDATE gmail_connections')) {
         return { rowCount: 1, rows: [] };
@@ -124,6 +169,34 @@ function createTestService({
             return { rowCount: 1, rows: [{ pg_advisory_unlock: true }] };
           }
           if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rowCount: 1, rows: [] };
+          if (sql.startsWith('INSERT INTO notification_jobs')) {
+            const [userId, applicationId, notificationType, channel, company, position, status, previousStatus, newStatus, eventKey] = params;
+            const exists = calls.notifications.some((notification) =>
+              notification.user_id === userId &&
+              notification.application_id === applicationId &&
+              notification.notification_type === notificationType &&
+              notification.channel === channel &&
+              notification.event_key === eventKey
+            );
+            if (exists) return { rowCount: 0, rows: [] };
+
+            const notification = {
+              id: nextNotificationId++,
+              user_id: userId,
+              application_id: applicationId,
+              notification_type: notificationType,
+              channel,
+              company,
+              position,
+              status,
+              read: false,
+              previous_status: previousStatus,
+              new_status: newStatus,
+              event_key: eventKey,
+            };
+            calls.notifications.push(notification);
+            return { rowCount: 1, rows: [{ id: notification.id }] };
+          }
           if (sql.startsWith('INSERT INTO gmail_processed_messages')) {
             const messageId = String(params[2]);
             if (sql.includes('review_reason, processed_at')) {
@@ -148,13 +221,24 @@ function createTestService({
             });
             return { rowCount: 1, rows: [{ id }] };
           }
-          if (sql.startsWith('SELECT id, outcome FROM gmail_processed_messages')) {
+          if (sql.startsWith('SELECT id, outcome')) {
             const row = processedRows.get(String(params[1]));
-            return { rowCount: row ? 1 : 0, rows: row ? [row] : [] };
+            return { rowCount: row ? 1 : 0, rows: row ? [{
+              id: row.id,
+              outcome: row.outcome,
+              detected_status: row.detectedStatus,
+              review_reason: row.reviewReason,
+              reprocess_version: row.reprocessVersion || 0,
+            }] : [] };
           }
           if (sql.startsWith('UPDATE gmail_processed_messages SET sender =')) {
             const row = Array.from(processedRows.values()).find((item) => item.id === params[0]);
-            if (row) row.outcome = 'processing';
+            if (row) {
+              row.outcome = 'processing';
+              row.detectedStatus = params[4];
+              row.reviewReason = null;
+              if (params[10]) row.reprocessVersion = params[11];
+            }
             return { rowCount: 1, rows: [] };
           }
           if (sql.startsWith('SELECT id, company, position, status, updated_at, interview_date')) {
@@ -178,7 +262,12 @@ function createTestService({
           }
           if (sql.startsWith('UPDATE gmail_processed_messages SET outcome =')) {
             const row = Array.from(processedRows.values()).find((item) => item.id === params[0]);
-            if (row) row.outcome = /SET outcome = '([^']+)'/.exec(sql)?.[1] || row.outcome;
+            if (row) {
+              row.outcome = /SET outcome = '([^']+)'/.exec(sql)?.[1] || row.outcome;
+              row.applicationId = params[1];
+              row.previousStatus = params[2];
+              row.newStatus = params[3];
+            }
             return { rowCount: 1, rows: [] };
           }
           throw new Error(`Unexpected lock query: ${sql}`);
@@ -233,6 +322,10 @@ function createTestService({
             },
           },
           messages: {
+            list: async (options) => {
+              calls.list += 1;
+              return messageList ? messageList(options) : { data: { messages: [] } };
+            },
             get: async ({ id }) => {
               calls.get += 1;
               return messageGet ? messageGet(id) : { data: {} };
@@ -322,6 +415,11 @@ test('an existing review message is re-evaluated and updated in place when a str
   assert.equal(processedRows.get('already-processed').outcome, 'updated');
   assert.equal(calls.applicationUpdates, 1);
   assert.equal(application.status, 'Interview');
+  assert.deepEqual(calls.notifications.map(({ read, previous_status, new_status }) => ({
+    read,
+    previous_status,
+    new_status,
+  })), [{ read: false, previous_status: 'Applied', new_status: 'Interview' }]);
 });
 
 test('a connection lock prevents a second sync from calling Gmail concurrently', async () => {
@@ -422,12 +520,33 @@ test('a hanging Gmail request times out, releases its lock, and recovers on retr
   assert.equal(timedOutSignal.aborted, true);
   assert.equal(calls.oauthTimeout, 10);
   assert.deepEqual(calls.lockQueryTimeouts, [10, 10]);
+  assert.deepEqual(calls.historyCursorUpdates, []);
   assert.equal(isLockHeld(), false);
 
   const retryResult = await service.syncConnection(7);
   assert.equal(retryResult.inProgress, undefined);
   assert.equal(historyAttempts, 2);
   assert.equal(isLockHeld(), false);
+  assert.deepEqual(calls.historyCursorUpdates, ['history-after-timeout']);
+});
+
+test('an expired Gmail history cursor resets and falls back to initial message sync', async () => {
+  const { calls, service } = createTestService({
+    historyList: async () => {
+      const error = new Error('History ID is too old');
+      error.response = { status: 404 };
+      throw error;
+    },
+    messageList: async () => ({ data: { messages: [] } }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.equal(calls.historyResets, 1);
+  assert.equal(calls.profile, 1);
+  assert.equal(calls.list, 1);
+  assert.equal(result.initialSyncComplete, true);
+  assert.deepEqual(calls.initialSyncCursorUpdates, ['initial-history', 'initial-history']);
 });
 
 test('scenario 13: malformed message records a warning and the next valid email still applies', async () => {
@@ -549,6 +668,8 @@ test('scenario 12: processing the same Gmail message twice has one application a
   assert.equal(processedRows.size, 1);
   assert.equal(calls.applicationUpdates, 1);
   assert.equal(reminderCount, 1);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(calls.notifications[0].read, false);
   assert.equal(application.status, 'Interview');
   assert.equal(application.interview_date, '2026-10-09');
   assert.equal(application.interview_time, '08:30');
@@ -756,6 +877,256 @@ test('Shoprite outcome email matches Cashier and records Interview to Rejected i
   assert.equal(calls.applicationUpdates, 1);
 });
 
+test('a clear Shoprite invitation corrects Rejected to Interview despite unrelated company candidates', async () => {
+  const applications = [
+    {
+      id: 79,
+      company: 'Shoprite',
+      position: 'Cashier',
+      status: 'Rejected',
+      updated_at: new Date('2026-10-07T06:00:00Z'),
+      interview_date: null,
+      interview_time: null,
+      interview_type: null,
+      notification_channels: [],
+      application_link: null,
+      interview_email: null,
+    },
+    { id: 80, company: 'Test Company', position: 'Developer', status: 'Applied' },
+    { id: 81, company: 'ABC Test Company', position: 'Analyst', status: 'Applied' },
+    { id: 82, company: 'Rejected Test Company', position: 'Engineer', status: 'Rejected' },
+  ];
+  const raw = Buffer.from([
+    'From: Shoprite Careers <careers@shoprite.co.za>',
+    'To: applyflow@example.com',
+    'Subject: INTERVIEW INVITATION - Shoprite TEST',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Shoprite invites you to an interview for the Cashier position.',
+    'Your interview is scheduled for 15 October 2026 at 10:00.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications,
+    historyList: async () => ({
+      data: {
+        historyId: 'history-shoprite-interview-correction',
+        history: [{ messagesAdded: [{ message: { id: 'shoprite-interview-correction' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'shoprite-interview-correction-thread',
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+  const processed = processedRows.get('shoprite-interview-correction');
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(processed.detectedStatus, 'Interview');
+  assert.equal(processed.applicationId, 79);
+  assert.equal(applications[0].status, 'Interview');
+  assert.equal(applications[0].interview_date, '2026-10-15');
+  assert.equal(applications[0].interview_time, '10:00');
+  assert.deepEqual(applications.slice(1).map(({ status }) => status), ['Applied', 'Applied', 'Rejected']);
+  assert.equal(calls.applicationUpdates, 1);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(calls.notifications[0].read, false);
+  assert.equal(calls.notifications[0].previous_status, 'Rejected');
+  assert.equal(calls.notifications[0].new_status, 'Interview');
+  assert.equal(calls.notifications[0].event_key, 'status-change:79:shoprite-interview-correction');
+});
+
+test('a Microsoft rejection updates the matching Applied application and notifies once', async () => {
+  const application = {
+    id: 83,
+    company: 'Microsoft',
+    position: 'Software Engineer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: Microsoft Recruiting <recruiting@microsoft.com>',
+    'To: applyflow@example.com',
+    'Subject: Microsoft Application Update',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We regret to inform you that your Microsoft Software Engineer application was unsuccessful.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-microsoft-rejection',
+        history: [{ messagesAdded: [{ message: { id: 'microsoft-rejection' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(application.status, 'Rejected');
+  assert.equal(calls.applicationUpdates, 1);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(calls.notifications[0].previous_status, 'Applied');
+  assert.equal(calls.notifications[0].new_status, 'Rejected');
+  assert.equal(calls.notifications[0].read, false);
+});
+
+test('a Google security alert cannot change an application or create a status notification', async () => {
+  const application = {
+    id: 84,
+    company: 'Shoprite',
+    position: 'Cashier',
+    status: 'Interview',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: Google <no-reply@accounts.google.com>',
+    'To: applyflow@example.com',
+    'Subject: Security alert for your Google Account',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'A new device signed in to your Google Account. If this was not you, secure your account.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-google-security-alert',
+        history: [{ messagesAdded: [{ message: { id: 'google-security-alert' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['ignored']);
+  assert.equal(processedRows.get('google-security-alert').outcome, 'ignored');
+  assert.equal(application.status, 'Interview');
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(calls.notifications.length, 0);
+});
+
+test('Hitech rejection email with a misspelling updates the matching application and creates an unread notification', async () => {
+  const application = {
+    id: 78,
+    company: 'Hitech',
+    position: 'Juniour developer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const subject = 'Responds to an application made';
+  const raw = Buffer.from([
+    'From: Tshiamo Malefo <tshiamomalefo0@gmail.com>',
+    'To: applyflow@example.com',
+    `Subject: ${subject}`,
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Dear Cassandra',
+    '',
+    'After a serious competition of large numbers of applicants we unfortunately decided not to carry o with your application',
+    '',
+    'Best of luch with your career',
+    '',
+    'Kind regards',
+    '',
+    'Hitech recruiment team',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    existingMessages: [{
+      id: 88,
+      messageId: 'hitech-rejection',
+      outcome: 'ignored',
+      reviewReason: 'No supported application status rule matched.',
+    }],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-hitech-rejection',
+        history: [],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'hitech-rejection-thread',
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7, { reprocessIgnored: true });
+  const historyRow = processedRows.get('hitech-rejection');
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(historyRow.detectedStatus, 'Rejected');
+  assert.equal(historyRow.outcome, 'updated');
+  assert.equal(application.status, 'Rejected');
+  assert.equal(calls.applicationUpdates, 1);
+  assert.deepEqual(calls.notifications, [{
+    id: 1,
+    user_id: 4,
+    application_id: '78',
+    notification_type: 'Status Update',
+    channel: 'In-app',
+    company: 'Hitech',
+    position: 'Juniour developer',
+    status: 'sent',
+    read: false,
+    previous_status: 'Applied',
+    new_status: 'Rejected',
+    event_key: 'status-change:78:hitech-rejection',
+  }]);
+
+  const retryResult = await service.syncConnection(7, { reprocessIgnored: true });
+  assert.deepEqual(retryResult.outcomes, []);
+  assert.equal(calls.get, 1);
+  assert.equal(calls.notifications.length, 1);
+});
+
 test('a Gmail API authentication failure remains fatal and releases the connection lock', async () => {
   const { service, isLockHeld, calls } = createTestService({
     historyList: async () => ({
@@ -874,7 +1245,7 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
     async query(sql) {
       if (sql.startsWith('SELECT * FROM gmail_connections')) return { rowCount: 1, rows: [connection] };
       if (sql.startsWith('SELECT CEIL(EXTRACT(EPOCH FROM (quota_backoff_until')) return { rowCount: 0, rows: [] };
-      if (sql.startsWith('SELECT outcome FROM gmail_processed_messages')) return { rowCount: 0, rows: [] };
+      if (sql.startsWith('SELECT outcome, detected_status')) return { rowCount: 0, rows: [] };
       if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
         return { rowCount: 1, rows: [application] };
       }
@@ -992,8 +1363,8 @@ test('scenarios 1-7: status transitions run through matching, persistence, and a
     { current: 'Shortlisted', detected: 'Interview', expected: 'updated', expectedStatus: 'Interview', interview: true },
     { current: 'Interview', detected: 'Offer', expected: 'updated', expectedStatus: 'Offer' },
     { current: 'Interview', detected: 'Interview', expected: 'updated', expectedStatus: 'Interview', interview: true },
-    { current: 'Rejected', detected: 'Interview', expected: 'review', expectedStatus: 'Rejected', interview: true },
-    { current: 'Offer', detected: 'Interview', expected: 'review', expectedStatus: 'Offer', interview: true },
+    { current: 'Rejected', detected: 'Interview', expected: 'updated', expectedStatus: 'Interview', interview: true },
+    { current: 'Offer', detected: 'Interview', expected: 'updated', expectedStatus: 'Interview', interview: true },
   ];
   const emailText = {
     Interview: 'Shoprite invites you to interview for the Cashier position. Your interview is scheduled for 09 October 2026 at 08:30.',
@@ -1051,6 +1422,39 @@ test('scenarios 1-7: status transitions run through matching, persistence, and a
     assert.deepEqual(result.outcomes, [scenario.expected], `scenario ${index + 1}`);
     assert.equal(application.status, scenario.expectedStatus, `scenario ${index + 1} status`);
     assert.equal(calls.applicationUpdates, scenario.expected === 'updated' ? 1 : 0, `scenario ${index + 1} write count`);
+    const shouldNotify = scenario.expected === 'updated' && scenario.current !== scenario.detected;
+    assert.equal(calls.notifications.length, shouldNotify ? 1 : 0, `scenario ${index + 1} notification count`);
+    if (shouldNotify) {
+      assert.deepEqual(
+        calls.notifications.map(({ user_id, application_id, notification_type, channel, company, position, status, read, previous_status, new_status, event_key }) => ({
+          user_id,
+          application_id,
+          notification_type,
+          channel,
+          company,
+          position,
+          status,
+          read,
+          previous_status,
+          new_status,
+          event_key,
+        })),
+        [{
+          user_id: 4,
+          application_id: String(application.id),
+          notification_type: 'Status Update',
+          channel: 'In-app',
+          company: 'Shoprite',
+          position: 'Cashier',
+          status: 'sent',
+          read: false,
+          previous_status: scenario.current,
+          new_status: scenario.detected,
+          event_key: `status-change:${application.id}:status-scenario-${index}`,
+        }],
+        `scenario ${index + 1} notification contents`
+      );
+    }
     if (scenario.interview && scenario.expected === 'updated') {
       assert.equal(application.interview_date, '2026-10-09', `scenario ${index + 1} date`);
       assert.equal(application.interview_time, '08:30', `scenario ${index + 1} time`);
