@@ -14,8 +14,10 @@ async function createStatusChangeNotification({
       'user_id, application_id, notification_type, channel, company, position, ' +
       'interview_date, interview_time, interview_at, application_link, scheduled_for, ' +
       'status, read, previous_status, new_status, event_key' +
-    ') VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, NULL, NULL, NOW(), $7, FALSE, $8, $9, $10) ' +
-    'ON CONFLICT (user_id, application_id, notification_type, channel, event_key) DO NOTHING RETURNING id',
+      ') SELECT $1, $2::text, $3, $4, $5, $6, NULL, NULL, NULL, NULL, NOW(), $7, FALSE, $8, $9, $10 ' +
+      'FROM applications AS application ' +
+      'WHERE application.id::text = $2 AND application.user_id = $1 ' +
+      'ON CONFLICT (user_id, application_id, notification_type, channel, event_key) DO NOTHING RETURNING id',
     [
       userId,
       String(applicationId),

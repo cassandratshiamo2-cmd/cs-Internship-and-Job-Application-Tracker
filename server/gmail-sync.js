@@ -677,8 +677,12 @@ function createGmailSyncService({
     }
     const applications = classification.status || classification.ignored
       ? (await pool.query(
-          'SELECT id, company, position, status, updated_at FROM applications WHERE user_id = $1',
-          [connection.user_id]
+          'SELECT id, company, position, status, updated_at FROM applications ' +
+            'WHERE user_id = $1 AND EXISTS (' +
+              'SELECT 1 FROM gmail_connections ' +
+              'WHERE id = $2 AND user_id = $1 AND is_connected = TRUE' +
+            ')',
+          [connection.user_id, connection.id]
         )).rows
       : [];
     let match = { outcome: 'ignored', candidateIds: [] };
@@ -1080,7 +1084,8 @@ function createGmailSyncService({
         'message.review_reason, message.reprocess_version, connection.id AS connection_id ' +
       'FROM gmail_processed_messages AS message ' +
       'JOIN gmail_connections AS connection ON connection.id = message.connection_id ' +
-      'WHERE message.id = $1 AND message.user_id = $2 AND connection.is_connected = TRUE',
+      'WHERE message.id = $1 AND message.user_id = $2 ' +
+        'AND connection.user_id = message.user_id AND connection.is_connected = TRUE',
       [processedMessageId, userId]
     );
     const message = result.rows[0];

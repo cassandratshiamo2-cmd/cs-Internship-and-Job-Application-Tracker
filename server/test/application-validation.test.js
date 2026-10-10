@@ -21,6 +21,14 @@ const validApplication = {
 test('application payload validation accepts supported values and the legacy Job type', () => {
   assert.equal(validateApplicationInput(validApplication), null);
   assert.equal(validateApplicationInput({ ...validApplication, type: 'Job' }), null);
+  assert.equal(validateApplicationInput({
+    ...validApplication,
+    status: 'Interview',
+    interviewDate: '2026-10-09',
+    interviewTime: '10:00',
+    interviewType: 'In-person',
+    interviewLocation: '',
+  }), null);
 });
 
 test('application payload validation rejects invalid enums, dates, links, and interview fields', () => {

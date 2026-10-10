@@ -124,6 +124,9 @@ export default function ApplicationDetailPage() {
               <InfoRow label="Interview Type" value={application.interviewType || "Not specified"} />
               <InfoRow label="Interview Date" value={application.interviewDate || "Not scheduled"} />
               <InfoRow label="Interview Time" value={application.interviewTime || "Not scheduled"} />
+              {application.interviewType === "In-person" ? (
+                <InfoRow label="Interview Location / Address" value={application.interviewLocation || "Not confirmed"} />
+              ) : null}
               <InfoRow label="Reminders" value={application.notificationChannels?.join(", ") || "In-app"} />
             </>
           ) : null}
@@ -145,7 +148,7 @@ function InfoRow({ label, value, link }: { label: string; value: string; link?: 
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">{label}</p>
       {link ? (
         <a href={link} target="_blank" rel="noreferrer" className="mt-2 block break-all text-base font-medium text-[#0f766e] underline">{value}</a>
-      ) : <p className="mt-2 text-base font-medium text-slate-700">{value}</p>}
+      ) : <p className="mt-2 whitespace-pre-line text-base font-medium text-slate-700">{value}</p>}
     </div>
   );
 }

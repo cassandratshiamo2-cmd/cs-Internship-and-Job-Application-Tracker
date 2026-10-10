@@ -103,6 +103,7 @@ async function ensureDatabase() {
       'interview_date DATE, ' +
       'interview_time TIME, ' +
       'interview_type VARCHAR(32) CHECK (interview_type IN (\'Phone\', \'Video\', \'In-person\', \'Technical\', \'Panel\', \'Other\')), ' +
+      'interview_location TEXT, ' +
       'notification_channels TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[], ' +
       'interview_email VARCHAR(255), ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
@@ -113,6 +114,11 @@ async function ensureDatabase() {
   await pool.query(
     'ALTER TABLE applications ' +
       'ADD COLUMN IF NOT EXISTS interview_type VARCHAR(32)'
+  );
+
+  await pool.query(
+    'ALTER TABLE applications ' +
+      'ADD COLUMN IF NOT EXISTS interview_location TEXT'
   );
 
   await pool.query(
@@ -520,6 +526,14 @@ async function replaceInterviewNotificationJobs(data) {
   try {
     if (ownsTransaction) {
       await client.query('BEGIN');
+    }
+
+    const applicationOwnership = await client.query(
+      'SELECT id FROM applications WHERE id::text = $1 AND user_id = $2 FOR KEY SHARE',
+      [data.applicationId, data.userId]
+    );
+    if (applicationOwnership.rowCount !== 1) {
+      throw new Error('Cannot schedule an interview reminder for an application owned by another user.');
     }
 
     await client.query(
@@ -1129,112 +1143,6 @@ app.post(
   }
 );
 
-app.get(
-  '/api/notifications',
-  authenticateRequest,
-  async function (req, res) {
-    try {
-      await pool.query(
-        'DELETE FROM notification_jobs ' +
-          'WHERE user_id = $1 ' +
-          "AND channel = 'In-app' " +
-          "AND notification_type <> 'Status Update' " +
-          "AND status <> 'cancelled' " +
-          'AND (' +
-            '(interview_at IS NULL AND scheduled_for < NOW()) ' +
-            'OR interview_at <= NOW()' +
-          ')',
-        [req.user.id]
-      );
-
-      const result =
-        await pool.query(
-          'SELECT ' +
-            'id, ' +
-            'notification_type, ' +
-            'company, ' +
-            'position, ' +
-            'interview_date::text AS interview_date, ' +
-            'interview_time, ' +
-            'interview_at, ' +
-            'application_id, ' +
-            'application_link, ' +
-            'scheduled_for, ' +
-            'read, ' +
-            'status, ' +
-            'previous_status, ' +
-            'new_status, ' +
-            'created_at ' +
-          'FROM notification_jobs ' +
-          'WHERE ' +
-            'user_id = $1 ' +
-            "AND channel = 'In-app' " +
-            "AND status <> 'cancelled' " +
-            'AND (' +
-              "notification_type = 'Status Update' " +
-              'OR scheduled_for >= NOW() ' +
-              'OR (' +
-                'interview_at > NOW() ' +
-                'AND (' +
-                  "status IN ('pending', 'processing', 'sent')" +
-                ')' +
-              ')' +
-            ') ' +
-          'ORDER BY scheduled_for ASC, created_at DESC',
-          [req.user.id]
-        );
-
-      const notifications =
-        result.rows.map(function (notification) {
-          const isStatusUpdate = notification.notification_type === 'Status Update';
-          const title = isStatusUpdate
-            ? 'Application Status Changed'
-            : 'Interview coming up at ' + notification.company;
-          const message = isStatusUpdate
-            ? `${notification.company} — ${notification.position}\nYour application status changed from ${notification.previous_status || 'Unknown'} to ${notification.new_status || 'Unknown'}.`
-            : notification.position +
-              ' is scheduled for ' +
-              notification.interview_date +
-              ' at ' +
-              String(
-                notification.interview_time
-              ).slice(0, 5) +
-              '.';
-
-          return {
-            id: String(notification.id),
-            title: title,
-            type: notification.notification_type,
-            message: message,
-            date: notification.interview_date || notification.created_at,
-            interviewTime: notification.interview_time ? String(notification.interview_time).slice(0, 5) : undefined,
-            interviewAt: notification.interview_at,
-            scheduledFor: notification.scheduled_for,
-            read: notification.read,
-            applicationId: notification.application_id,
-            applicationLink: notification.application_link,
-            status: notification.status,
-          };
-        });
-
-      return res.status(200).json({
-        notifications:
-          notifications,
-      });
-    } catch (error) {
-      console.error(
-        'Loading in-app notifications failed:',
-        error.message
-      );
-
-      return res.status(500).json({
-        message:
-          'Unable to load notifications.',
-      });
-    }
-  }
-);
-
 app.use(
   '/api/notifications',
   createNotificationRouter({ pool, authenticateRequest })
@@ -1312,6 +1220,7 @@ app.get(
           'interview_date::text AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
+          'interview_location AS "interviewLocation", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail" ' +
         'FROM applications ' +
@@ -1334,6 +1243,7 @@ app.get(
           interviewDate: application.interviewDate ? serializeDateOnly(application.interviewDate) : undefined,
           interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
           interviewType: application.interviewType || undefined,
+          interviewLocation: application.interviewLocation || undefined,
           notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
           interviewEmail: application.interviewEmail || undefined,
         };
@@ -1371,6 +1281,7 @@ function serializeApplication(application) {
     interviewDate: application.interviewDate ? serializeDateOnly(application.interviewDate) : undefined,
     interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
     interviewType: application.interviewType || undefined,
+    interviewLocation: application.interviewLocation || undefined,
     notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
     interviewEmail: application.interviewEmail || undefined,
   };
@@ -1403,6 +1314,7 @@ app.get(
           'interview_date::text AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
+          'interview_location AS "interviewLocation", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail" ' +
         'FROM applications ' +
@@ -1453,6 +1365,8 @@ app.put(
       const interviewDate = String(body.interviewDate || '').trim();
       const interviewTime = String(body.interviewTime || '').trim();
       const interviewType = String(body.interviewType || '').trim();
+      const hasInterviewLocation = Object.hasOwn(body, 'interviewLocation');
+      const interviewLocation = String(body.interviewLocation || '').trim();
       const interviewEmail = String(body.interviewEmail || '').trim();
       const notificationChannels = Array.isArray(body.notificationChannels) ? body.notificationChannels : [];
       const normalizedChannels = normalizeNotificationChannels(notificationChannels);
@@ -1501,6 +1415,11 @@ app.put(
           'interview_date = $11::date, ' +
           'interview_time = $12::time, ' +
           'interview_type = $13, ' +
+          'interview_location = CASE ' +
+            "WHEN $7 <> 'Interview' THEN NULL " +
+            "WHEN $13 <> 'In-person' THEN NULL " +
+            'WHEN $16::boolean THEN NULLIF($17, \'\') ' +
+            'ELSE interview_location END, ' +
           'notification_channels = $14::text[], ' +
           'interview_email = $15, ' +
           'updated_at = NOW() ' +
@@ -1518,6 +1437,7 @@ app.put(
           'interview_date::text AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
+          'interview_location AS "interviewLocation", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail"',
           [
@@ -1536,6 +1456,8 @@ app.put(
             status === 'Interview' ? interviewType || null : null,
             status === 'Interview' ? normalizedChannels : [],
             status === 'Interview' ? interviewEmail || null : null,
+            hasInterviewLocation,
+            interviewLocation,
           ]
         );
 
@@ -1660,9 +1582,10 @@ app.post(
           'interview_date, ' +
           'interview_time, ' +
           'interview_type, ' +
+          'interview_location, ' +
           'notification_channels, ' +
           'interview_email' +
-        ') VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10::date, $11::time, $12, $13::text[], $14) ' +
+        ') VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10::date, $11::time, $12, $13, $14::text[], $15) ' +
         'RETURNING ' +
           'id, ' +
           'company, ' +
@@ -1676,6 +1599,7 @@ app.post(
           'interview_date::text AS "interviewDate", ' +
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
+          'interview_location AS "interviewLocation", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail"',
           [
@@ -1691,6 +1615,9 @@ app.post(
             status === 'Interview' ? interviewDate : null,
             status === 'Interview' ? interviewTime : null,
             status === 'Interview' ? interviewType || null : null,
+            status === 'Interview' && interviewType === 'In-person'
+              ? String(body.interviewLocation || '').trim() || null
+              : null,
             status === 'Interview' ? normalizedChannels : [],
             status === 'Interview' ? interviewEmail || null : null,
           ]
@@ -1732,6 +1659,7 @@ app.post(
             interviewDate: application.interviewDate ? serializeDateOnly(application.interviewDate) : undefined,
             interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
             interviewType: application.interviewType || undefined,
+            interviewLocation: application.interviewLocation || undefined,
             notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
             interviewEmail: application.interviewEmail || undefined,
           },

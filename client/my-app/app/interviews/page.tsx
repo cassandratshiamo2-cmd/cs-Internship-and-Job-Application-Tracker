@@ -212,6 +212,9 @@ export default function InterviewsPage() {
                     <p><span className="font-semibold text-slate-700">Type:</span> {application.interviewType || "Not specified"}</p>
                     <p><span className="font-semibold text-slate-700">Date:</span> {application.interviewDate}</p>
                     <p><span className="font-semibold text-slate-700">Time:</span> {application.interviewTime}</p>
+                    {application.interviewType === "In-person" ? (
+                      <p className="whitespace-pre-line"><span className="font-semibold text-slate-700">Location / Address:</span> {application.interviewLocation || "Not confirmed"}</p>
+                    ) : null}
                     <p><span className="font-semibold text-slate-700">Reminders:</span> {application.notificationChannels?.join(", ") || "In-app"}</p>
                   </div>
                 </div>

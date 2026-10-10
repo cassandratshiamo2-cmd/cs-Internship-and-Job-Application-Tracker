@@ -14,6 +14,7 @@ export default function AddApplicationPage() {
   const router = useRouter();
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const [interviewType, setInterviewType] = useState<InterviewType | "">("");
   const [isSaving, setIsSaving] = useState(false);
   const savingRef = useRef(false);
 
@@ -32,8 +33,9 @@ export default function AddApplicationPage() {
     const applicationLink = String(form.get("applicationLink") || "").trim();
     const interviewDate = String(form.get("interviewDate") || "").trim();
     const interviewTime = String(form.get("interviewTime") || "").trim();
-    const interviewType = String(form.get("interviewType") || "").trim();
-    const normalizedInterviewType = interviewType as InterviewType;
+    const interviewTypeValue = String(form.get("interviewType") || "").trim();
+    const interviewLocation = String(form.get("interviewLocation") || "").trim();
+    const normalizedInterviewType = interviewTypeValue as InterviewType;
     const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
 
     if (!company || !position || !date || !type || !applicationStatus || !arrangement || !notes) {
@@ -46,7 +48,7 @@ export default function AddApplicationPage() {
       return;
     }
 
-    if (applicationStatus === "Interview" && (!interviewDate || !interviewTime || !interviewType)) {
+    if (applicationStatus === "Interview" && (!interviewDate || !interviewTime || !interviewTypeValue)) {
       setError("Add the interview date, time, and type before saving an interview application.");
       return;
     }
@@ -73,6 +75,7 @@ export default function AddApplicationPage() {
             interviewDate,
             interviewTime,
             interviewType: normalizedInterviewType,
+            ...(interviewLocation ? { interviewLocation } : {}),
             notificationChannels: selectedChannels.length ? selectedChannels : defaultInterviewChannels,
           }
         : {}),
@@ -187,7 +190,10 @@ export default function AddApplicationPage() {
             </div>
             <div>
               <label className="mb-2 block text-sm font-medium text-slate-700">Application Status</label>
-              <select name="status" value={status} onChange={(event) => setStatus(event.target.value)} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
+              <select name="status" value={status} onChange={(event) => {
+                setStatus(event.target.value);
+                if (event.target.value !== "Interview") setInterviewType("");
+              }} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
                 <option value="">Select</option>
                 <option>Saved</option>
                 <option>Applied</option>
@@ -210,7 +216,9 @@ export default function AddApplicationPage() {
             </div>
           </div>
 
-          {status === "Interview" ? <InterviewFields /> : null}
+          {status === "Interview" ? (
+            <InterviewFields interviewType={interviewType} onInterviewTypeChange={setInterviewType} />
+          ) : null}
 
           <div>
             <label className="mb-2 block text-sm font-medium text-slate-700">Notes</label>
@@ -237,7 +245,13 @@ export default function AddApplicationPage() {
   );
 }
 
-function InterviewFields() {
+function InterviewFields({
+  interviewType,
+  onInterviewTypeChange,
+}: {
+  interviewType: InterviewType | "";
+  onInterviewTypeChange: (value: InterviewType | "") => void;
+}) {
   return (
     <fieldset className="rounded-2xl border border-[#d9d3ff] bg-[#faf8ff] p-4">
       <legend className="px-1 text-sm font-semibold text-[#5d4b9f]">Interview schedule and reminders</legend>
@@ -252,7 +266,7 @@ function InterviewFields() {
         </div>
         <div className="sm:col-span-2">
           <label className="mb-2 block text-sm font-medium text-slate-700">Type of interview</label>
-          <select required name="interviewType" className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
+          <select required name="interviewType" value={interviewType} onChange={(event) => onInterviewTypeChange(event.target.value as InterviewType | "")} className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
             <option value="">Select interview type</option>
             <option>Phone</option>
             <option>Video</option>
@@ -262,6 +276,20 @@ function InterviewFields() {
             <option>Other</option>
           </select>
         </div>
+        {interviewType === "In-person" ? (
+          <div className="sm:col-span-2">
+            <label htmlFor="interviewLocation" className="mb-2 block text-sm font-medium text-slate-700">
+              Interview Location / Address <span className="font-normal text-slate-500">(optional)</span>
+            </label>
+            <textarea
+              id="interviewLocation"
+              name="interviewLocation"
+              rows={2}
+              placeholder="Company Name, Building Name, Street, Suburb, City"
+              className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]"
+            />
+          </div>
+        ) : null}
       </div>
       <p className="mt-4 text-sm text-slate-500">In-app reminders appear in ApplyFlow.</p>
       <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
