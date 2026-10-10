@@ -33,6 +33,14 @@ export default function HomePage() {
                 Register
               </Link>
             </div>
+            <nav aria-label="Legal information" className="flex gap-5 border-t border-[#f1e5ea] pt-5 text-sm text-slate-500">
+              <Link href="/privacy" className="underline-offset-4 hover:text-[#0f766e] hover:underline">
+                Privacy Policy
+              </Link>
+              <Link href="/terms" className="underline-offset-4 hover:text-[#0f766e] hover:underline">
+                Terms of Service
+              </Link>
+            </nav>
           </div>
         </div>
       </div>
