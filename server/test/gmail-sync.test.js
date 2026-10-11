@@ -69,11 +69,15 @@ function createTestService({
       reviewReason: message.reviewReason || null,
       reprocessVersion: message.reprocessVersion || 0,
       userId: message.userId ?? 4,
+      sourceVerified: message.sourceVerified ?? true,
     });
   }
   const connection = {
     id: 7,
     user_id: 4,
+    account_generation: 1,
+    consecutive_sync_failures: 0,
+    sync_paused: false,
     gmail_address: 'applyflow@example.com',
     refresh_token_ciphertext: encryptToken('refresh-token', encryptionKey),
     access_token_ciphertext: null,
@@ -133,7 +137,13 @@ function createTestService({
         heldLocks.delete(params[0]);
         return { rowCount: 1, rows: [{ lock_key: params[0] }] };
       }
-      if (sql.startsWith('SELECT id FROM gmail_connections WHERE is_connected = TRUE ORDER BY id')) {
+      if (sql.startsWith('INSERT INTO gmail_sync_worker_state')) {
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.startsWith('UPDATE gmail_sync_worker_state')) {
+        return { rowCount: 1, rows: [] };
+      }
+      if (sql.startsWith('SELECT id FROM gmail_connections WHERE')) {
         return { rowCount: 1, rows: [{ id: connection.id }] };
       }
       if (sql.startsWith('SELECT * FROM gmail_connections')) {
@@ -145,7 +155,8 @@ function createTestService({
           .find(([, row]) => row.id === params[0]);
         if (!entry ||
             params[1] !== connection.user_id ||
-            entry[1].userId !== params[1]) {
+            entry[1].userId !== params[1] ||
+            entry[1].sourceVerified !== true) {
           return { rowCount: 0, rows: [] };
         }
         const [gmailMessageId, row] = entry;
@@ -169,7 +180,7 @@ function createTestService({
         };
       }
       if (sql.startsWith('SELECT outcome, detected_status')) {
-        const row = processedRows.get(String(params[1]));
+        const row = processedRows.get(String(params[2]));
         return {
           rowCount: row ? 1 : 0,
           rows: row ? [{
@@ -188,15 +199,20 @@ function createTestService({
         return { rowCount: rows.length, rows };
       }
       if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
-        assert.match(sql, /WHERE user_id = \$1 AND EXISTS/);
-        assert.match(sql, /id = \$2 AND user_id = \$1 AND is_connected = TRUE/);
+        assert.match(sql, /WHERE user_id = \$1 AND gmail_source_connection_id = \$2/);
+        assert.match(sql, /gmail_source_generation = \$3/);
+        assert.match(sql, /is_connected = TRUE AND sync_paused = FALSE/);
         assert.equal(params[1], connection.id);
         const rows = applications
           .map((application) => ({
             ...application,
             user_id: application.user_id ?? connection.user_id,
+            gmail_source_connection_id: application.gmail_source_connection_id ?? connection.id,
+            gmail_source_generation: application.gmail_source_generation ?? connection.account_generation,
           }))
-          .filter((application) => application.user_id === params[0]);
+          .filter((application) => application.user_id === params[0] &&
+            application.gmail_source_connection_id === params[1] &&
+            application.gmail_source_generation === params[2]);
         return { rowCount: rows.length, rows };
       }
       if (sql.startsWith('UPDATE gmail_connections SET quota_failure_count')) {
@@ -236,6 +252,16 @@ function createTestService({
             calls.lockQueryTimeouts.push(query.query_timeout);
           }
           if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rowCount: 1, rows: [] };
+          if (sql.startsWith('SELECT id FROM gmail_connections')) {
+            return {
+              rowCount: params[0] === connection.id &&
+                params[1] === connection.user_id &&
+                params[2] === connection.account_generation ? 1 : 0,
+              rows: params[0] === connection.id &&
+                params[1] === connection.user_id &&
+                params[2] === connection.account_generation ? [{ id: connection.id }] : [],
+            };
+          }
           if (sql.startsWith('INSERT INTO notification_jobs')) {
             const [userId, applicationId, notificationType, channel, company, position, status, previousStatus, newStatus, eventKey] = params;
             const exists = calls.notifications.some((notification) =>
@@ -272,7 +298,8 @@ function createTestService({
                   id: nextProcessedId++,
                   outcome: 'review',
                   warning: true,
-                  review_reason: params[3],
+                  review_reason: params[5],
+                  sourceVerified: true,
                 });
               }
               return { rowCount: 1, rows: [] };
@@ -282,9 +309,10 @@ function createTestService({
             processedRows.set(messageId, {
               id,
               outcome: 'processing',
-              sender: params[4],
-              subject: params[5],
-              detectedStatus: params[7],
+              sourceVerified: true,
+              sender: params[6],
+              subject: params[7],
+              detectedStatus: params[9],
             });
             return { rowCount: 1, rows: [{ id }] };
           }
@@ -296,15 +324,16 @@ function createTestService({
               detected_status: row.detectedStatus,
               review_reason: row.reviewReason,
               reprocess_version: row.reprocessVersion || 0,
+              source_verified: row.sourceVerified,
             }] : [] };
           }
-          if (sql.startsWith('UPDATE gmail_processed_messages SET sender =')) {
+          if (sql.startsWith('UPDATE gmail_processed_messages SET gmail_account_address =')) {
             const row = Array.from(processedRows.values()).find((item) => item.id === params[0]);
             if (row) {
               row.outcome = 'processing';
-              row.detectedStatus = params[4];
+              row.detectedStatus = params[5];
               row.reviewReason = null;
-              if (params[10]) row.reprocessVersion = (row.reprocessVersion || 0) + 1;
+              if (params[12]) row.reprocessVersion = (row.reprocessVersion || 0) + 1;
             }
             return { rowCount: 1, rows: [] };
           }
@@ -329,6 +358,9 @@ function createTestService({
             application.interview_type = params[9]
               ? (params[8] || application.interview_type)
               : (application.interview_type || params[8]);
+            application.interview_location = params[9]
+              ? (params[10] || application.interview_location)
+              : (application.interview_location || params[10]);
             return { rowCount: 1, rows: [{ ...application }] };
           }
           if (sql.startsWith('UPDATE gmail_processed_messages SET outcome =')) {
@@ -452,7 +484,7 @@ test('incremental sync skips stored messages before fetching their bodies', asyn
   assert.equal(calls.get, 0);
 });
 
-test('the exact Nova assessment email is classified, matched, and updates the application', async () => {
+test('a transactional Nova assessment email with the exact position updates only its opted-in application', async () => {
   const application = {
     id: 73,
     company: 'Nova',
@@ -473,7 +505,7 @@ test('the exact Nova assessment email is classified, matched, and updates the ap
     'Content-Type: text/plain; charset=utf-8',
     '',
     'Dear Cassandra',
-    'You are invited for an assesment',
+    'You are invited for an assesment for your Graduate Trainee application.',
     'Kind regard',
     'Nova recruitment team',
   ].join('\r\n')).toString('base64url');
@@ -934,7 +966,7 @@ test('the worker releases its database lock when loading connections fails', asy
   assert.equal(heldLocks.has('worker:worker'), false);
 });
 
-test('the Gmail worker waits for its first interval and does not overlap local sweeps', async () => {
+test('the Gmail worker runs immediately and does not overlap local sweeps', async () => {
   let runWorker;
   let scheduledInterval;
   let workerCalls = 0;
@@ -960,7 +992,7 @@ test('the Gmail worker waits for its first interval and does not overlap local s
 
   assert.equal(returnedTimer, timer);
   assert.equal(scheduledInterval, 60000);
-  assert.equal(workerCalls, 0);
+  assert.equal(workerCalls, 1);
 
   const firstTick = runWorker();
   await firstSweepStarted;
@@ -969,6 +1001,7 @@ test('the Gmail worker waits for its first interval and does not overlap local s
 
   releaseFirstSweep();
   await firstTick;
+  await new Promise((resolve) => setImmediate(resolve));
   await runWorker();
   assert.equal(workerCalls, 2);
 });

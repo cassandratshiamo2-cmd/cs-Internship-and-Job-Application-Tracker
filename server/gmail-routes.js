@@ -51,7 +51,8 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       if (!gmailAddress) throw new Error('Google did not return the Gmail account address.');
 
       const existing = await pool.query(
-        'SELECT refresh_token_ciphertext FROM gmail_connections WHERE user_id = $1',
+        'SELECT refresh_token_ciphertext, gmail_address, account_generation ' +
+          'FROM gmail_connections WHERE user_id = $1',
         [userId]
       );
       const refreshToken = tokens.refresh_token
@@ -62,8 +63,9 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       await pool.query(
         'INSERT INTO gmail_connections (' +
           'user_id, gmail_address, refresh_token_ciphertext, access_token_ciphertext, ' +
-          'token_expires_at, history_id, is_connected, last_sync_error' +
-        ') VALUES ($1, $2, $3, $4, $5, NULL, TRUE, NULL) ' +
+          'token_expires_at, history_id, is_connected, last_sync_error, account_generation, ' +
+          'last_sync_success_at, consecutive_sync_failures, next_sync_at' +
+        ') VALUES ($1, $2, $3, $4, $5, NULL, TRUE, NULL, 1, NULL, 0, NULL) ' +
         'ON CONFLICT (user_id) DO UPDATE SET ' +
           'gmail_address = EXCLUDED.gmail_address, ' +
           'refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, ' +
@@ -71,6 +73,11 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'token_expires_at = EXCLUDED.token_expires_at, ' +
           'history_id = NULL, initial_sync_history_id = NULL, initial_sync_page_token = NULL, ' +
           'quota_backoff_until = NULL, quota_failure_count = 0, ' +
+          'account_generation = CASE WHEN LOWER(gmail_connections.gmail_address) = LOWER(EXCLUDED.gmail_address) ' +
+            'THEN gmail_connections.account_generation ELSE gmail_connections.account_generation + 1 END, ' +
+          'last_sync_success_at = CASE WHEN LOWER(gmail_connections.gmail_address) = LOWER(EXCLUDED.gmail_address) ' +
+            'THEN gmail_connections.last_sync_success_at ELSE NULL END, ' +
+          'consecutive_sync_failures = 0, next_sync_at = NULL, sync_paused = FALSE, ' +
           'is_connected = TRUE, last_sync_at = NULL, last_sync_error = NULL, updated_at = NOW()',
         [
           userId,
@@ -82,7 +89,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       );
 
       void syncService.syncUser(userId).catch((error) => {
-        console.error('Initial Gmail sync failed:', error.message);
+        console.error('Initial Gmail sync failed:', getSafeSyncErrorDetails(error));
       });
       return redirectWithResult('connected');
     } catch (error) {
@@ -94,7 +101,8 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
   router.get('/status', authenticateRequest, async (req, res) => {
     try {
       const result = await pool.query(
-        'SELECT gmail_address, is_connected, last_sync_at, last_sync_error ' +
+        'SELECT gmail_address, is_connected, last_sync_at, last_sync_error, ' +
+          'last_sync_success_at, consecutive_sync_failures, sync_paused ' +
           'FROM gmail_connections WHERE user_id = $1',
         [req.user.id]
       );
@@ -104,6 +112,9 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         email: connection?.is_connected ? connection.gmail_address : null,
         lastSyncAt: connection?.last_sync_at || null,
         lastSyncError: connection?.last_sync_error || null,
+        lastSyncSuccessAt: connection?.last_sync_success_at || null,
+        consecutiveSyncFailures: Number(connection?.consecutive_sync_failures || 0),
+        syncRequiresReconnect: Boolean(connection?.sync_paused),
       });
     } catch (error) {
       console.error('Loading Gmail connection status failed:', error.message);
@@ -206,13 +217,14 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
     try {
       const result = await pool.query(
         "SELECT id, gmail_message_id, sender, subject, received_at, detected_status, confidence, " +
-          'reprocess_version, ' +
+          'reprocess_version, detected_interview_location, ' +
           "candidate_application_ids, review_reason FROM gmail_processed_messages " +
-          "WHERE user_id = $1 AND outcome = 'review' " +
+          "WHERE user_id = $1 AND source_verified = TRUE AND outcome = 'review' " +
           'AND EXISTS (' +
             'SELECT 1 FROM gmail_connections AS connection ' +
             'WHERE connection.id = gmail_processed_messages.connection_id ' +
-              'AND connection.user_id = gmail_processed_messages.user_id' +
+              'AND connection.user_id = gmail_processed_messages.user_id ' +
+              'AND connection.account_generation = gmail_processed_messages.account_generation'
           ') ORDER BY received_at DESC LIMIT 100',
         [req.user.id]
       );
@@ -237,11 +249,14 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'message.detected_interview_date::text AS detected_interview_date, ' +
           'message.detected_interview_time::text AS detected_interview_time, ' +
           'message.detected_interview_type, message.outcome, ' +
+          'message.detected_interview_location, message.gmail_account_address, ' +
           'application.company AS application_company, application.position AS application_position, ' +
           'application.status AS application_status, ' +
           'application.interview_date::text AS application_interview_date, ' +
           'application.interview_time::text AS application_interview_time, ' +
-          'application.interview_type AS application_interview_type ' +
+          'application.interview_type AS application_interview_type, ' +
+          '(message.source_verified AND connection.account_generation = message.account_generation ' +
+            'AND connection.is_connected AND NOT connection.sync_paused) AS source_is_current ' +
         'FROM gmail_processed_messages AS message ' +
         'JOIN gmail_connections AS connection ON connection.id = message.connection_id ' +
           'AND connection.user_id = message.user_id ' +
@@ -254,7 +269,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       return res.status(200).json({
         messages: result.rows.map((message) => ({
           ...message,
-          retryable: isRetryableProcessedMessage(message),
+          retryable: Boolean(message.source_is_current) && isRetryableProcessedMessage(message),
         })),
       });
     } catch (error) {
@@ -309,11 +324,14 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
     try {
       await client.query('BEGIN');
       const messageResult = await client.query(
-        "SELECT id, detected_status, detected_interview_date::text AS detected_interview_date, " +
-          "detected_interview_time::text AS detected_interview_time, detected_interview_type " +
+        "SELECT id, connection_id, account_generation, detected_status, " +
+          "detected_interview_date::text AS detected_interview_date, " +
+          "detected_interview_time::text AS detected_interview_time, detected_interview_type, " +
+          "detected_interview_location " +
         'FROM gmail_processed_messages AS message ' +
         'JOIN gmail_connections AS connection ON connection.id = message.connection_id ' +
           'AND connection.user_id = message.user_id ' +
+          'AND connection.account_generation = message.account_generation ' +
         "WHERE message.id = $1 AND message.user_id = $2 AND message.outcome = 'review' FOR UPDATE OF message",
         [req.params.messageId, req.user.id]
       );
@@ -355,6 +373,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         interviewDate: message.detected_interview_date,
         interviewTime: message.detected_interview_time,
         interviewType: message.detected_interview_type,
+        interviewLocation: message.detected_interview_location,
       };
       const isExistingInterview =
         message.detected_status === 'Interview' && application.status === 'Interview';
@@ -365,10 +384,12 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         currentStatus: application.status,
         detectedStatus: message.detected_status,
         interviewDetailsDetected: Boolean(
-          interviewDetails.interviewDate || interviewDetails.interviewTime || interviewDetails.interviewType
+          interviewDetails.interviewDate || interviewDetails.interviewTime ||
+          interviewDetails.interviewType || interviewDetails.interviewLocation
         ),
         interviewDetailsChanged: Boolean(
-          detailsToFill.interviewDate || detailsToFill.interviewTime || detailsToFill.interviewType
+          detailsToFill.interviewDate || detailsToFill.interviewTime ||
+          detailsToFill.interviewType || detailsToFill.interviewLocation
         ),
         manual: true,
       });
@@ -391,10 +412,12 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'interview_date = CASE WHEN $8::boolean THEN COALESCE($4::date, interview_date) ELSE COALESCE(interview_date, $4::date) END, ' +
           'interview_time = CASE WHEN $8::boolean THEN COALESCE($6::time, interview_time) ELSE COALESCE(interview_time, $6::time) END, ' +
           'interview_type = CASE WHEN $8::boolean THEN COALESCE($7, interview_type) ELSE COALESCE(interview_type, $7) END, ' +
+          'interview_location = CASE WHEN $8::boolean THEN COALESCE($9, interview_location) ELSE COALESCE(interview_location, $9) END, ' +
           'updated_at = NOW() ' +
           'WHERE id = $1 AND user_id = $2 ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
-          'interview_time::text AS interview_time, notification_channels, application_link, interview_email',
+          'interview_time::text AS interview_time, interview_type, interview_location, ' +
+          'notification_channels, application_link, interview_email',
         [
           applicationId,
           req.user.id,
@@ -404,6 +427,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           detailsToFill.interviewTime,
           detailsToFill.interviewType,
           Boolean(updateDecision.applyInterviewDetails && isExistingInterview),
+          detailsToFill.interviewLocation,
         ]
       );
       await scheduleInterviewReminderIfReady({

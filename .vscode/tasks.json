@@ -1,0 +1,285 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "ApplyFlow Next.js build",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"build"
+			],
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "ApplyFlow frontend lint",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"lint",
+				"--prefix",
+				"client/my-app"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Inspect notification ownership data",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"require('./server/node_modules/dotenv').config({path:'server/.env',quiet:true}); const {Pool}=require('./server/node_modules/pg'); const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_URL?{rejectUnauthorized:false}:false,statement_timeout:15000}); (async()=>{try{const target=await pool.query(\"SELECT a.id AS application_id,a.user_id AS application_user_id,a.company,a.position,a.status,a.updated_at,n.id AS notification_id,n.user_id AS notification_user_id,n.previous_status,n.new_status,n.created_at AS notification_created_at,m.user_id AS message_user_id,m.connection_id,c.user_id AS connection_user_id,m.received_at,m.processed_at,m.outcome FROM applications a LEFT JOIN notification_jobs n ON n.application_id=a.id::text LEFT JOIN gmail_processed_messages m ON m.gmail_message_id=split_part(n.event_key,':',3) AND m.user_id=n.user_id LEFT JOIN gmail_connections c ON c.id=m.connection_id WHERE a.id=29 ORDER BY n.created_at DESC\"); const mismatches=await pool.query(\"SELECT COUNT(*)::int AS count FROM notification_jobs n JOIN applications a ON n.application_id ~ '^[0-9]+$' AND a.id=n.application_id::bigint WHERE n.user_id<>a.user_id\"); const badMessages=await pool.query(\"SELECT COUNT(*)::int AS count FROM gmail_processed_messages m JOIN gmail_connections c ON c.id=m.connection_id WHERE m.user_id<>c.user_id\"); console.log(JSON.stringify({application29:target.rows,notificationOwnerMismatches:mismatches.rows[0].count,processedMessageConnectionOwnerMismatches:badMessages.rows[0].count},null,2));}catch(e){console.error('Diagnostic query failed:',e.message);process.exitCode=1;}finally{await pool.end();}})();"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Audit notification ownership",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"server/.notification-ownership-audit.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Run focused server tests",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"test",
+				"--prefix",
+				"server",
+				"--",
+				"--test-name-pattern",
+				"Gmail matching ignores|Gmail message linked|notification|cross-user|owner application"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Build frontend updated",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"build"
+			],
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Run server full suite",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"test",
+				"--prefix",
+				"server"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Lint frontend changes",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"lint",
+				"--prefix",
+				"client/my-app"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Run tenant tests targeted",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				"server/test/gmail-notifications.test.js",
+				"server/test/notification-routes.test.js",
+				"server/test/gmail-sync.test.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify notification isolation tests",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				"server/test/notification-routes.test.js",
+				"server/test/gmail-notifications.test.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Check focused notification tests",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"test",
+				"--prefix",
+				"server",
+				"--",
+				"server/test/notification-routes.test.js",
+				"server/test/gmail-notifications.test.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Validate app address optional",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				"server/test/application-validation.test.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Final focused isolation tests",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				"server/test/gmail-notifications.test.js",
+				"server/test/notification-routes.test.js",
+				"server/test/gmail-sync.test.js",
+				"server/test/application-validation.test.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Final Next.js build",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"build"
+			],
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Final server test suite",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"test",
+				"--prefix",
+				"server"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Verify notification tests again",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				"server/test/notification-routes.test.js",
+				"server/test/gmail-notifications.test.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Run notification isolation only",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"test",
+				"--prefix",
+				"server",
+				"--",
+				"--test-name-pattern",
+				"GET notifications|PATCH notification"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Execute current lint",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"lint",
+				"--prefix",
+				"client/my-app"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Recheck notification routes",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				"server/test/notification-routes.test.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Check command runner",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"-e",
+				"console.log('runner-ready')"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Safe PostgreSQL diagnostic",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"server/.db-connection-diagnostic.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Rerun notification isolation test",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				"server/test/notification-routes.test.js",
+				"server/test/gmail-notifications.test.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Notification test result",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				"server/test/notification-routes.test.js"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Report changed files",
+			"type": "shell",
+			"command": "git",
+			"args": [
+				"status",
+				"--short"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "Run final ownership unit tests",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"--test",
+				"server/test/notification-routes.test.js",
+				"server/test/gmail-notifications.test.js"
+			],
+			"problemMatcher": []
+		}
+	]
+}

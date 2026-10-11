@@ -6,7 +6,10 @@ export type GmailConnectionStatus = {
   connected: boolean;
   email: string | null;
   lastSyncAt: string | null;
+  lastSyncSuccessAt?: string | null;
   lastSyncError: string | null;
+  consecutiveSyncFailures?: number;
+  syncRequiresReconnect?: boolean;
 };
 
 export type GmailReviewMessage = {

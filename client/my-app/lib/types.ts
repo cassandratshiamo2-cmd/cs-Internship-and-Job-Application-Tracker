@@ -29,6 +29,7 @@ export interface Application {
   interviewTime?: string;
   interviewType?: InterviewType;
   interviewLocation?: string;
+  gmailSyncEnabled?: boolean;
   notificationChannels?: NotificationChannel[];
   interviewEmail?: string;
 }

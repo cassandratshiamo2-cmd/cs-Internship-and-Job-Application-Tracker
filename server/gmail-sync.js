@@ -4,6 +4,7 @@ const { randomUUID } = require('node:crypto');
 const {
   classifyApplicationEmail,
   extractInterviewDateTime,
+  extractInterviewLocation,
   extractInterviewType,
   getInterviewDetailsToFill,
   getInterviewDetailsToUpdate,
@@ -35,6 +36,8 @@ const MAX_GMAIL_REQUEST_TIMEOUT_MS = 120000;
 const UNCLASSIFIED_EMAIL_REVIEW_REASON = 'No supported application status rule matched.';
 const IGNORED_MESSAGE_REPROCESS_DAYS = 30;
 const IGNORED_MESSAGE_REPROCESS_LIMIT = 25;
+const TRANSACTIONAL_APPLICATION_CONTEXT =
+  /\b(?:your\s+(?:application|interview)|application\s+(?:status|update|for)|update\s+(?:on|about)\s+your\s+application|candidate\s+(?:for|application)|application\s+for\s+the)\b/i;
 
 function isRetryableIgnoredMessage(message) {
   return message?.outcome === 'ignored' &&
@@ -376,12 +379,13 @@ function createGmailSyncService({
         'refresh_token_ciphertext = COALESCE($3, refresh_token_ciphertext), ' +
         'token_expires_at = $4, ' +
         'updated_at = NOW() ' +
-      'WHERE id = $1',
+      'WHERE id = $1 AND account_generation = $5',
       [
         connection.id,
         credentials.access_token ? encryptToken(credentials.access_token, encryptionKey) : null,
         credentials.refresh_token ? encryptToken(credentials.refresh_token, encryptionKey) : null,
         credentials.expiry_date ? new Date(credentials.expiry_date) : null,
+        connection.account_generation,
       ]
     );
 
@@ -440,12 +444,23 @@ function createGmailSyncService({
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      const currentConnection = await client.query(
+        'SELECT id FROM gmail_connections ' +
+          'WHERE id = $1 AND user_id = $2 AND account_generation = $3 AND is_connected = TRUE ' +
+          'FOR UPDATE',
+        [connection.id, connection.user_id, connection.account_generation]
+      );
+      if (currentConnection.rowCount !== 1) {
+        throw new Error('Gmail account changed while this message was being processed.');
+      }
+
       const inserted = await client.query(
         'INSERT INTO gmail_processed_messages (' +
-          'connection_id, user_id, gmail_message_id, gmail_thread_id, sender, subject, ' +
-            'received_at, detected_status, detected_interview_date, detected_interview_time, detected_interview_type, ' +
+          'connection_id, user_id, gmail_message_id, gmail_thread_id, account_generation, source_verified, ' +
+            'gmail_account_address, sender, subject, received_at, detected_status, ' +
+            'detected_interview_date, detected_interview_time, detected_interview_type, detected_interview_location, ' +
           'confidence, candidate_application_ids, outcome' +
-          ') VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10::time, $11, $12, $13::jsonb, \'processing\') ' +
+          ') VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, $10, $11::date, $12::time, $13, $14, $15, $16::jsonb, \'processing\') ' +
         'ON CONFLICT (connection_id, gmail_message_id) DO NOTHING ' +
         'RETURNING id',
         [
@@ -453,6 +468,8 @@ function createGmailSyncService({
           connection.user_id,
           email.id,
           email.threadId,
+          connection.account_generation,
+          connection.gmail_address,
           email.from.slice(0, 998),
           email.subject,
           email.receivedAt,
@@ -460,6 +477,7 @@ function createGmailSyncService({
           interviewDetails?.interviewDate || null,
           interviewDetails?.interviewTime || null,
           interviewDetails?.interviewType || null,
+          interviewDetails?.interviewLocation || null,
           classification.confidence,
           JSON.stringify(match.candidateIds || []),
         ]
@@ -468,12 +486,13 @@ function createGmailSyncService({
       let messageRowId;
       if (inserted.rowCount === 0) {
         const existing = await client.query(
-          'SELECT id, outcome, detected_status, review_reason, reprocess_version FROM gmail_processed_messages ' +
+          'SELECT id, outcome, detected_status, review_reason, reprocess_version, source_verified ' +
+            'FROM gmail_processed_messages ' +
             'WHERE connection_id = $1 AND gmail_message_id = $2 FOR UPDATE',
-          [connection.id, email.id]
+            [connection.id, email.id]
         );
         const existingMessage = existing.rows[0];
-        if (!existingMessage || (
+        if (!existingMessage || !existingMessage.source_verified || (
           existingMessage.outcome !== 'review' && !isRetryableIgnoredMessage(existingMessage)
         )) {
           await client.query('ROLLBACK');
@@ -483,13 +502,15 @@ function createGmailSyncService({
         messageRowId = existingMessage.id;
         await client.query(
           'UPDATE gmail_processed_messages SET ' +
-            'sender = $2, subject = $3, received_at = $4, detected_status = $5, ' +
-            'detected_interview_date = $6::date, detected_interview_time = $7::time, ' +
-            'detected_interview_type = $8, confidence = $9, candidate_application_ids = $10::jsonb, outcome = \'processing\', ' +
+            'gmail_account_address = $2, sender = $3, subject = $4, received_at = $5, detected_status = $6, ' +
+            'detected_interview_date = $7::date, detected_interview_time = $8::time, ' +
+            'detected_interview_type = $9, detected_interview_location = $10, confidence = $11, ' +
+            'candidate_application_ids = $12::jsonb, outcome = \'processing\', ' +
             'review_reason = NULL, processed_at = NULL, ' +
-            'reprocess_version = CASE WHEN $11::boolean THEN reprocess_version + 1 ELSE reprocess_version END WHERE id = $1',
+            'reprocess_version = CASE WHEN $13::boolean THEN reprocess_version + 1 ELSE reprocess_version END WHERE id = $1',
           [
             messageRowId,
+            connection.gmail_address,
             email.from.slice(0, 998),
             email.subject,
             email.receivedAt,
@@ -497,6 +518,7 @@ function createGmailSyncService({
             interviewDetails?.interviewDate || null,
             interviewDetails?.interviewTime || null,
             interviewDetails?.interviewType || null,
+            interviewDetails?.interviewLocation || null,
             classification.confidence,
             JSON.stringify(match.candidateIds || []),
             isRetryableProcessedMessage(existingMessage),
@@ -527,7 +549,7 @@ function createGmailSyncService({
       const applicationResult = await client.query(
         'SELECT id, company, position, status, updated_at, ' +
           'interview_date::text AS interview_date, interview_time::text AS interview_time, ' +
-          'interview_type, notification_channels, application_link, interview_email ' +
+          'interview_type, interview_location, notification_channels, application_link, interview_email ' +
           'FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
         [match.application.id, connection.user_id]
       );
@@ -542,10 +564,14 @@ function createGmailSyncService({
       const interviewDetailsWereDetected = Boolean(
         interviewDetails?.interviewDate ||
         interviewDetails?.interviewTime ||
-        interviewDetails?.interviewType
+        interviewDetails?.interviewType ||
+        interviewDetails?.interviewLocation
       );
       const interviewDetailsChanged = Boolean(
-        detailsToFill.interviewDate || detailsToFill.interviewTime || detailsToFill.interviewType
+        detailsToFill.interviewDate ||
+        detailsToFill.interviewTime ||
+        detailsToFill.interviewType ||
+        detailsToFill.interviewLocation
       );
       const updateDecision = decideApplicationEmailUpdate({
         currentStatus: application?.status,
@@ -578,11 +604,13 @@ function createGmailSyncService({
         'UPDATE applications SET status = CASE WHEN $8::boolean THEN $3 ELSE status END, updated_at = NOW() ' +
           ', interview_date = CASE WHEN $10::boolean THEN COALESCE($6::date, interview_date) ELSE COALESCE(interview_date, $6::date) END, ' +
           'interview_time = CASE WHEN $10::boolean THEN COALESCE($7::time, interview_time) ELSE COALESCE(interview_time, $7::time) END, ' +
-          'interview_type = CASE WHEN $10::boolean THEN COALESCE($9, interview_type) ELSE COALESCE(interview_type, $9) END ' +
+          'interview_type = CASE WHEN $10::boolean THEN COALESCE($9, interview_type) ELSE COALESCE(interview_type, $9) END, ' +
+          'interview_location = CASE WHEN $10::boolean THEN COALESCE($11, interview_location) ELSE COALESCE(interview_location, $11) END ' +
           'WHERE id = $1 AND user_id = $2 AND status = $4 ' +
           'AND (updated_at <= $5 OR NOT ($8::boolean OR $10::boolean)) ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
-          'interview_time::text AS interview_time, interview_type, notification_channels, application_link, interview_email',
+          'interview_time::text AS interview_time, interview_type, interview_location, ' +
+          'notification_channels, application_link, interview_email',
         [
           application.id,
           connection.user_id,
@@ -594,6 +622,7 @@ function createGmailSyncService({
           updateDecision.applyStatus,
           classification.status === 'Interview' ? detailsToFill.interviewType : null,
           Boolean(updateDecision.applyInterviewDetails && isExistingInterview),
+          classification.status === 'Interview' ? detailsToFill.interviewLocation : null,
         ]
       );
 
@@ -625,6 +654,8 @@ function createGmailSyncService({
           previousStatus: application.status,
           newStatus: classification.status,
           gmailMessageId: email.id,
+          gmailConnectionId: connection.id,
+          gmailAccountGeneration: connection.account_generation,
         });
       }
 
@@ -645,10 +676,13 @@ function createGmailSyncService({
   async function processMessage(connection, gmail, messageId, explicitRetry = false, assertLeaseOwned = async () => {}) {
     await assertLeaseOwned();
     const existing = await pool.query(
-      'SELECT outcome, detected_status, review_reason, reprocess_version FROM gmail_processed_messages WHERE connection_id = $1 AND gmail_message_id = $2',
-      [connection.id, messageId]
+      'SELECT outcome, detected_status, review_reason, reprocess_version, source_verified ' +
+        'FROM gmail_processed_messages ' +
+        'WHERE connection_id = $1 AND gmail_message_id = $3 AND account_generation = $2',
+      [connection.id, connection.account_generation, messageId]
     );
     const existingMessage = existing.rows[0];
+    if (existingMessage && !existingMessage.source_verified) return 'duplicate';
     if (existingMessage && !isRetryableProcessedMessage(existingMessage)) {
       return 'duplicate';
     }
@@ -678,14 +712,25 @@ function createGmailSyncService({
     const applications = classification.status || classification.ignored
       ? (await pool.query(
           'SELECT id, company, position, status, updated_at FROM applications ' +
-            'WHERE user_id = $1 AND EXISTS (' +
-              'SELECT 1 FROM gmail_connections ' +
-              'WHERE id = $2 AND user_id = $1 AND is_connected = TRUE' +
+                'WHERE user_id = $1 AND gmail_source_connection_id = $2 ' +
+                  'AND gmail_source_generation = $3 AND EXISTS (' +
+                  'SELECT 1 FROM gmail_connections ' +
+                  'WHERE id = $2 AND user_id = $1 AND account_generation = $3 ' +
+                    'AND is_connected = TRUE AND sync_paused = FALSE' +
             ')',
-          [connection.user_id, connection.id]
+          [connection.user_id, connection.id, connection.account_generation]
         )).rows
       : [];
     let match = { outcome: 'ignored', candidateIds: [] };
+    if (classification.status && !TRANSACTIONAL_APPLICATION_CONTEXT.test(
+      `${email.subject || ''}\n${email.text || ''}`
+    )) {
+      match = {
+        outcome: 'review',
+        candidateIds: [],
+        reason: 'The email did not contain clear application-specific context.',
+      };
+    }
     if (classification.ignored && applications.length) {
       const strongMatch = matchApplication(email, applications, {
         minimumConfidence: 0.95,
@@ -702,15 +747,23 @@ function createGmailSyncService({
       }
     }
 
+    const detectedInterviewType = classification.status === 'Interview'
+      ? extractInterviewType(email)
+      : null;
     const interviewDetails = classification.status === 'Interview'
       ? {
           ...extractInterviewDateTime(email),
-          interviewType: extractInterviewType(email),
+          interviewType: detectedInterviewType,
+          interviewLocation: detectedInterviewType === 'In-person'
+            ? extractInterviewLocation(email).interviewLocation
+            : null,
         }
       : null;
-    if (classification.status) {
+    if (classification.status && TRANSACTIONAL_APPLICATION_CONTEXT.test(
+      `${email.subject || ''}\n${email.text || ''}`
+    )) {
       try {
-        match = matchApplication(email, applications);
+        match = matchApplication(email, applications, { requirePositionMatch: true });
       } catch (error) {
         const matchingError = new Error('Gmail message application matching failed.');
         matchingError.code = 'GMAIL_MESSAGE_MATCH';
@@ -726,16 +779,29 @@ function createGmailSyncService({
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      const currentConnection = await client.query(
+        'SELECT id FROM gmail_connections ' +
+          'WHERE id = $1 AND user_id = $2 AND account_generation = $3 AND is_connected = TRUE ' +
+          'FOR UPDATE',
+        [connection.id, connection.user_id, connection.account_generation]
+      );
+      if (currentConnection.rowCount !== 1) {
+        throw new Error('Gmail account changed while this message was being processed.');
+      }
+
       await client.query(
         'INSERT INTO gmail_processed_messages (' +
-          'connection_id, user_id, gmail_message_id, sender, subject, received_at, ' +
+          'connection_id, user_id, gmail_message_id, account_generation, source_verified, gmail_account_address, ' +
+            'sender, subject, received_at, ' +
           'confidence, candidate_application_ids, outcome, review_reason, processed_at' +
-        ') VALUES ($1, $2, $3, \'\', \'\', NOW(), 0, \'[]\'::jsonb, \'review\', $4, NOW()) ' +
+        ') VALUES ($1, $2, $3, $4, TRUE, $5, \'\', \'\', NOW(), 0, \'[]\'::jsonb, \'review\', $6, NOW()) ' +
         'ON CONFLICT (connection_id, gmail_message_id) DO NOTHING',
         [
           connection.id,
           connection.user_id,
           messageId,
+          connection.account_generation,
+          connection.gmail_address,
           'This email could not be processed automatically. Inspect the original email in Gmail.',
         ]
       );
@@ -801,8 +867,9 @@ function createGmailSyncService({
     const startingHistoryId = connection.initial_sync_history_id || profile.historyId;
     if (!connection.initial_sync_history_id) {
       await pool.query(
-        'UPDATE gmail_connections SET initial_sync_history_id = $2, updated_at = NOW() WHERE id = $1',
-        [connection.id, startingHistoryId]
+        'UPDATE gmail_connections SET initial_sync_history_id = $2, updated_at = NOW() ' +
+          'WHERE id = $1 AND account_generation = $3',
+        [connection.id, startingHistoryId, connection.account_generation]
       );
     }
 
@@ -818,9 +885,10 @@ function createGmailSyncService({
           'initial_sync_page_token = $2, ' +
           'initial_sync_history_id = CASE WHEN $2::text IS NULL THEN NULL ELSE initial_sync_history_id END, ' +
           'history_id = CASE WHEN $2::text IS NULL THEN $3 ELSE history_id END, ' +
-          'last_sync_at = NOW(), last_sync_error = NULL, updated_at = NOW() ' +
-        'WHERE id = $1',
-        [connection.id, nextPageToken, startingHistoryId]
+          'last_sync_at = NOW(), last_sync_success_at = NOW(), ' +
+          'consecutive_sync_failures = 0, next_sync_at = NULL, last_sync_error = NULL, updated_at = NOW() ' +
+        'WHERE id = $1 AND account_generation = $4',
+        [connection.id, nextPageToken, startingHistoryId, connection.account_generation]
       );
     }
 
@@ -866,8 +934,10 @@ function createGmailSyncService({
     if (batch.warningsPersisted) {
       await pool.query(
         'UPDATE gmail_connections SET history_id = $2, last_sync_at = NOW(), ' +
-          'last_sync_error = NULL, updated_at = NOW() WHERE id = $1',
-        [connection.id, latestHistoryId]
+          'last_sync_success_at = NOW(), consecutive_sync_failures = 0, next_sync_at = NULL, ' +
+          'last_sync_error = NULL, updated_at = NOW() ' +
+          'WHERE id = $1 AND account_generation = $3',
+        [connection.id, latestHistoryId, connection.account_generation]
       );
     }
     return {
@@ -913,7 +983,7 @@ function createGmailSyncService({
       const ignoredMessages = reprocessIgnored && !retryMessageId
         ? await pool.query(
             'SELECT gmail_message_id FROM gmail_processed_messages ' +
-              'WHERE connection_id = $1 ' +
+                'WHERE connection_id = $1 AND account_generation = $6 ' +
                 "AND outcome = 'ignored' " +
                 'AND detected_status IS NULL ' +
                 'AND review_reason = $2 ' +
@@ -926,6 +996,7 @@ function createGmailSyncService({
               MAX_REPROCESS_ATTEMPTS,
               IGNORED_MESSAGE_REPROCESS_DAYS,
               IGNORED_MESSAGE_REPROCESS_LIMIT,
+              connection.account_generation,
             ]
           )
         : { rows: [] };
@@ -966,8 +1037,8 @@ function createGmailSyncService({
             ))).data;
             await pool.query(
               'UPDATE gmail_connections SET history_id = NULL, initial_sync_history_id = NULL, ' +
-                'initial_sync_page_token = NULL WHERE id = $1',
-              [connection.id]
+                'initial_sync_page_token = NULL WHERE id = $1 AND account_generation = $2',
+              [connection.id, connection.account_generation]
             );
             syncResult = await syncInitialPage({
               ...connection,
@@ -1000,8 +1071,10 @@ function createGmailSyncService({
 
         await pool.query(
           'UPDATE gmail_connections SET quota_backoff_until = NULL, quota_failure_count = 0, ' +
-            'last_sync_error = NULL, updated_at = NOW() WHERE id = $1',
-          [connection.id]
+            'consecutive_sync_failures = 0, next_sync_at = NULL, last_sync_at = NOW(), ' +
+            'last_sync_success_at = NOW(), last_sync_error = NULL, updated_at = NOW() ' +
+            'WHERE id = $1 AND account_generation = $2',
+          [connection.id, connection.account_generation]
         );
         const { checkedMessageIds, ...result } = syncResult;
         return result;
@@ -1014,7 +1087,8 @@ function createGmailSyncService({
               'quota_backoff_until = NOW() + (GREATEST($2::double precision, ' +
                 'LEAST($3::double precision * POWER(2, LEAST(quota_failure_count, 6)), $4::double precision)) ' +
                 '* INTERVAL \'1 second\'), ' +
-              'last_sync_at = NOW(), last_sync_error = $5, updated_at = NOW() WHERE id = $1 ' +
+              'last_sync_at = NOW(), last_sync_error = $5, updated_at = NOW() ' +
+              'WHERE id = $1 AND account_generation = $6 ' +
               'RETURNING CEIL(EXTRACT(EPOCH FROM (quota_backoff_until - NOW()))) AS retry_after_seconds',
             [
               connection.id,
@@ -1022,6 +1096,7 @@ function createGmailSyncService({
               QUOTA_COOLDOWN_BASE_SECONDS,
               QUOTA_COOLDOWN_MAX_SECONDS,
               'Gmail is temporarily rate-limited. Sync will retry after a cooldown.',
+              connection.account_generation,
             ]
           );
           return {
@@ -1035,12 +1110,23 @@ function createGmailSyncService({
         }
 
         const errorStatus = getGmailErrorStatus(error);
-        const safeMessage = errorStatus === 401 || errorStatus === 403
+        const requiresReconnect = errorStatus === 401 || errorStatus === 403;
+        const safeMessage = requiresReconnect
           ? 'Gmail access was denied or expired. Reconnect Gmail and try again.'
           : 'Gmail sync failed. Please try again later.';
+        const retryDelaySeconds = Math.round(
+          Math.min(3600, 120 * (2 ** Math.min(connection.consecutive_sync_failures || 0, 5))) *
+          (0.8 + random() * 0.4)
+        );
         await pool.query(
-          'UPDATE gmail_connections SET last_sync_at = NOW(), last_sync_error = $2, updated_at = NOW() WHERE id = $1',
-          [connection.id, safeMessage]
+          'UPDATE gmail_connections SET ' +
+            'consecutive_sync_failures = LEAST(consecutive_sync_failures + 1, 12), ' +
+            'sync_paused = CASE WHEN $5::boolean THEN TRUE ELSE sync_paused END, ' +
+            'next_sync_at = CASE WHEN $5::boolean THEN NULL ELSE ' +
+              'NOW() + ($4::double precision * INTERVAL \'1 second\') END, ' +
+            'last_sync_at = NOW(), last_sync_error = $2, updated_at = NOW() ' +
+            'WHERE id = $1 AND account_generation = $3',
+          [connection.id, safeMessage, connection.account_generation, retryDelaySeconds, requiresReconnect]
         );
         const syncError = new Error(safeMessage);
         syncError.cause = error;
@@ -1085,7 +1171,10 @@ function createGmailSyncService({
       'FROM gmail_processed_messages AS message ' +
       'JOIN gmail_connections AS connection ON connection.id = message.connection_id ' +
       'WHERE message.id = $1 AND message.user_id = $2 ' +
-        'AND connection.user_id = message.user_id AND connection.is_connected = TRUE',
+        'AND message.source_verified = TRUE ' +
+        'AND connection.user_id = message.user_id ' +
+        'AND connection.account_generation = message.account_generation ' +
+        'AND connection.is_connected = TRUE AND connection.sync_paused = FALSE',
       [processedMessageId, userId]
     );
     const message = result.rows[0];
@@ -1102,11 +1191,21 @@ function createGmailSyncService({
   }
 
   async function syncAllConnected() {
+    const startedAt = Date.now();
+    await pool.query(
+      'INSERT INTO gmail_sync_worker_state (worker_name, last_started_at, updated_at) ' +
+        "VALUES ('gmail', NOW(), NOW()) " +
+        'ON CONFLICT (worker_name) DO UPDATE SET last_started_at = NOW(), updated_at = NOW()'
+    );
     const lease = await withSyncLease('worker:' + GMAIL_SYNC_WORKER_LOCK_KEY, async (assertLeaseOwned) => {
       try {
       await assertLeaseOwned();
       const result = await pool.query(
-        'SELECT id FROM gmail_connections WHERE is_connected = TRUE ORDER BY id'
+        'SELECT id FROM gmail_connections ' +
+          'WHERE is_connected = TRUE AND sync_paused = FALSE ' +
+            'AND (next_sync_at IS NULL OR next_sync_at <= NOW()) ' +
+            'AND (quota_backoff_until IS NULL OR quota_backoff_until <= NOW()) ' +
+          'ORDER BY id'
       );
       const outcomes = [];
       for (const connection of result.rows) {
@@ -1114,12 +1213,11 @@ function createGmailSyncService({
         try {
           outcomes.push(await syncConnection(connection.id));
         } catch (error) {
-          if (error.code !== 'GMAIL_QUOTA_LIMITED') {
-            console.error(
-              'Gmail sync failed for connection ' + connection.id + ':',
-              getSafeSyncErrorDetails(error)
-            );
-          }
+          outcomes.push({ connectionId: connection.id, failed: true });
+          console.error('Gmail connection sync failed:', {
+            connectionId: connection.id,
+            ...getSafeSyncErrorDetails(error),
+          });
         }
       }
       return outcomes;
@@ -1128,7 +1226,29 @@ function createGmailSyncService({
         throw error;
       }
     });
-    return lease.acquired ? lease.result : [];
+    if (!lease.acquired) {
+      console.warn('Gmail worker sweep skipped because another worker owns the database lease.');
+      return [];
+    }
+
+    const outcomes = lease.result;
+    const failures = outcomes.filter((outcome) =>
+      outcome && typeof outcome === 'object' && outcome.failed
+    ).length;
+    await pool.query(
+      'UPDATE gmail_sync_worker_state SET last_completed_at = NOW(), ' +
+        'consecutive_failed_runs = CASE WHEN $2 = 0 THEN 0 ' +
+          'ELSE LEAST(consecutive_failed_runs + 1, 1000000) END, ' +
+        'last_error_category = CASE WHEN $2 = 0 THEN NULL ELSE $3 END, updated_at = NOW() ' +
+      "WHERE worker_name = 'gmail'",
+      [outcomes.length, failures, failures ? 'CONNECTION_SYNC_FAILED' : null]
+    );
+    console.info('Gmail worker sweep completed:', {
+      durationMs: Date.now() - startedAt,
+      connectionsSeen: outcomes.length,
+      connectionFailures: failures,
+    });
+    return outcomes;
   }
 
   return { retryProcessedMessage, syncAllConnected, syncConnection, syncUser };
@@ -1150,6 +1270,7 @@ function startGmailSyncWorker(syncService, env = process.env, scheduleInterval =
     }
   };
 
+  void run();
   return scheduleInterval(run, intervalMs);
 }
 

@@ -15,7 +15,7 @@ const {
   interviewDateTimeToInstant,
 } = require('./interview-reminder-schedule');
 const { validateApplicationInput } = require('./application-validation');
-const { checkDatabaseHealth } = require('./health-check');
+const { checkDatabaseHealth, checkGmailSyncHealth } = require('./health-check');
 const { createStatusChangeNotification } = require('./gmail-notifications');
 
 const app = express();
@@ -39,8 +39,17 @@ const pool = new Pool({
   statement_timeout: 60000,
 });
 
+function getSafeStartupErrorDetails(error) {
+  return {
+    name: String(error?.name || 'Error').slice(0, 80),
+    code: /^[A-Z0-9_]{1,80}$/.test(String(error?.code || ''))
+      ? String(error.code)
+      : 'DATABASE_INITIALIZATION_FAILED',
+  };
+}
+
 pool.on('error', (err) => {
-  console.error('Unexpected PostgreSQL client error:', err);
+  console.error('Unexpected PostgreSQL client error:', getSafeStartupErrorDetails(err));
 });
 
 const allowedOrigins = [
@@ -229,10 +238,15 @@ async function ensureDatabase() {
       'history_id VARCHAR(255), ' +
       'initial_sync_history_id VARCHAR(255), ' +
       'initial_sync_page_token TEXT, ' +
+      'account_generation BIGINT NOT NULL DEFAULT 1, ' +
       'quota_backoff_until TIMESTAMPTZ, ' +
       'quota_failure_count INTEGER NOT NULL DEFAULT 0, ' +
       'is_connected BOOLEAN NOT NULL DEFAULT TRUE, ' +
       'last_sync_at TIMESTAMPTZ, ' +
+      'last_sync_success_at TIMESTAMPTZ, ' +
+      'consecutive_sync_failures INTEGER NOT NULL DEFAULT 0, ' +
+      'next_sync_at TIMESTAMPTZ, ' +
+      'sync_paused BOOLEAN NOT NULL DEFAULT FALSE, ' +
       'last_sync_error TEXT, ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
       'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
@@ -249,6 +263,17 @@ async function ensureDatabase() {
   );
 
   await pool.query(
+    'ALTER TABLE applications ' +
+      'ADD COLUMN IF NOT EXISTS gmail_source_connection_id BIGINT ' +
+      'REFERENCES gmail_connections(id) ON DELETE SET NULL'
+  );
+
+  await pool.query(
+    'ALTER TABLE applications ' +
+      'ADD COLUMN IF NOT EXISTS gmail_source_generation BIGINT'
+  );
+
+  await pool.query(
     'ALTER TABLE gmail_connections ' +
       'ADD COLUMN IF NOT EXISTS quota_backoff_until TIMESTAMPTZ'
   );
@@ -256,6 +281,42 @@ async function ensureDatabase() {
   await pool.query(
     'ALTER TABLE gmail_connections ' +
       'ADD COLUMN IF NOT EXISTS quota_failure_count INTEGER NOT NULL DEFAULT 0'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_connections ' +
+      'ADD COLUMN IF NOT EXISTS account_generation BIGINT NOT NULL DEFAULT 1'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_connections ' +
+      'ADD COLUMN IF NOT EXISTS last_sync_success_at TIMESTAMPTZ'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_connections ' +
+      'ADD COLUMN IF NOT EXISTS consecutive_sync_failures INTEGER NOT NULL DEFAULT 0'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_connections ' +
+      'ADD COLUMN IF NOT EXISTS next_sync_at TIMESTAMPTZ'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_connections ' +
+      'ADD COLUMN IF NOT EXISTS sync_paused BOOLEAN NOT NULL DEFAULT FALSE'
+  );
+
+  await pool.query(
+    'CREATE TABLE IF NOT EXISTS gmail_sync_worker_state (' +
+      'worker_name VARCHAR(64) PRIMARY KEY, ' +
+      'last_started_at TIMESTAMPTZ, ' +
+      'last_completed_at TIMESTAMPTZ, ' +
+      'consecutive_failed_runs INTEGER NOT NULL DEFAULT 0, ' +
+      'last_error_category VARCHAR(80), ' +
+      'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
+      ')'
   );
 
   await pool.query(
@@ -274,6 +335,9 @@ async function ensureDatabase() {
       'user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ' +
       'gmail_message_id VARCHAR(255) NOT NULL, ' +
       'gmail_thread_id VARCHAR(255), ' +
+      'account_generation BIGINT NOT NULL DEFAULT 1, ' +
+      'source_verified BOOLEAN NOT NULL DEFAULT FALSE, ' +
+      'gmail_account_address VARCHAR(255), ' +
       'sender VARCHAR(998) NOT NULL DEFAULT \'\', ' +
       'subject VARCHAR(998) NOT NULL DEFAULT \'\', ' +
       'received_at TIMESTAMPTZ NOT NULL, ' +
@@ -281,6 +345,7 @@ async function ensureDatabase() {
       'detected_interview_date DATE, ' +
       'detected_interview_time TIME, ' +
       'detected_interview_type VARCHAR(32), ' +
+      'detected_interview_location TEXT, ' +
       'confidence NUMERIC(4, 3) NOT NULL DEFAULT 0, ' +
       'candidate_application_ids JSONB NOT NULL DEFAULT \'[]\'::jsonb, ' +
       'application_id INTEGER REFERENCES applications(id) ON DELETE SET NULL, ' +
@@ -291,8 +356,63 @@ async function ensureDatabase() {
       'review_reason TEXT, ' +
       'processed_at TIMESTAMPTZ, ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
+      'CHECK (account_generation > 0), ' +
       'UNIQUE (connection_id, gmail_message_id)' +
       ')'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS account_generation BIGINT NOT NULL DEFAULT 1'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS gmail_account_address VARCHAR(255)'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS source_verified BOOLEAN NOT NULL DEFAULT FALSE'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS detected_interview_location TEXT'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS account_generation BIGINT NOT NULL DEFAULT 1'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS gmail_account_address VARCHAR(255)'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS detected_interview_location TEXT'
+  );
+
+  await pool.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS gmail_processed_messages_generation_message_idx ' +
+      'ON gmail_processed_messages (connection_id, account_generation, gmail_message_id)'
+  );
+
+  await pool.query(
+    'DO $$ ' +
+      'DECLARE legacy_constraint RECORD; ' +
+      'BEGIN ' +
+        'FOR legacy_constraint IN ' +
+          "SELECT conname FROM pg_constraint WHERE conrelid = 'gmail_processed_messages'::regclass " +
+            "AND contype = 'u' " +
+            "AND pg_get_constraintdef(oid) = 'UNIQUE (connection_id, gmail_message_id)' " +
+        'LOOP ' +
+          "EXECUTE format('ALTER TABLE gmail_processed_messages DROP CONSTRAINT %I', legacy_constraint.conname); " +
+        'END LOOP; ' +
+      'END $$'
   );
 
   await pool.query(
@@ -394,6 +514,11 @@ app.get('/api/health', async (req, res) => {
   const health = await checkDatabaseHealth(pool, Boolean(DATABASE_URL));
   return res.status(health.httpStatus).json({
     ...health.body,
+    gmailSync: health.body.status === 'UP'
+      ? await checkGmailSyncHealth(pool, {
+          intervalMs: Number(process.env.GMAIL_SYNC_INTERVAL_MS) || 120000,
+        })
+      : { status: 'UNKNOWN' },
     timestamp: new Date().toISOString(),
   });
 });
@@ -1222,7 +1347,12 @@ app.get(
           'interview_type AS "interviewType", ' +
           'interview_location AS "interviewLocation", ' +
           'notification_channels AS "notificationChannels", ' +
-          'interview_email AS "interviewEmail" ' +
+          'interview_email AS "interviewEmail", ' +
+          'EXISTS (SELECT 1 FROM gmail_connections AS connection ' +
+            'WHERE connection.id = applications.gmail_source_connection_id ' +
+              'AND connection.user_id = applications.user_id ' +
+              'AND connection.account_generation = applications.gmail_source_generation ' +
+              'AND connection.is_connected = TRUE) AS "gmailSyncEnabled" ' +
         'FROM applications ' +
         'WHERE user_id = $1 ' +
         'ORDER BY application_date DESC, created_at DESC',
@@ -1244,6 +1374,7 @@ app.get(
           interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
           interviewType: application.interviewType || undefined,
           interviewLocation: application.interviewLocation || undefined,
+          gmailSyncEnabled: application.gmailSyncEnabled,
           notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
           interviewEmail: application.interviewEmail || undefined,
         };
@@ -1282,6 +1413,7 @@ function serializeApplication(application) {
     interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
     interviewType: application.interviewType || undefined,
     interviewLocation: application.interviewLocation || undefined,
+    gmailSyncEnabled: Boolean(application.gmailSyncEnabled),
     notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
     interviewEmail: application.interviewEmail || undefined,
   };
@@ -1316,7 +1448,12 @@ app.get(
           'interview_type AS "interviewType", ' +
           'interview_location AS "interviewLocation", ' +
           'notification_channels AS "notificationChannels", ' +
-          'interview_email AS "interviewEmail" ' +
+          'interview_email AS "interviewEmail", ' +
+          'EXISTS (SELECT 1 FROM gmail_connections AS connection ' +
+            'WHERE connection.id = applications.gmail_source_connection_id ' +
+              'AND connection.user_id = applications.user_id ' +
+              'AND connection.account_generation = applications.gmail_source_generation ' +
+              'AND connection.is_connected = TRUE) AS "gmailSyncEnabled" ' +
         'FROM applications ' +
         'WHERE id = $1 AND user_id = $2',
         [applicationId, req.user.id]
@@ -1367,6 +1504,11 @@ app.put(
       const interviewType = String(body.interviewType || '').trim();
       const hasInterviewLocation = Object.hasOwn(body, 'interviewLocation');
       const interviewLocation = String(body.interviewLocation || '').trim();
+      const hasGmailSyncEnabled = Object.hasOwn(body, 'gmailSyncEnabled');
+      if (hasGmailSyncEnabled && typeof body.gmailSyncEnabled !== 'boolean') {
+        return res.status(400).json({ message: 'Gmail sync preference must be a boolean.' });
+      }
+      const gmailSyncEnabled = body.gmailSyncEnabled === true;
       const interviewEmail = String(body.interviewEmail || '').trim();
       const notificationChannels = Array.isArray(body.notificationChannels) ? body.notificationChannels : [];
       const normalizedChannels = normalizeNotificationChannels(notificationChannels);
@@ -1393,13 +1535,37 @@ app.put(
       try {
         await client.query('BEGIN');
         const currentApplicationResult = await client.query(
-          'SELECT status, company, position FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
+          'SELECT status, company, position, gmail_source_connection_id, gmail_source_generation ' +
+            'FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
           [applicationId, req.user.id]
         );
         const currentApplication = currentApplicationResult.rows[0];
         if (!currentApplication) {
           await client.query('ROLLBACK');
           return res.status(404).json({ message: 'Application not found.' });
+        }
+        let gmailSourceConnectionId = currentApplication.gmail_source_connection_id;
+        let gmailSourceGeneration = currentApplication.gmail_source_generation;
+        if (hasGmailSyncEnabled) {
+          gmailSourceConnectionId = null;
+          gmailSourceGeneration = null;
+          if (gmailSyncEnabled) {
+            const connectionResult = await client.query(
+              'SELECT id, account_generation FROM gmail_connections ' +
+                'WHERE user_id = $1 AND is_connected = TRUE AND sync_paused = FALSE ' +
+                'FOR KEY SHARE',
+              [req.user.id]
+            );
+            const connection = connectionResult.rows[0];
+            if (!connection) {
+              await client.query('ROLLBACK');
+              return res.status(409).json({
+                message: 'Connect Gmail before enabling sync for this application.',
+              });
+            }
+            gmailSourceConnectionId = connection.id;
+            gmailSourceGeneration = connection.account_generation;
+          }
         }
         const result = await client.query(
         'UPDATE applications ' +
@@ -1420,6 +1586,8 @@ app.put(
             "WHEN $13 <> 'In-person' THEN NULL " +
             'WHEN $16::boolean THEN NULLIF($17, \'\') ' +
             'ELSE interview_location END, ' +
+          'gmail_source_connection_id = $18, ' +
+          'gmail_source_generation = $19, ' +
           'notification_channels = $14::text[], ' +
           'interview_email = $15, ' +
           'updated_at = NOW() ' +
@@ -1439,7 +1607,13 @@ app.put(
           'interview_type AS "interviewType", ' +
           'interview_location AS "interviewLocation", ' +
           'notification_channels AS "notificationChannels", ' +
-          'interview_email AS "interviewEmail"',
+          'interview_email AS "interviewEmail", ' +
+          'EXISTS (SELECT 1 FROM gmail_connections AS connection ' +
+            'WHERE connection.id = applications.gmail_source_connection_id ' +
+              'AND connection.user_id = applications.user_id ' +
+              'AND connection.account_generation = applications.gmail_source_generation ' +
+              'AND connection.is_connected = TRUE ' +
+              'AND connection.sync_paused = FALSE) AS "gmailSyncEnabled"',
           [
             applicationId,
             req.user.id,
@@ -1458,6 +1632,8 @@ app.put(
             status === 'Interview' ? interviewEmail || null : null,
             hasInterviewLocation,
             interviewLocation,
+            hasGmailSyncEnabled ? gmailSourceConnectionId : currentApplication.gmail_source_connection_id,
+            hasGmailSyncEnabled ? gmailSourceGeneration : currentApplication.gmail_source_generation,
           ]
         );
 
@@ -1543,6 +1719,10 @@ app.post(
       const interviewDate = String(body.interviewDate || '').trim();
       const interviewTime = String(body.interviewTime || '').trim();
       const interviewType = String(body.interviewType || '').trim();
+      if (Object.hasOwn(body, 'gmailSyncEnabled') && typeof body.gmailSyncEnabled !== 'boolean') {
+        return res.status(400).json({ message: 'Gmail sync preference must be a boolean.' });
+      }
+      const gmailSyncEnabled = body.gmailSyncEnabled === true;
       const interviewEmail = String(body.interviewEmail || '').trim();
       const notificationChannels = Array.isArray(body.notificationChannels) ? body.notificationChannels : [];
       const normalizedChannels = normalizeNotificationChannels(notificationChannels);
@@ -1568,6 +1748,25 @@ app.post(
 
       try {
         await client.query('BEGIN');
+        let gmailSourceConnectionId = null;
+        let gmailSourceGeneration = null;
+        if (gmailSyncEnabled) {
+          const connectionResult = await client.query(
+            'SELECT id, account_generation FROM gmail_connections ' +
+              'WHERE user_id = $1 AND is_connected = TRUE AND sync_paused = FALSE ' +
+              'FOR KEY SHARE',
+            [req.user.id]
+          );
+          const connection = connectionResult.rows[0];
+          if (!connection) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({
+              message: 'Connect Gmail before enabling sync for this application.',
+            });
+          }
+          gmailSourceConnectionId = connection.id;
+          gmailSourceGeneration = connection.account_generation;
+        }
         const result = await client.query(
         'INSERT INTO applications (' +
           'user_id, ' +
@@ -1583,9 +1782,11 @@ app.post(
           'interview_time, ' +
           'interview_type, ' +
           'interview_location, ' +
+          'gmail_source_connection_id, ' +
+          'gmail_source_generation, ' +
           'notification_channels, ' +
           'interview_email' +
-        ') VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10::date, $11::time, $12, $13, $14::text[], $15) ' +
+        ') VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10::date, $11::time, $12, $13, $14, $15, $16::text[], $17) ' +
         'RETURNING ' +
           'id, ' +
           'company, ' +
@@ -1601,7 +1802,8 @@ app.post(
           'interview_type AS "interviewType", ' +
           'interview_location AS "interviewLocation", ' +
           'notification_channels AS "notificationChannels", ' +
-          'interview_email AS "interviewEmail"',
+          'interview_email AS "interviewEmail", ' +
+          '(gmail_source_connection_id IS NOT NULL) AS "gmailSyncEnabled"',
           [
             req.user.id,
             company,
@@ -1618,6 +1820,8 @@ app.post(
             status === 'Interview' && interviewType === 'In-person'
               ? String(body.interviewLocation || '').trim() || null
               : null,
+            gmailSourceConnectionId,
+            gmailSourceGeneration,
             status === 'Interview' ? normalizedChannels : [],
             status === 'Interview' ? interviewEmail || null : null,
           ]
@@ -1660,6 +1864,7 @@ app.post(
             interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
             interviewType: application.interviewType || undefined,
             interviewLocation: application.interviewLocation || undefined,
+            gmailSyncEnabled: Boolean(application.gmailSyncEnabled),
             notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
             interviewEmail: application.interviewEmail || undefined,
           },
@@ -1901,6 +2106,18 @@ app.use(
 
 ensureDatabase()
   .then(function () {
+    if (process.env.APPLYFLOW_PROCESS_ROLE === 'gmail-worker') {
+      console.log('ApplyFlow Gmail worker is running.');
+      startGmailSyncWorker(gmailSyncService);
+      const shutdown = async () => {
+        await pool.end();
+        process.exit(0);
+      };
+      process.once('SIGTERM', shutdown);
+      process.once('SIGINT', shutdown);
+      return;
+    }
+
     app.listen(
       PORT,
       function () {
@@ -1915,6 +2132,6 @@ ensureDatabase()
     );
   })
   .catch((error) => {
-    console.error('Failed to initialize database:', error);
+    console.error('Failed to initialize database:', getSafeStartupErrorDetails(error));
     process.exit(1);
   });

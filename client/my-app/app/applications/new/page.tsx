@@ -35,6 +35,7 @@ export default function AddApplicationPage() {
     const interviewTime = String(form.get("interviewTime") || "").trim();
     const interviewTypeValue = String(form.get("interviewType") || "").trim();
     const interviewLocation = String(form.get("interviewLocation") || "").trim();
+    const gmailSyncEnabled = form.get("gmailSyncEnabled") === "on";
     const normalizedInterviewType = interviewTypeValue as InterviewType;
     const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
 
@@ -69,6 +70,7 @@ export default function AddApplicationPage() {
       status: applicationStatus as Application["status"],
       arrangement: arrangement as Application["arrangement"],
       notes,
+      gmailSyncEnabled,
       ...(applicationLink ? { applicationLink } : {}),
       ...(applicationStatus === "Interview"
         ? {
@@ -224,6 +226,14 @@ export default function AddApplicationPage() {
             <label className="mb-2 block text-sm font-medium text-slate-700">Notes</label>
             <textarea name="notes" rows={5} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" />
           </div>
+
+          <label className="flex items-start gap-3 rounded-2xl border border-[#b9e7e4] bg-[#f0fbfa] p-4 text-sm text-slate-700">
+            <input type="checkbox" name="gmailSyncEnabled" className="mt-0.5" />
+            <span>
+              <span className="block font-semibold text-slate-800">Allow connected Gmail to update this application</span>
+              <span className="mt-1 block text-slate-600">Only emails from the Gmail account currently connected to your ApplyFlow account can be matched to this application. Leave unchecked to review and manage it manually.</span>
+            </span>
+          </label>
 
           {error ? (
             <div className="rounded-2xl border border-[#f8c8d5] bg-[#fff4f7] px-4 py-3 text-sm text-[#b3506e]">

@@ -277,6 +277,9 @@ export default function GmailIntegrationPage() {
                   <p className="mt-1 text-xs text-slate-500">
                     Last sync attempt: {status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : 'Not synced yet'}
                   </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Last successful sync: {status.lastSyncSuccessAt ? new Date(status.lastSyncSuccessAt).toLocaleString() : 'No successful sync recorded yet'}
+                  </p>
                 </>
               ) : (
                 <p className="mt-1 text-sm text-slate-600">No Gmail account connected.</p>
@@ -302,6 +305,16 @@ export default function GmailIntegrationPage() {
           {status?.lastSyncError ? (
             <p role="alert" className="mt-4 rounded-xl border border-[#f8c8d5] bg-[#fff4f7] px-3 py-2 text-sm text-[#b3506e]">
               Last sync error: {status.lastSyncError}
+            </p>
+          ) : null}
+          {status?.syncRequiresReconnect ? (
+            <p role="alert" className="mt-4 rounded-xl border border-[#f8c8d5] bg-[#fff4f7] px-3 py-2 text-sm text-[#b3506e]">
+              Gmail authorization needs attention. Reconnect the Gmail account to resume automatic sync.
+            </p>
+          ) : null}
+          {status?.consecutiveSyncFailures ? (
+            <p className="mt-2 text-xs text-slate-500">
+              Consecutive sync failures: {status.consecutiveSyncFailures}
             </p>
           ) : null}
           {notice ? <p role="status" className="mt-4 text-sm text-[#0f766e]">{notice}</p> : null}

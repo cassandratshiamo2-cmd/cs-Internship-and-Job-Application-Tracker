@@ -7,8 +7,11 @@ async function createStatusChangeNotification({
   previousStatus,
   newStatus,
   gmailMessageId,
+  gmailConnectionId,
+  gmailAccountGeneration,
 }) {
-  const eventKey = `status-change:${applicationId}:${gmailMessageId || Date.now()}`;
+  const eventKey = `status-change:${applicationId}:${gmailConnectionId || 'connection'}:` +
+    `${gmailAccountGeneration || 1}:${gmailMessageId || Date.now()}`;
   const result = await client.query(
     'INSERT INTO notification_jobs (' +
       'user_id, application_id, notification_type, channel, company, position, ' +

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
+    "worker": "node gmail-worker.js",
     "test": "node --test"
   },
   "keywords": [],

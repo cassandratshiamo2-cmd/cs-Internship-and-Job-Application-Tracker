@@ -89,6 +89,7 @@ export default function EditApplicationPage() {
     const interviewTime = String(form.get("interviewTime") || "").trim();
     const interviewTypeValue = String(form.get("interviewType") || "").trim();
     const interviewLocation = String(form.get("interviewLocation") || "").trim();
+    const gmailSyncEnabled = form.get("gmailSyncEnabled") === "on";
     const normalizedInterviewType = interviewTypeValue as InterviewType;
     const applicationLink = String(form.get("applicationLink") || "").trim();
     const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
@@ -126,6 +127,7 @@ export default function EditApplicationPage() {
             arrangement: String(form.get("arrangement") || application.arrangement) as Application["arrangement"],
             notes: String(form.get("notes") || application.notes).trim(),
             applicationLink: applicationLink || undefined,
+            gmailSyncEnabled,
             ...(nextStatus === "Interview"
               ? { interviewDate, interviewTime, interviewType: normalizedInterviewType, interviewLocation, notificationChannels: savedChannels }
               : { interviewDate: undefined, interviewTime: undefined, interviewType: undefined, notificationChannels: undefined, interviewEmail: undefined }),
@@ -163,6 +165,7 @@ export default function EditApplicationPage() {
         arrangement: String(form.get("arrangement") || item.arrangement) as Application["arrangement"],
         notes: String(form.get("notes") || item.notes).trim(),
         applicationLink: applicationLink || undefined,
+        gmailSyncEnabled,
         ...(nextStatus === "Interview"
           ? { interviewDate, interviewTime, interviewType: normalizedInterviewType, interviewLocation, notificationChannels: savedChannels, interviewEmail: undefined }
           : { interviewDate: undefined, interviewTime: undefined, interviewType: undefined, notificationChannels: undefined, interviewEmail: undefined }),
@@ -274,6 +277,13 @@ export default function EditApplicationPage() {
             </fieldset>
           ) : null}
           <div><label className="mb-2 block text-sm font-medium text-slate-700">Notes</label><textarea name="notes" defaultValue={application.notes} rows={5} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" /></div>
+          <label className="flex items-start gap-3 rounded-2xl border border-[#b9e7e4] bg-[#f0fbfa] p-4 text-sm text-slate-700">
+            <input type="checkbox" name="gmailSyncEnabled" defaultChecked={application.gmailSyncEnabled === true} className="mt-0.5" />
+            <span>
+              <span className="block font-semibold text-slate-800">Allow connected Gmail to update this application</span>
+              <span className="mt-1 block text-slate-600">Only emails from the Gmail account currently connected to your ApplyFlow account can be matched to this application. Uncheck to stop automatic status updates.</span>
+            </span>
+          </label>
           {saveError ? <div role="alert" className="rounded-2xl border border-[#f8c8d5] bg-[#fff4f7] px-4 py-3 text-sm text-[#b3506e]">{saveError}</div> : null}
           <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
             <Link href={`/applications/${application.id}`} className="inline-flex items-center justify-center rounded-full border border-[#e7d6dd] bg-white px-5 py-3 text-sm font-semibold text-slate-700">Cancel</Link>

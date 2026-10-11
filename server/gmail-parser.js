@@ -202,6 +202,8 @@ const INTERVIEW_TYPE_PATTERNS = [
   { type: 'Panel', pattern: /\b(?:interview\s+)?type\s*[:\-]\s*panel\b|\bpanel\s+interview\b/i },
   { type: 'Other', pattern: /\binterview\s+type\s*[:\-]\s*other\b/i },
 ];
+const NON_PHYSICAL_LOCATION = /\b(?:online|virtual|remote|zoom|microsoft teams|teams meeting|google meet|phone|telephone|tba|tbd|to be confirmed|not confirmed)\b/i;
+const INTERVIEW_LOCATION_LABEL = /^\s*(?:interview\s+)?(?:location|address|venue|interview\s+venue)\s*[:\-]\s*(.*)$/i;
 
 function monthNumber(value) {
   const normalized = value.toLowerCase().replace(/\.$/, '');
@@ -317,6 +319,9 @@ function getInterviewDetailsToFill(existing, extracted) {
     interviewType: existing?.interview_type || existing?.interviewType
       ? null
       : extracted?.interviewType || null,
+    interviewLocation: existing?.interview_location || existing?.interviewLocation
+      ? null
+      : extracted?.interviewLocation || null,
   };
 }
 
@@ -339,12 +344,54 @@ function getInterviewDetailsToUpdate(existing, extracted) {
     interviewType: extracted?.interviewType && extracted.interviewType !== existingType
       ? extracted.interviewType
       : null,
+    interviewLocation: !existing?.interview_location && !existing?.interviewLocation
+      ? extracted?.interviewLocation || null
+      : null,
   };
 }
 
 function extractInterviewType({ subject = '', text = '' }) {
   const content = `${subject}\n${text}`.slice(0, 100000);
   return INTERVIEW_TYPE_PATTERNS.find(({ pattern }) => pattern.test(content))?.type || null;
+}
+
+function extractInterviewLocation({ text = '' }) {
+  const lines = String(text || '').slice(0, 100000).replace(/\r/g, '').split('\n');
+  const locations = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const label = INTERVIEW_LOCATION_LABEL.exec(lines[index]);
+    if (!label) continue;
+
+    const parts = label[1].trim() ? [label[1].trim()] : [];
+    for (let offset = 1; parts.length < 4 && index + offset < lines.length; offset += 1) {
+      const nextLine = lines[index + offset].trim();
+      if (!nextLine || INTERVIEW_LOCATION_LABEL.test(nextLine) ||
+          /^(?:regards|kind regards|sincerely|thank you|best wishes)\b/i.test(nextLine)) {
+        break;
+      }
+      parts.push(nextLine);
+    }
+    const value = parts.join(', ')
+      .replace(/^(?:<|&lt;)/, '')
+      .replace(/(?:>|&gt;)$/, '')
+      .trim();
+
+    if (
+      value.length < 8 ||
+      value.length > 500 ||
+      NON_PHYSICAL_LOCATION.test(value) ||
+      !/[a-z]/i.test(value)
+    ) {
+      continue;
+    }
+    locations.push(value);
+  }
+
+  const uniqueLocations = [...new Set(locations)];
+  return uniqueLocations.length === 1
+    ? { interviewLocation: uniqueLocations[0], ambiguous: false }
+    : { interviewLocation: null, ambiguous: uniqueLocations.length > 1 };
 }
 
 function extractInterviewDateTime({ subject = '', text = '' }) {
@@ -400,6 +447,7 @@ module.exports = {
   classifyApplicationEmail,
   isGenericJobAlert,
   extractInterviewDateTime,
+  extractInterviewLocation,
   extractInterviewType,
   getInterviewDetailsToFill,
   getInterviewDetailsToUpdate,
