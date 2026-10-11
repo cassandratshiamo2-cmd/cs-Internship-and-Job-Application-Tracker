@@ -25,6 +25,7 @@ function formatSyncOutcomeSummary(outcomes: string[] = []) {
     updated: 'updated',
     review: 'sent for review',
     ignored: 'ignored',
+    unavailable: 'unavailable in Gmail (not processed)',
     duplicate: 'duplicates skipped',
     already_up_to_date: 'already up to date',
     warning: 'sent for review with a processing warning',
@@ -392,12 +393,24 @@ export default function GmailIntegrationPage() {
                     <div className="min-w-0">
                       <p className="break-words font-semibold text-slate-800">{message.subject || '(No subject)'}</p>
                       <p className="mt-1 break-all text-sm text-slate-500">{message.sender}</p>
-                      <p className="mt-1 text-xs text-slate-500">Processed {message.processed_at ? new Date(message.processed_at).toLocaleString() : 'recently'}</p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {message.review_reason?.startsWith('This Gmail message is no longer available.')
+                          ? 'Checked'
+                          : 'Processed'} {message.processed_at ? new Date(message.processed_at).toLocaleString() : 'recently'}
+                      </p>
                     </div>
                     {message.detected_status ? <StatusBadge status={message.detected_status} /> : null}
                   </div>
                   <p className="mt-3 text-sm font-medium text-slate-700">
-                    {message.outcome === 'updated' ? 'Automatically applied' : message.outcome === 'reviewed' ? 'Applied from review' : message.outcome === 'dismissed' ? 'Dismissed' : 'Processed'}
+                    {message.review_reason?.startsWith('This Gmail message is no longer available.')
+                      ? 'Unavailable in Gmail; email contents were not retrieved'
+                      : message.outcome === 'updated'
+                        ? 'Automatically applied'
+                        : message.outcome === 'reviewed'
+                          ? 'Applied from review'
+                          : message.outcome === 'dismissed'
+                            ? 'Dismissed'
+                            : 'Processed'}
                     {message.application_company ? ` to ${message.application_company} - ${message.application_position || 'Application'}` : ''}
                   </p>
                   <dl className="mt-3 grid gap-x-6 gap-y-1 text-sm text-slate-600 sm:grid-cols-2 lg:grid-cols-4">

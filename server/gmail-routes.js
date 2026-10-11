@@ -224,14 +224,14 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
             'SELECT 1 FROM gmail_connections AS connection ' +
             'WHERE connection.id = gmail_processed_messages.connection_id ' +
               'AND connection.user_id = gmail_processed_messages.user_id ' +
-              'AND connection.account_generation = gmail_processed_messages.account_generation'
+              'AND connection.account_generation = gmail_processed_messages.account_generation' +
           ') ORDER BY received_at DESC LIMIT 100',
         [req.user.id]
       );
       return res.status(200).json({
         messages: result.rows.map((message) => ({
           ...message,
-          retryable: Number(message.reprocess_version || 0) < MAX_REPROCESS_ATTEMPTS,
+          retryable: isRetryableProcessedMessage(message),
         })),
       });
     } catch (error) {

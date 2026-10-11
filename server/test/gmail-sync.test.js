@@ -19,6 +19,7 @@ function createTestService({
   unlockReturnsFalse = false,
   failLockAcquisition = false,
   requestTimeoutMs = 30000,
+  initialSync = false,
   messageGet,
   messageList,
   parseMessage,
@@ -37,6 +38,7 @@ function createTestService({
     history: 0,
     list: 0,
     get: 0,
+    getRequests: [],
     delays: [],
     unlocks: 0,
     releases: 0,
@@ -59,6 +61,7 @@ function createTestService({
     processedRows.set('already-processed', {
       id: 99,
       outcome: typeof existingMessage === 'string' ? existingMessage : 'updated',
+      sourceVerified: true,
     });
   }
   for (const message of existingMessages) {
@@ -67,6 +70,9 @@ function createTestService({
       outcome: message.outcome,
       detectedStatus: message.detectedStatus || null,
       reviewReason: message.reviewReason || null,
+      sender: message.sender || '',
+      subject: message.subject || '',
+      candidateApplicationIds: message.candidateApplicationIds || [],
       reprocessVersion: message.reprocessVersion || 0,
       userId: message.userId ?? 4,
       sourceVerified: message.sourceVerified ?? true,
@@ -82,7 +88,7 @@ function createTestService({
     refresh_token_ciphertext: encryptToken('refresh-token', encryptionKey),
     access_token_ciphertext: null,
     token_expires_at: null,
-    history_id: 'history-start',
+    history_id: initialSync ? null : 'history-start',
     initial_sync_history_id: null,
     initial_sync_page_token: null,
   };
@@ -188,6 +194,7 @@ function createTestService({
             detected_status: row.detectedStatus,
             review_reason: row.reviewReason,
             reprocess_version: row.reprocessVersion || 0,
+            source_verified: row.sourceVerified,
           }] : [],
         };
       }
@@ -290,15 +297,46 @@ function createTestService({
             calls.notifications.push(notification);
             return { rowCount: 1, rows: [{ id: notification.id }] };
           }
+          if (sql.startsWith('SELECT id, outcome, detected_status, sender, subject')) {
+            const row = processedRows.get(String(params[3]));
+            return {
+              rowCount: row ? 1 : 0,
+              rows: row ? [{
+                id: row.id,
+                outcome: row.outcome,
+                detected_status: row.detectedStatus,
+                sender: row.sender || '',
+                subject: row.subject || '',
+                candidate_application_ids: row.candidateApplicationIds || [],
+              }] : [],
+            };
+          }
           if (sql.startsWith('INSERT INTO gmail_processed_messages')) {
             const messageId = String(params[2]);
             if (sql.includes('review_reason, processed_at')) {
+              if (sql.includes("'ignored', $6, NOW()")) {
+                if (!processedRows.has(messageId)) {
+                  processedRows.set(messageId, {
+                    id: nextProcessedId++,
+                    outcome: 'ignored',
+                    reviewReason: params[5],
+                    sender: '',
+                    subject: '',
+                    candidateApplicationIds: [],
+                    sourceVerified: true,
+                  });
+                }
+                return { rowCount: 1, rows: [] };
+              }
               if (!processedRows.has(messageId)) {
                 processedRows.set(messageId, {
                   id: nextProcessedId++,
                   outcome: 'review',
                   warning: true,
-                  review_reason: params[5],
+                  reviewReason: params[5],
+                  sender: '',
+                  subject: '',
+                  candidateApplicationIds: [],
                   sourceVerified: true,
                 });
               }
@@ -367,10 +405,16 @@ function createTestService({
             const row = Array.from(processedRows.values()).find((item) => item.id === params[0]);
             if (row) {
               row.outcome = /SET outcome = '([^']+)'/.exec(sql)?.[1] || row.outcome;
+              row.reviewReason = params[1];
               row.applicationId = params[1];
               row.previousStatus = params[2];
               row.newStatus = params[3];
             }
+            return { rowCount: 1, rows: [] };
+          }
+          if (sql.startsWith('UPDATE gmail_processed_messages SET review_reason =')) {
+            const row = Array.from(processedRows.values()).find((item) => item.id === params[0]);
+            if (row) row.reviewReason = params[1];
             return { rowCount: 1, rows: [] };
           }
           throw new Error(`Unexpected lock query: ${sql}`);
@@ -429,9 +473,14 @@ function createTestService({
               calls.list += 1;
               return messageList ? messageList(options) : { data: { messages: [] } };
             },
-            get: async ({ id }) => {
+            get: async (request) => {
               calls.get += 1;
-              return messageGet ? messageGet(id) : { data: {} };
+              calls.getRequests.push({
+                id: request.id,
+                userId: request.userId,
+                format: request.format,
+              });
+              return messageGet ? messageGet(request.id, request) : { data: {} };
             },
           },
         },
@@ -560,7 +609,7 @@ test('a previously ignored Nova email can be explicitly retried in place without
     'Content-Type: text/plain; charset=utf-8',
     '',
     'Dear Cassandra',
-    'You are invited for an assesment',
+    'Nova invites you to complete an assessment for your Graduate Trainee application.',
     'Kind regard',
     'Nova recruitment team',
   ].join('\r\n')).toString('base64url');
@@ -642,7 +691,7 @@ test('automatic retry does not double-count an ignored email also returned by Gm
     'Subject: Nova application',
     'Content-Type: text/plain; charset=utf-8',
     '',
-    'You are invited for an assessment.',
+    'Nova invites you to complete an assessment for your Graduate Trainee application.',
     'Nova recruitment team',
   ].join('\r\n')).toString('base64url');
   const { calls, service, processedRows } = createTestService({
@@ -895,6 +944,10 @@ test('worker sweeps use a database lock shared by separate service instances', a
   function createWorkerOnlyService() {
     const pool = {
       async query(sql, params = []) {
+        if (sql.startsWith('INSERT INTO gmail_sync_worker_state') ||
+            sql.startsWith('UPDATE gmail_sync_worker_state')) {
+          return { rowCount: 1, rows: [] };
+        }
         if (sql.startsWith('INSERT INTO gmail_sync_leases')) {
           const existing = heldLocks.get(params[0]);
           if (existing && existing.expiresAt > Date.now()) return { rowCount: 0, rows: [] };
@@ -913,7 +966,10 @@ test('worker sweeps use a database lock shared by separate service instances', a
           heldLocks.delete(params[0]);
           return { rowCount: 1, rows: [{ lock_key: params[0] }] };
         }
-        if (sql.startsWith('SELECT id FROM gmail_connections WHERE is_connected = TRUE ORDER BY id')) {
+        if (sql.startsWith('UPDATE gmail_sync_worker_state')) {
+          return { rowCount: 1, rows: [] };
+        }
+        if (sql.startsWith('SELECT id FROM gmail_connections WHERE is_connected = TRUE')) {
           connectionListCalls += 1;
           startedConnectionList();
           return new Promise((resolve) => { releaseConnectionList = resolve; });
@@ -943,6 +999,10 @@ test('the worker releases its database lock when loading connections fails', asy
   const heldLocks = new Map();
   const pool = {
     async query(sql, params = []) {
+      if (sql.startsWith('INSERT INTO gmail_sync_worker_state') ||
+          sql.startsWith('UPDATE gmail_sync_worker_state')) {
+        return { rowCount: 1, rows: [] };
+      }
       if (sql.startsWith('INSERT INTO gmail_sync_leases')) {
         heldLocks.set(params[0], { ownerToken: params[1], expiresAt: Date.now() + 180000 });
         return { rowCount: 1, rows: [{ owner_token: params[1] }] };
@@ -1220,6 +1280,142 @@ test('scenario 13: malformed message records a warning and the next valid email 
   assert.equal(application.interview_time, '08:30');
   assert.equal(application.interview_type, 'Panel');
   assert.equal(calls.get, 2);
+});
+
+test('a listed Gmail message that returns 404 is recorded as unavailable and is not fetched again', async () => {
+  const listedMessageId = 'message-id-from-gmail-list-123';
+  const missingError = new Error('Requested entity was not found.');
+  missingError.code = '404';
+  missingError.response = {
+    status: 404,
+    data: { error: { errors: [{ reason: 'notFound' }] } },
+  };
+  const { service, processedRows, calls } = createTestService({
+    initialSync: true,
+    messageList: async () => ({ data: { messages: [{ id: listedMessageId }] } }),
+    messageGet: async (messageId) => {
+      assert.equal(messageId, listedMessageId);
+      throw missingError;
+    },
+  });
+
+  const firstResult = await service.syncConnection(7);
+
+  assert.deepEqual(firstResult.outcomes, ['unavailable']);
+  assert.deepEqual(firstResult.warnings, []);
+  assert.deepEqual(calls.getRequests, [{
+    id: listedMessageId,
+    userId: 'me',
+    format: 'raw',
+  }]);
+  assert.equal(processedRows.get(listedMessageId).outcome, 'ignored');
+  assert.match(processedRows.get(listedMessageId).reviewReason, /no longer available/i);
+  assert.equal(processedRows.get(listedMessageId).detectedStatus, undefined);
+
+  const secondResult = await service.syncConnection(7);
+
+  assert.deepEqual(secondResult.outcomes, ['duplicate']);
+  assert.equal(calls.get, 1);
+});
+
+test('a missing Gmail history message does not block processing the remaining valid email', async () => {
+  const application = {
+    id: 116,
+    company: 'Acme Technology',
+    position: 'Junior Software Engineer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const validMessageId = 'valid-interview-message-after-missing';
+  const missingMessageId = 'missing-message-from-history-456';
+  const validRaw = Buffer.from([
+    'From: hiring@acme.example',
+    'To: applyflow@example.com',
+    'Subject: Interview invitation - Acme Technology - Junior Software Engineer',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Acme Technology invites you to interview for the Junior Software Engineer position.',
+    'Your interview is scheduled for 09 October 2026 at 08:30.',
+  ].join('\r\n')).toString('base64url');
+  const { service, processedRows, calls } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-with-unavailable-message',
+        history: [{ messagesAdded: [
+          { message: { id: missingMessageId } },
+          { message: { id: validMessageId } },
+        ] }],
+      },
+    }),
+    messageGet: async (messageId) => {
+      if (messageId === missingMessageId) {
+        const error = new Error('Requested entity was not found.');
+        error.code = '404';
+        error.response = {
+          status: 404,
+          data: { error: { errors: [{ reason: 'notFound' }] } },
+        };
+        throw error;
+      }
+      return {
+        data: {
+          labelIds: [],
+          raw: validRaw,
+          threadId: 'acme-interview-thread',
+          internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+        },
+      };
+    },
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['unavailable', 'updated']);
+  assert.deepEqual(result.warnings, []);
+  assert.equal(processedRows.get(missingMessageId).outcome, 'ignored');
+  assert.equal(processedRows.get(validMessageId).outcome, 'updated');
+  assert.equal(application.status, 'Interview');
+  assert.equal(application.interview_date, '2026-10-09');
+  assert.equal(application.interview_time, '08:30');
+  assert.deepEqual(calls.getRequests.map(({ id, userId, format }) => ({ id, userId, format })), [
+    { id: missingMessageId, userId: 'me', format: 'raw' },
+    { id: validMessageId, userId: 'me', format: 'raw' },
+  ]);
+});
+
+test('a Gmail message 404 without a notFound reason remains a sync failure', async () => {
+  const messageId = 'message-404-unrelated-to-missing-message';
+  const error = new Error('Requested entity was not found.');
+  error.code = '404';
+  error.response = {
+    status: 404,
+    data: { error: { errors: [{ reason: 'backendError' }] } },
+  };
+  const { service, processedRows, calls } = createTestService({
+    historyList: async () => ({
+      data: {
+        historyId: 'history-404-other-reason',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => {
+      throw error;
+    },
+  });
+
+  await assert.rejects(service.syncConnection(7), /Gmail sync failed/);
+
+  assert.equal(calls.get, 1);
+  assert.equal(processedRows.has(messageId), false);
+  assert.deepEqual(calls.historyCursorUpdates, []);
 });
 
 test('scenario 12: processing the same Gmail message twice has one application and reminder effect', async () => {
@@ -1607,7 +1803,7 @@ test('a clear Shoprite invitation corrects Rejected to Interview despite unrelat
   assert.equal(calls.notifications[0].read, false);
   assert.equal(calls.notifications[0].previous_status, 'Rejected');
   assert.equal(calls.notifications[0].new_status, 'Interview');
-  assert.equal(calls.notifications[0].event_key, 'status-change:79:shoprite-interview-correction');
+  assert.equal(calls.notifications[0].event_key, 'status-change:79:7:1:shoprite-interview-correction');
 });
 
 test('a Microsoft rejection updates the matching Applied application and notifies once', async () => {
@@ -1710,7 +1906,7 @@ test('a Google security alert cannot change an application or create a status no
   assert.equal(calls.notifications.length, 0);
 });
 
-test('Hitech rejection email with a misspelling updates the matching application and creates an unread notification', async () => {
+test('Hitech rejection with a misspelled role is queued for review without changing the application', async () => {
   const application = {
     id: 78,
     company: 'Hitech',
@@ -1734,7 +1930,7 @@ test('Hitech rejection email with a misspelling updates the matching application
     '',
     'Dear Cassandra',
     '',
-    'After a serious competition of large numbers of applicants we unfortunately decided not to carry o with your application',
+    'Hitech recruitment unfortunately decided not to carry o with your Juniour developer application after a serious competition of large numbers of applicants',
     '',
     'Best of luch with your career',
     '',
@@ -1769,30 +1965,17 @@ test('Hitech rejection email with a misspelling updates the matching application
   const result = await service.syncConnection(7, { reprocessIgnored: true });
   const historyRow = processedRows.get('hitech-rejection');
 
-  assert.deepEqual(result.outcomes, ['updated']);
+  assert.deepEqual(result.outcomes, ['review']);
   assert.equal(historyRow.detectedStatus, 'Rejected');
-  assert.equal(historyRow.outcome, 'updated');
-  assert.equal(application.status, 'Rejected');
-  assert.equal(calls.applicationUpdates, 1);
-  assert.deepEqual(calls.notifications, [{
-    id: 1,
-    user_id: 4,
-    application_id: '78',
-    notification_type: 'Status Update',
-    channel: 'In-app',
-    company: 'Hitech',
-    position: 'Juniour developer',
-    status: 'sent',
-    read: false,
-    previous_status: 'Applied',
-    new_status: 'Rejected',
-    event_key: 'status-change:78:hitech-rejection',
-  }]);
+  assert.equal(historyRow.outcome, 'review');
+  assert.equal(application.status, 'Applied');
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(calls.notifications.length, 0);
 
   const retryResult = await service.syncConnection(7, { reprocessIgnored: true });
   assert.deepEqual(retryResult.outcomes, []);
   assert.equal(calls.get, 1);
-  assert.equal(calls.notifications.length, 1);
+  assert.equal(calls.notifications.length, 0);
 });
 
 test('a Gmail API authentication failure remains fatal and releases the connection lock', async () => {
@@ -1898,8 +2081,8 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
     '--applyflow-boundary',
     'Content-Type: text/plain; charset=utf-8',
     '',
-    'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026',
-    'AT 08:30',
+    'YOU ARE INVITED TO AN INTERVIEW FOR THE CASHIER APPLICATION.',
+    'Your interview is scheduled for 09 October 2026 at 08:30.',
     '',
     'Kind regards',
     '',
@@ -1907,8 +2090,8 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
     '--applyflow-boundary',
     'Content-Type: text/html; charset=utf-8',
     '',
-    '<p>YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026</p>',
-    '<p>AT 08:30</p><p>Kind regards</p><p>Shoprite</p>',
+    '<p>YOU ARE INVITED TO AN INTERVIEW FOR THE CASHIER APPLICATION.</p>',
+    '<p>Your interview is scheduled for 09 October 2026 at 08:30.</p><p>Kind regards</p><p>Shoprite</p>',
     '--applyflow-boundary--',
   ].join('\r\n')).toString('base64url');
   let lockHeld = false;
@@ -1929,6 +2112,8 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
       if (sql.startsWith('SELECT * FROM gmail_connections')) return { rowCount: 1, rows: [connection] };
       if (sql.startsWith('SELECT CEIL(EXTRACT(EPOCH FROM (quota_backoff_until')) return { rowCount: 0, rows: [] };
       if (sql.startsWith('SELECT outcome, detected_status')) return { rowCount: 0, rows: [] };
+      if (sql.startsWith('INSERT INTO gmail_sync_worker_state') ||
+          sql.startsWith('UPDATE gmail_sync_worker_state')) return { rowCount: 1, rows: [] };
       if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
         return { rowCount: 1, rows: [application] };
       }
@@ -1941,14 +2126,23 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
           const sql = typeof query === 'string' ? query : query.text;
           if (typeof query !== 'string') params = query.values || [];
           if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rowCount: 1, rows: [] };
+          if (sql.startsWith('SELECT id FROM gmail_connections')) {
+            const ownsConnection = params[0] === connection.id &&
+              params[1] === connection.user_id &&
+              params[2] === connection.account_generation;
+            return {
+              rowCount: ownsConnection ? 1 : 0,
+              rows: ownsConnection ? [{ id: connection.id }] : [],
+            };
+          }
           if (sql.startsWith('INSERT INTO gmail_processed_messages')) {
-            assert.equal(params[8], '2026-10-09');
-            assert.equal(params[9], '08:30');
+            assert.equal(params[10], '2026-10-09');
+            assert.equal(params[11], '08:30');
             Object.assign(processed, {
-              status: params[7],
-              interview_date: params[8],
-              interview_time: params[9],
-              interview_type: params[10],
+              status: params[9],
+              interview_date: params[10],
+              interview_time: params[11],
+              interview_type: params[12],
             });
             return { rowCount: 1, rows: [{ id: 500 }] };
           }
@@ -2178,7 +2372,7 @@ test('scenarios 1-7: status transitions run through matching, persistence, and a
           read: false,
           previous_status: scenario.current,
           new_status: scenario.detected,
-          event_key: `status-change:${application.id}:status-scenario-${index}`,
+          event_key: `status-change:${application.id}:7:1:status-scenario-${index}`,
         }],
         `scenario ${index + 1} notification contents`
       );

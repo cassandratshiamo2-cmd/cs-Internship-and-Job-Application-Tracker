@@ -34,10 +34,14 @@ const QUOTA_COOLDOWN_MAX_SECONDS = 3600;
 const DEFAULT_GMAIL_REQUEST_TIMEOUT_MS = 30000;
 const MAX_GMAIL_REQUEST_TIMEOUT_MS = 120000;
 const UNCLASSIFIED_EMAIL_REVIEW_REASON = 'No supported application status rule matched.';
+const UNAVAILABLE_GMAIL_MESSAGE_REASON =
+  'This Gmail message is no longer available. No email contents were retrieved.';
+const UNAVAILABLE_REVIEW_MESSAGE_REASON =
+  'This Gmail message is no longer available. Previously extracted details were preserved.';
 const IGNORED_MESSAGE_REPROCESS_DAYS = 30;
 const IGNORED_MESSAGE_REPROCESS_LIMIT = 25;
 const TRANSACTIONAL_APPLICATION_CONTEXT =
-  /\b(?:your\s+(?:application|interview)|application\s+(?:status|update|for)|update\s+(?:on|about)\s+your\s+application|candidate\s+(?:for|application)|application\s+for\s+the)\b/i;
+  /\b(?:your\s+(?:application|interview)|application\s+(?:status|update|for)|update\s+(?:on|about)\s+your\s+application|candidate\s+(?:for|application)|application\s+for\s+the|for\s+your\s+.{1,100}\s+application)\b/i;
 
 function isRetryableIgnoredMessage(message) {
   return message?.outcome === 'ignored' &&
@@ -49,6 +53,7 @@ function isRetryableIgnoredMessage(message) {
 function isRetryableProcessedMessage(message) {
   return isRetryableIgnoredMessage(message) ||
     (message?.outcome === 'review' &&
+      message.review_reason !== UNAVAILABLE_REVIEW_MESSAGE_REASON &&
       Number(message.reprocess_version || 0) < MAX_REPROCESS_ATTEMPTS);
 }
 
@@ -388,7 +393,6 @@ function createGmailSyncService({
         connection.account_generation,
       ]
     );
-
     return gmailClientFactory(oauthClient);
   }
 
@@ -405,7 +409,10 @@ function createGmailSyncService({
         'Gmail message fetch'
       ));
     } catch (error) {
-      if (getGmailErrorStatus(error) === 404) {
+      if (
+        getGmailErrorStatus(error) === 404 &&
+        getGmailErrorReasons(error).includes('notfound')
+      ) {
         const missingMessageError = new Error('Gmail message no longer exists.');
         missingMessageError.code = 'GMAIL_MESSAGE_NOT_FOUND';
         missingMessageError.cause = error;
@@ -461,7 +468,7 @@ function createGmailSyncService({
             'detected_interview_date, detected_interview_time, detected_interview_type, detected_interview_location, ' +
           'confidence, candidate_application_ids, outcome' +
           ') VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, $10, $11::date, $12::time, $13, $14, $15, $16::jsonb, \'processing\') ' +
-        'ON CONFLICT (connection_id, gmail_message_id) DO NOTHING ' +
+        'ON CONFLICT (connection_id, account_generation, gmail_message_id) DO NOTHING ' +
         'RETURNING id',
         [
           connection.id,
@@ -488,8 +495,8 @@ function createGmailSyncService({
         const existing = await client.query(
           'SELECT id, outcome, detected_status, review_reason, reprocess_version, source_verified ' +
             'FROM gmail_processed_messages ' +
-            'WHERE connection_id = $1 AND gmail_message_id = $2 FOR UPDATE',
-            [connection.id, email.id]
+            'WHERE connection_id = $1 AND gmail_message_id = $2 AND account_generation = $3 FOR UPDATE',
+            [connection.id, email.id, connection.account_generation]
         );
         const existingMessage = existing.rows[0];
         if (!existingMessage || !existingMessage.source_verified || (
@@ -500,14 +507,15 @@ function createGmailSyncService({
         }
 
         messageRowId = existingMessage.id;
-        await client.query(
+        const messageUpdate = await client.query(
           'UPDATE gmail_processed_messages SET ' +
             'gmail_account_address = $2, sender = $3, subject = $4, received_at = $5, detected_status = $6, ' +
             'detected_interview_date = $7::date, detected_interview_time = $8::time, ' +
             'detected_interview_type = $9, detected_interview_location = $10, confidence = $11, ' +
             'candidate_application_ids = $12::jsonb, outcome = \'processing\', ' +
             'review_reason = NULL, processed_at = NULL, ' +
-            'reprocess_version = CASE WHEN $13::boolean THEN reprocess_version + 1 ELSE reprocess_version END WHERE id = $1',
+            'reprocess_version = CASE WHEN $13::boolean THEN reprocess_version + 1 ELSE reprocess_version END ' +
+            'WHERE id = $1 AND connection_id = $14 AND user_id = $15 AND account_generation = $16',
           [
             messageRowId,
             connection.gmail_address,
@@ -522,8 +530,14 @@ function createGmailSyncService({
             classification.confidence,
             JSON.stringify(match.candidateIds || []),
             isRetryableProcessedMessage(existingMessage),
+            connection.id,
+            connection.user_id,
+            connection.account_generation,
           ]
         );
+        if (messageUpdate.rowCount !== 1) {
+          throw new Error('The Gmail message ownership changed while it was being updated.');
+        }
       } else {
         messageRowId = inserted.rows[0].id;
       }
@@ -738,7 +752,7 @@ function createGmailSyncService({
         allowMultiCompanyAlert: true,
       });
       const hasTransactionalApplicationContext =
-        /\b(?:your\s+(?:application|interview)|application\s+(?:status|update|for)|update\s+(?:on|about)\s+your\s+application)\b/i.test(
+        TRANSACTIONAL_APPLICATION_CONTEXT.test(
           `${email.subject || ''}\n${email.text || ''}`
         );
       if (strongMatch.outcome === 'matched' && hasTransactionalApplicationContext) {
@@ -795,7 +809,7 @@ function createGmailSyncService({
             'sender, subject, received_at, ' +
           'confidence, candidate_application_ids, outcome, review_reason, processed_at' +
         ') VALUES ($1, $2, $3, $4, TRUE, $5, \'\', \'\', NOW(), 0, \'[]\'::jsonb, \'review\', $6, NOW()) ' +
-        'ON CONFLICT (connection_id, gmail_message_id) DO NOTHING',
+        'ON CONFLICT (connection_id, account_generation, gmail_message_id) DO NOTHING',
         [
           connection.id,
           connection.user_id,
@@ -815,6 +829,91 @@ function createGmailSyncService({
     }
   }
 
+  async function recordUnavailableMessage(connection, messageId) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const currentConnection = await client.query(
+        'SELECT id FROM gmail_connections ' +
+          'WHERE id = $1 AND user_id = $2 AND account_generation = $3 AND is_connected = TRUE ' +
+          'FOR UPDATE',
+        [connection.id, connection.user_id, connection.account_generation]
+      );
+      if (currentConnection.rowCount !== 1) {
+        throw new Error('Gmail account changed while this message was being processed.');
+      }
+
+      const existingResult = await client.query(
+        'SELECT id, outcome, detected_status, sender, subject, candidate_application_ids ' +
+          'FROM gmail_processed_messages ' +
+          'WHERE connection_id = $1 AND user_id = $2 AND account_generation = $3 ' +
+            'AND gmail_message_id = $4 FOR UPDATE',
+        [connection.id, connection.user_id, connection.account_generation, messageId]
+      );
+      const existing = existingResult.rows[0];
+      if (!existing) {
+        await client.query(
+          'INSERT INTO gmail_processed_messages (' +
+            'connection_id, user_id, gmail_message_id, account_generation, source_verified, ' +
+              'gmail_account_address, sender, subject, received_at, confidence, ' +
+              'candidate_application_ids, outcome, review_reason, processed_at' +
+          ') VALUES ($1, $2, $3, $4, TRUE, $5, \'\', \'\', NOW(), 0, \'[]\'::jsonb, \'ignored\', $6, NOW()) ' +
+          'ON CONFLICT (connection_id, account_generation, gmail_message_id) DO NOTHING',
+          [
+            connection.id,
+            connection.user_id,
+            messageId,
+            connection.account_generation,
+            connection.gmail_address,
+            UNAVAILABLE_GMAIL_MESSAGE_REASON,
+          ]
+        );
+      } else if (
+        existing.outcome === 'review' &&
+        !existing.detected_status &&
+        !existing.sender &&
+        !existing.subject &&
+        JSON.stringify(existing.candidate_application_ids || []) === '[]'
+      ) {
+        await client.query(
+          "UPDATE gmail_processed_messages SET outcome = 'ignored', review_reason = $2, " +
+            'processed_at = NOW() WHERE id = $1 AND connection_id = $3 AND user_id = $4 ' +
+            'AND account_generation = $5',
+          [
+            existing.id,
+            UNAVAILABLE_GMAIL_MESSAGE_REASON,
+            connection.id,
+            connection.user_id,
+            connection.account_generation,
+          ]
+        );
+      } else if (
+        existing.outcome === 'review' ||
+        (existing.outcome === 'ignored' &&
+          existing.review_reason === UNCLASSIFIED_EMAIL_REVIEW_REASON)
+      ) {
+        await client.query(
+          'UPDATE gmail_processed_messages SET review_reason = $2, processed_at = NOW() ' +
+            'WHERE id = $1 AND connection_id = $3 AND user_id = $4 AND account_generation = $5',
+          [
+            existing.id,
+            UNAVAILABLE_REVIEW_MESSAGE_REASON,
+            connection.id,
+            connection.user_id,
+            connection.account_generation,
+          ]
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async function processMessagesIndividually(connection, gmail, messageIds, assertLeaseOwned) {
     const outcomes = [];
     const warnings = [];
@@ -825,11 +924,25 @@ function createGmailSyncService({
         await assertLeaseOwned();
         outcomes.push(await processMessage(connection, gmail, messageId, false, assertLeaseOwned));
       } catch (error) {
+        if (error.code === 'GMAIL_MESSAGE_NOT_FOUND') {
+          console.info('Gmail message unavailable during sync:', getSafeSyncErrorDetails(error));
+          try {
+            await recordUnavailableMessage(connection, messageId);
+            outcomes.push('unavailable');
+          } catch (unavailableError) {
+            warningsPersisted = false;
+            console.error('Gmail unavailable-message outcome could not be recorded:', getSafeSyncErrorDetails(unavailableError));
+            outcomes.push('warning');
+            warnings.push('An email could not be processed automatically.');
+          }
+          continue;
+        }
+
         if (
           error.gmailApiFailure ||
           isGmailQuotaError(error) ||
           [401, 403].includes(getGmailErrorStatus(error)) ||
-          !['GMAIL_MESSAGE_NOT_FOUND', 'GMAIL_MESSAGE_PARSE', 'GMAIL_MESSAGE_CLASSIFY', 'GMAIL_MESSAGE_MATCH'].includes(error.code)
+          !['GMAIL_MESSAGE_PARSE', 'GMAIL_MESSAGE_CLASSIFY', 'GMAIL_MESSAGE_MATCH'].includes(error.code)
         ) {
           throw error;
         }
@@ -908,17 +1021,26 @@ function createGmailSyncService({
     let latestHistoryId = connection.history_id;
 
     do {
-      const response = await withQuotaRetry(() => withGmailRequestTimeout(
-        (requestOptions) => gmail.users.history.list({
-          userId: 'me',
-          startHistoryId: connection.history_id,
-          historyTypes: ['messageAdded'],
-          maxResults: HISTORY_PAGE_SIZE,
-          pageToken,
-          ...requestOptions,
-        }),
-        'Gmail history fetch'
-      ));
+      let response;
+      try {
+        response = await withQuotaRetry(() => withGmailRequestTimeout(
+          (requestOptions) => gmail.users.history.list({
+            userId: 'me',
+            startHistoryId: connection.history_id,
+            historyTypes: ['messageAdded'],
+            maxResults: HISTORY_PAGE_SIZE,
+            pageToken,
+            ...requestOptions,
+          }),
+          'Gmail history fetch'
+        ));
+      } catch (error) {
+        if (getGmailErrorStatus(error) !== 404) throw error;
+        const expiredCursorError = new Error('Gmail history cursor expired.');
+        expiredCursorError.code = 'GMAIL_HISTORY_CURSOR_EXPIRED';
+        expiredCursorError.cause = error;
+        throw expiredCursorError;
+      }
       latestHistoryId = response.data.historyId || latestHistoryId;
       for (const history of response.data.history || []) {
         for (const added of history.messagesAdded || []) {
@@ -1030,7 +1152,7 @@ function createGmailSyncService({
           try {
             syncResult = await syncHistory(connection, gmail, assertLeaseOwned);
           } catch (error) {
-            if (getGmailErrorStatus(error) !== 404) throw error;
+            if (error.code !== 'GMAIL_HISTORY_CURSOR_EXPIRED') throw error;
             const profile = (await withQuotaRetry(() => withGmailRequestTimeout(
               (requestOptions) => gmail.users.getProfile({ userId: 'me', ...requestOptions }),
               'Gmail profile fetch'

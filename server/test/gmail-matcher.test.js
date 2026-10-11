@@ -212,7 +212,12 @@ test('fills a missing schedule on an existing Interview application without chan
   assert.equal(classification.status, 'Interview');
   assert.equal(match.outcome, 'matched');
   assert.equal(match.application.id, application.id);
-  assert.deepEqual(fieldsToFill, { interviewDate: '2026-10-15', interviewTime: '10:00', interviewType: null });
+  assert.deepEqual(fieldsToFill, {
+    interviewDate: '2026-10-15',
+    interviewTime: '10:00',
+    interviewType: null,
+    interviewLocation: null,
+  });
   assert.equal(decision.action, 'apply');
   assert.equal(decision.applyStatus, false);
   assert.equal(decision.applyInterviewDetails, true);
@@ -413,6 +418,7 @@ test('matches the Shoprite interview invitation and fills status, date, and time
     interviewDate: '2026-10-09',
     interviewTime: '08:30',
     interviewType: null,
+    interviewLocation: null,
   });
   Object.assign(application, {
     status: classification.status,

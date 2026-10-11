@@ -311,14 +311,14 @@ test('does not replace existing interview details with extracted values', () => 
       { interview_date: '2026-10-15', interview_time: '10:00:00', interview_type: 'Panel' },
       { interviewDate: '2026-10-16', interviewTime: '11:00', interviewType: 'Video' }
     ),
-    { interviewDate: null, interviewTime: null, interviewType: null }
+    { interviewDate: null, interviewTime: null, interviewType: null, interviewLocation: null }
   );
   assert.deepEqual(
     getInterviewDetailsToFill(
       { interview_date: '2026-10-15', interview_time: null, interview_type: null },
       { interviewDate: '2026-10-16', interviewTime: '11:00', interviewType: 'Video' }
     ),
-    { interviewDate: null, interviewTime: '11:00', interviewType: 'Video' }
+    { interviewDate: null, interviewTime: '11:00', interviewType: 'Video', interviewLocation: null }
   );
 });
 
@@ -328,13 +328,13 @@ test('identifies changed interview details without inventing or replacing absent
       { interview_date: '2026-10-09', interview_time: '07:30:00', interview_type: 'Panel' },
       { interviewDate: '2026-10-09', interviewTime: '08:30', interviewType: null }
     ),
-    { interviewDate: null, interviewTime: '08:30', interviewType: null }
+    { interviewDate: null, interviewTime: '08:30', interviewType: null, interviewLocation: null }
   );
   assert.deepEqual(
     getInterviewDetailsToUpdate(
       { interview_date: '2026-10-09', interview_time: '08:30:00', interview_type: 'Panel' },
       { interviewDate: '2026-10-09', interviewTime: '08:30', interviewType: 'Video' }
     ),
-    { interviewDate: null, interviewTime: null, interviewType: 'Video' }
+    { interviewDate: null, interviewTime: null, interviewType: 'Video', interviewLocation: null }
   );
 });
