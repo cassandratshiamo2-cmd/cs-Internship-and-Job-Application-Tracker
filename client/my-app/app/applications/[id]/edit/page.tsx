@@ -15,6 +15,7 @@ export default function EditApplicationPage() {
   const router = useRouter();
   const [application, setApplication] = useState<Application | null>(null);
   const [status, setStatus] = useState<Application["status"]>("Saved");
+  const [interviewType, setInterviewType] = useState<InterviewType | "">("");
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState("");
@@ -32,6 +33,7 @@ export default function EditApplicationPage() {
         if (isMounted) {
           setApplication(fallbackApplication);
           setStatus(fallbackApplication?.status ?? "Saved");
+          setInterviewType(fallbackApplication?.interviewType ?? "");
           setIsLoading(false);
         }
         return;
@@ -57,6 +59,7 @@ export default function EditApplicationPage() {
           const loadedApplication = payload.application ?? fallbackApplication;
           setApplication(loadedApplication);
           setStatus(loadedApplication?.status ?? "Saved");
+          setInterviewType(loadedApplication?.interviewType ?? "");
         }
       } catch {
         if (isMounted) {
@@ -84,13 +87,14 @@ export default function EditApplicationPage() {
     const nextStatus = String(form.get("status") || application.status) as Application["status"];
     const interviewDate = String(form.get("interviewDate") || "").trim();
     const interviewTime = String(form.get("interviewTime") || "").trim();
-    const interviewType = String(form.get("interviewType") || "").trim();
-    const normalizedInterviewType = interviewType as InterviewType;
+    const interviewTypeValue = String(form.get("interviewType") || "").trim();
+    const interviewLocation = String(form.get("interviewLocation") || "").trim();
+    const normalizedInterviewType = interviewTypeValue as InterviewType;
     const applicationLink = String(form.get("applicationLink") || "").trim();
     const notificationChannels = form.getAll("notificationChannel") as NotificationChannel[];
     const savedChannels: NotificationChannel[] = notificationChannels.includes("In-app") ? ["In-app"] : ["In-app"];
 
-    if (nextStatus === "Interview" && (!interviewDate || !interviewTime || !interviewType)) {
+    if (nextStatus === "Interview" && (!interviewDate || !interviewTime || !interviewTypeValue)) {
       setSaveError("Add the interview date, time, and type before saving an interview application.");
       return;
     }
@@ -123,7 +127,7 @@ export default function EditApplicationPage() {
             notes: String(form.get("notes") || application.notes).trim(),
             applicationLink: applicationLink || undefined,
             ...(nextStatus === "Interview"
-              ? { interviewDate, interviewTime, interviewType: normalizedInterviewType, notificationChannels: savedChannels }
+              ? { interviewDate, interviewTime, interviewType: normalizedInterviewType, interviewLocation, notificationChannels: savedChannels }
               : { interviewDate: undefined, interviewTime: undefined, interviewType: undefined, notificationChannels: undefined, interviewEmail: undefined }),
           }),
         });
@@ -160,7 +164,7 @@ export default function EditApplicationPage() {
         notes: String(form.get("notes") || item.notes).trim(),
         applicationLink: applicationLink || undefined,
         ...(nextStatus === "Interview"
-          ? { interviewDate, interviewTime, interviewType: normalizedInterviewType, notificationChannels: savedChannels, interviewEmail: undefined }
+          ? { interviewDate, interviewTime, interviewType: normalizedInterviewType, interviewLocation, notificationChannels: savedChannels, interviewEmail: undefined }
           : { interviewDate: undefined, interviewTime: undefined, interviewType: undefined, notificationChannels: undefined, interviewEmail: undefined }),
       };
     });
@@ -223,7 +227,10 @@ export default function EditApplicationPage() {
             </div>
             <div>
               <label className="mb-2 block text-sm font-medium text-slate-700">Application Status</label>
-              <select name="status" value={status} onChange={(event) => setStatus(event.target.value as Application["status"])} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
+              <select name="status" value={status} onChange={(event) => {
+                setStatus(event.target.value as Application["status"]);
+                if (event.target.value !== "Interview") setInterviewType("");
+              }} className="w-full rounded-2xl border border-[#e7d6dd] bg-[#fffafc] px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
                 <option>Saved</option><option>Applied</option><option>Assessment</option><option>Shortlisted</option><option>Interview</option><option>Offer</option><option>Rejected</option><option>Withdrawn</option>
               </select>
             </div>
@@ -242,10 +249,25 @@ export default function EditApplicationPage() {
                 <div><label className="mb-2 block text-sm font-medium text-slate-700">Interview time</label><input required type="time" name="interviewTime" defaultValue={application.interviewTime} className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]" /></div>
                 <div className="sm:col-span-2">
                   <label className="mb-2 block text-sm font-medium text-slate-700">Type of interview</label>
-                  <select required name="interviewType" defaultValue={application.interviewType || ""} className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
+                  <select required name="interviewType" value={interviewType} onChange={(event) => setInterviewType(event.target.value as InterviewType | "")} className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]">
                     <option value="">Select interview type</option><option>Phone</option><option>Video</option><option>In-person</option><option>Technical</option><option>Panel</option><option>Other</option>
                   </select>
                 </div>
+                {interviewType === "In-person" ? (
+                  <div className="sm:col-span-2">
+                    <label htmlFor="interviewLocation" className="mb-2 block text-sm font-medium text-slate-700">
+                      Interview Location / Address <span className="font-normal text-slate-500">(optional)</span>
+                    </label>
+                    <textarea
+                      id="interviewLocation"
+                      name="interviewLocation"
+                      rows={2}
+                      defaultValue={application.interviewLocation || ""}
+                      placeholder="Company Name, Building Name, Street, Suburb, City"
+                      className="w-full rounded-2xl border border-[#e7d6dd] bg-white px-4 py-3 text-slate-800 outline-none focus:border-[#38b7b9]"
+                    />
+                  </div>
+                ) : null}
               </div>
               <p className="mt-4 text-sm text-slate-500">In-app reminders appear in ApplyFlow.</p>
               <label className="mt-3 flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" name="notificationChannel" value="In-app" defaultChecked={(application.notificationChannels || ["In-app"]).includes("In-app")} />In-app</label>

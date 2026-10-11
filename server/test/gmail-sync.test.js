@@ -68,6 +68,7 @@ function createTestService({
       detectedStatus: message.detectedStatus || null,
       reviewReason: message.reviewReason || null,
       reprocessVersion: message.reprocessVersion || 0,
+      userId: message.userId ?? 4,
     });
   }
   const connection = {
@@ -139,9 +140,14 @@ function createTestService({
         return { rowCount: 1, rows: [connection] };
       }
       if (sql.startsWith('SELECT message.id, message.gmail_message_id')) {
+        assert.match(sql, /connection\.user_id = message\.user_id/);
         const entry = Array.from(processedRows.entries())
           .find(([, row]) => row.id === params[0]);
-        if (!entry || params[1] !== connection.user_id) return { rowCount: 0, rows: [] };
+        if (!entry ||
+            params[1] !== connection.user_id ||
+            entry[1].userId !== params[1]) {
+          return { rowCount: 0, rows: [] };
+        }
         const [gmailMessageId, row] = entry;
         return {
           rowCount: 1,
@@ -182,7 +188,16 @@ function createTestService({
         return { rowCount: rows.length, rows };
       }
       if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
-        return { rowCount: applications.length, rows: applications };
+        assert.match(sql, /WHERE user_id = \$1 AND EXISTS/);
+        assert.match(sql, /id = \$2 AND user_id = \$1 AND is_connected = TRUE/);
+        assert.equal(params[1], connection.id);
+        const rows = applications
+          .map((application) => ({
+            ...application,
+            user_id: application.user_id ?? connection.user_id,
+          }))
+          .filter((application) => application.user_id === params[0]);
+        return { rowCount: rows.length, rows };
       }
       if (sql.startsWith('UPDATE gmail_connections SET quota_failure_count')) {
         calls.connectionUpdates.push(sql);
@@ -294,7 +309,11 @@ function createTestService({
             return { rowCount: 1, rows: [] };
           }
           if (sql.startsWith('SELECT id, company, position, status, updated_at, interview_date')) {
-            return { rowCount: 1, rows: [{ ...applications[0] }] };
+            const application = applications.find((item) =>
+              String(item.id) === String(params[0]) &&
+              (item.user_id ?? connection.user_id) === params[1]
+            );
+            return { rowCount: application ? 1 : 0, rows: application ? [{ ...application }] : [] };
           }
           if (sql.startsWith('UPDATE applications SET status = CASE')) {
             const application = applications.find((item) => String(item.id) === String(params[0]));
@@ -551,6 +570,24 @@ test('a previously ignored Nova email can be explicitly retried in place without
   );
   assert.equal(calls.get, 1);
   assert.equal(calls.notifications.length, 1);
+});
+
+test('a Gmail message linked to a different owner connection cannot be retried', async () => {
+  const { calls, service } = createTestService({
+    existingMessages: [{
+      id: 813,
+      messageId: 'mismatched-connection-owner',
+      outcome: 'review',
+      detectedStatus: 'Assessment',
+      userId: 5,
+    }],
+  });
+
+  await assert.rejects(
+    service.retryProcessedMessage(5, 813),
+    (error) => error.code === 'GMAIL_MESSAGE_NOT_RETRYABLE'
+  );
+  assert.equal(calls.get, 0);
 });
 
 test('automatic retry does not double-count an ignored email also returned by Gmail history', async () => {
@@ -1209,6 +1246,68 @@ test('scenario 12: processing the same Gmail message twice has one application a
   assert.equal(application.status, 'Interview');
   assert.equal(application.interview_date, '2026-10-09');
   assert.equal(application.interview_time, '08:30');
+});
+
+test('Gmail matching ignores a matching application owned by another ApplyFlow user', async () => {
+  const otherUsersApplication = {
+    id: 74,
+    user_id: 8,
+    company: 'Acme Technology',
+    position: 'Junior Software Engineer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+  };
+  const connectedUsersApplication = {
+    id: 75,
+    user_id: 4,
+    company: 'Acme Technology',
+    position: 'Junior Software Engineer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: ['In-app'],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: hiring@acme.example',
+    'To: applyflow@example.com',
+    'Subject: Interview invitation - Acme Technology - Junior Software Engineer',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Acme Technology invites you to interview for the Junior Software Engineer position.',
+    'Your interview is scheduled for 09 October 2026 at 08:30.',
+  ].join('\r\n')).toString('base64url');
+  const { service, calls, processedRows } = createTestService({
+    applications: [otherUsersApplication, connectedUsersApplication],
+    historyList: async () => ({
+      data: {
+        historyId: 'cross-user-isolation',
+        history: [{ messagesAdded: [{ message: { id: 'tenant-isolation-message' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'cross-user-isolation-thread',
+        internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(connectedUsersApplication.status, 'Interview');
+  assert.equal(otherUsersApplication.status, 'Applied');
+  assert.equal(processedRows.get('tenant-isolation-message').applicationId, 75);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(calls.notifications[0].user_id, 4);
+  assert.equal(calls.notifications[0].application_id, '75');
 });
 
 test('scenario 15: an interview date without a time preserves existing time and type', async () => {

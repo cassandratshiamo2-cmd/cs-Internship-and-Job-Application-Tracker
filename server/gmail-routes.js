@@ -208,7 +208,12 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         "SELECT id, gmail_message_id, sender, subject, received_at, detected_status, confidence, " +
           'reprocess_version, ' +
           "candidate_application_ids, review_reason FROM gmail_processed_messages " +
-          "WHERE user_id = $1 AND outcome = 'review' ORDER BY received_at DESC LIMIT 100",
+          "WHERE user_id = $1 AND outcome = 'review' " +
+          'AND EXISTS (' +
+            'SELECT 1 FROM gmail_connections AS connection ' +
+            'WHERE connection.id = gmail_processed_messages.connection_id ' +
+              'AND connection.user_id = gmail_processed_messages.user_id' +
+          ') ORDER BY received_at DESC LIMIT 100',
         [req.user.id]
       );
       return res.status(200).json({
@@ -238,7 +243,10 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'application.interview_time::text AS application_interview_time, ' +
           'application.interview_type AS application_interview_type ' +
         'FROM gmail_processed_messages AS message ' +
+        'JOIN gmail_connections AS connection ON connection.id = message.connection_id ' +
+          'AND connection.user_id = message.user_id ' +
         'LEFT JOIN applications AS application ON application.id = message.application_id ' +
+          'AND application.user_id = message.user_id ' +
         "WHERE message.user_id = $1 AND message.outcome IN ('updated', 'reviewed', 'dismissed', 'ignored') " +
         'ORDER BY message.processed_at DESC, message.received_at DESC LIMIT 100',
         [req.user.id]
@@ -303,8 +311,10 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       const messageResult = await client.query(
         "SELECT id, detected_status, detected_interview_date::text AS detected_interview_date, " +
           "detected_interview_time::text AS detected_interview_time, detected_interview_type " +
-          'FROM gmail_processed_messages ' +
-          "WHERE id = $1 AND user_id = $2 AND outcome = 'review' FOR UPDATE",
+        'FROM gmail_processed_messages AS message ' +
+        'JOIN gmail_connections AS connection ON connection.id = message.connection_id ' +
+          'AND connection.user_id = message.user_id ' +
+        "WHERE message.id = $1 AND message.user_id = $2 AND message.outcome = 'review' FOR UPDATE OF message",
         [req.params.messageId, req.user.id]
       );
       const message = messageResult.rows[0];
@@ -315,8 +325,9 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
 
       if (action === 'dismiss') {
         await client.query(
-          "UPDATE gmail_processed_messages SET outcome = 'dismissed', processed_at = NOW() WHERE id = $1",
-          [message.id]
+          "UPDATE gmail_processed_messages SET outcome = 'dismissed', processed_at = NOW() " +
+            'WHERE id = $1 AND user_id = $2',
+          [message.id, req.user.id]
         );
         await client.query('COMMIT');
         return res.status(200).json({ message: 'Email dismissed.' });
@@ -330,7 +341,8 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
 
       const applicationResult = await client.query(
         'SELECT id, company, position, status, interview_date::text AS interview_date, ' +
-          'interview_time::text AS interview_time, interview_type, notification_channels, application_link, interview_email ' +
+          'interview_time::text AS interview_time, interview_type, interview_location, ' +
+          'notification_channels, application_link, interview_email ' +
           'FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
         [applicationId, req.user.id]
       );
