@@ -5,6 +5,7 @@ const {
   createGmailSyncService,
   getRetryAfterMs,
   isGmailQuotaError,
+  isRetryableProcessedMessage,
   startGmailSyncWorker,
 } = require('../gmail-sync');
 const { encryptToken } = require('../gmail-oauth');
@@ -19,6 +20,7 @@ function createTestService({
   unlockReturnsFalse = false,
   failLockAcquisition = false,
   requestTimeoutMs = 30000,
+  initialSync = false,
   messageGet,
   messageList,
   parseMessage,
@@ -37,6 +39,7 @@ function createTestService({
     history: 0,
     list: 0,
     get: 0,
+    getRequests: [],
     delays: [],
     unlocks: 0,
     releases: 0,
@@ -67,6 +70,9 @@ function createTestService({
       outcome: message.outcome,
       detectedStatus: message.detectedStatus || null,
       reviewReason: message.reviewReason || null,
+      sender: message.sender || '',
+      subject: message.subject || '',
+      candidateApplicationIds: message.candidateApplicationIds || [],
       reprocessVersion: message.reprocessVersion || 0,
       userId: message.userId ?? 4,
     });
@@ -78,7 +84,7 @@ function createTestService({
     refresh_token_ciphertext: encryptToken('refresh-token', encryptionKey),
     access_token_ciphertext: null,
     token_expires_at: null,
-    history_id: 'history-start',
+    history_id: initialSync ? null : 'history-start',
     initial_sync_history_id: null,
     initial_sync_page_token: null,
   };
@@ -180,6 +186,21 @@ function createTestService({
           }] : [],
         };
       }
+      if (sql.startsWith('SELECT id, outcome, detected_status, sender, subject')) {
+        const row = processedRows.get(String(params[2]));
+        return {
+          rowCount: row ? 1 : 0,
+          rows: row ? [{
+            id: row.id,
+            outcome: row.outcome,
+            detected_status: row.detectedStatus,
+            sender: row.sender || '',
+            subject: row.subject || '',
+            candidate_application_ids: row.candidateApplicationIds || [],
+            review_reason: row.reviewReason || null,
+          }] : [],
+        };
+      }
       if (sql.startsWith('SELECT gmail_message_id FROM gmail_processed_messages')) {
         const rows = Array.from(processedRows.entries())
           .filter(([, row]) => row.outcome === 'ignored' && !row.detectedStatus &&
@@ -236,6 +257,14 @@ function createTestService({
             calls.lockQueryTimeouts.push(query.query_timeout);
           }
           if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rowCount: 1, rows: [] };
+          if (sql.startsWith('SELECT id FROM gmail_connections')) {
+            return {
+              rowCount: params[0] === connection.id && params[1] === connection.user_id ? 1 : 0,
+              rows: params[0] === connection.id && params[1] === connection.user_id
+                ? [{ id: connection.id }]
+                : [],
+            };
+          }
           if (sql.startsWith('INSERT INTO notification_jobs')) {
             const [userId, applicationId, notificationType, channel, company, position, status, previousStatus, newStatus, eventKey] = params;
             const exists = calls.notifications.some((notification) =>
@@ -267,12 +296,28 @@ function createTestService({
           if (sql.startsWith('INSERT INTO gmail_processed_messages')) {
             const messageId = String(params[2]);
             if (sql.includes('review_reason, processed_at')) {
+              if (sql.includes("'ignored', $4, NOW()")) {
+                if (!processedRows.has(messageId)) {
+                  processedRows.set(messageId, {
+                    id: nextProcessedId++,
+                    outcome: 'ignored',
+                    reviewReason: params[3],
+                    sender: '',
+                    subject: '',
+                    candidateApplicationIds: [],
+                  });
+                }
+                return { rowCount: 1, rows: [] };
+              }
               if (!processedRows.has(messageId)) {
                 processedRows.set(messageId, {
                   id: nextProcessedId++,
                   outcome: 'review',
                   warning: true,
-                  review_reason: params[3],
+                  reviewReason: params[3],
+                  sender: '',
+                  subject: '',
+                  candidateApplicationIds: [],
                 });
               }
               return { rowCount: 1, rows: [] };
@@ -287,6 +332,21 @@ function createTestService({
               detectedStatus: params[7],
             });
             return { rowCount: 1, rows: [{ id }] };
+          }
+          if (sql.startsWith('SELECT id, outcome, detected_status, sender, subject')) {
+            const row = processedRows.get(String(params[2]));
+            return {
+              rowCount: row ? 1 : 0,
+              rows: row ? [{
+                id: row.id,
+                outcome: row.outcome,
+                detected_status: row.detectedStatus,
+                sender: row.sender || '',
+                subject: row.subject || '',
+                candidate_application_ids: row.candidateApplicationIds || [],
+                review_reason: row.reviewReason || null,
+              }] : [],
+            };
           }
           if (sql.startsWith('SELECT id, outcome')) {
             const row = processedRows.get(String(params[1]));
@@ -335,10 +395,16 @@ function createTestService({
             const row = Array.from(processedRows.values()).find((item) => item.id === params[0]);
             if (row) {
               row.outcome = /SET outcome = '([^']+)'/.exec(sql)?.[1] || row.outcome;
+              if (sql.includes('review_reason = $2')) row.reviewReason = params[1];
               row.applicationId = params[1];
               row.previousStatus = params[2];
               row.newStatus = params[3];
             }
+            return { rowCount: 1, rows: [] };
+          }
+          if (sql.startsWith('UPDATE gmail_processed_messages SET review_reason =')) {
+            const row = Array.from(processedRows.values()).find((item) => item.id === params[0]);
+            if (row) row.reviewReason = params[1];
             return { rowCount: 1, rows: [] };
           }
           throw new Error(`Unexpected lock query: ${sql}`);
@@ -397,9 +463,14 @@ function createTestService({
               calls.list += 1;
               return messageList ? messageList(options) : { data: { messages: [] } };
             },
-            get: async ({ id }) => {
+            get: async (request) => {
               calls.get += 1;
-              return messageGet ? messageGet(id) : { data: {} };
+              calls.getRequests.push({
+                id: request.id,
+                userId: request.userId,
+                format: request.format,
+              });
+              return messageGet ? messageGet(request.id, request) : { data: {} };
             },
           },
         },
@@ -1187,6 +1258,202 @@ test('scenario 13: malformed message records a warning and the next valid email 
   assert.equal(application.interview_time, '08:30');
   assert.equal(application.interview_type, 'Panel');
   assert.equal(calls.get, 2);
+});
+
+test('listed Gmail message IDs are fetched unchanged and a notFound response is terminal', async () => {
+  const gmailMessageId = 'gmail-message-id-from-list-123';
+  const missingError = new Error('Requested entity was not found.');
+  missingError.code = '404';
+  missingError.response = {
+    status: 404,
+    data: { error: { errors: [{ reason: 'notFound' }] } },
+  };
+  const { service, processedRows, calls } = createTestService({
+    initialSync: true,
+    messageList: async () => ({ data: { messages: [{ id: gmailMessageId }] } }),
+    messageGet: async (messageId) => {
+      assert.equal(messageId, gmailMessageId);
+      throw missingError;
+    },
+  });
+
+  const first = await service.syncConnection(7);
+
+  assert.deepEqual(first.outcomes, ['unavailable']);
+  assert.deepEqual(calls.getRequests, [{
+    id: gmailMessageId,
+    userId: 'me',
+    format: 'raw',
+  }]);
+  assert.equal(processedRows.get(gmailMessageId).outcome, 'ignored');
+  assert.match(processedRows.get(gmailMessageId).reviewReason, /no longer available/i);
+  assert.equal(processedRows.get(gmailMessageId).detectedStatus, undefined);
+
+  const second = await service.syncConnection(7);
+
+  assert.deepEqual(second.outcomes, ['duplicate']);
+  assert.equal(calls.get, 1);
+});
+
+test('unavailable source disables retry without discarding previously extracted review details', async () => {
+  const messageId = 'gmail-review-with-source-now-unavailable';
+  const unavailableError = new Error('Requested entity was not found.');
+  unavailableError.code = '404';
+  unavailableError.response = {
+    status: 404,
+    data: { error: { errors: [{ reason: 'notFound' }] } },
+  };
+  const { service, processedRows } = createTestService({
+    existingMessages: [{
+      id: 712,
+      messageId,
+      outcome: 'review',
+      detectedStatus: 'Interview',
+      reviewReason: 'Application match was not sufficiently confident and unique.',
+      sender: 'Hiring team',
+      subject: 'Interview invitation',
+      candidateApplicationIds: ['17', '18'],
+    }],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-review-missing-source',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => { throw unavailableError; },
+  });
+
+  const result = await service.syncConnection(7);
+  const row = processedRows.get(messageId);
+
+  assert.deepEqual(result.outcomes, ['unavailable']);
+  assert.equal(row.outcome, 'review');
+  assert.equal(row.detectedStatus, 'Interview');
+  assert.equal(row.sender, 'Hiring team');
+  assert.equal(row.subject, 'Interview invitation');
+  assert.deepEqual(row.candidateApplicationIds, ['17', '18']);
+  assert.match(row.reviewReason, /no longer available/i);
+  assert.equal(isRetryableProcessedMessage({
+    outcome: row.outcome,
+    review_reason: row.reviewReason,
+    reprocess_version: row.reprocessVersion,
+  }), false);
+});
+
+test('an unavailable message does not prevent a valid history message from being applied', async () => {
+  const missingId = 'gmail-history-missing-id';
+  const validId = 'gmail-history-valid-interview-id';
+  const application = {
+    id: 72,
+    company: 'Acme Technology',
+    position: 'Junior Software Engineer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const validRaw = Buffer.from([
+    'From: hiring@acme.example',
+    'To: applyflow@example.com',
+    'Subject: Interview invitation - Acme Technology - Junior Software Engineer',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Acme Technology invites you to interview for the Junior Software Engineer position.',
+    'Your interview is scheduled for 09 October 2026 at 08:30.',
+  ].join('\r\n')).toString('base64url');
+  const { service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-after-missing-message',
+        history: [{ messagesAdded: [
+          { message: { id: missingId } },
+          { message: { id: validId } },
+        ] }],
+      },
+    }),
+    messageGet: async (messageId) => {
+      if (messageId === missingId) {
+        const error = new Error('Requested entity was not found.');
+        error.code = '404';
+        error.response = {
+          status: 404,
+          data: { error: { errors: [{ reason: 'notFound' }] } },
+        };
+        throw error;
+      }
+      return {
+        data: {
+          labelIds: [],
+          raw: validRaw,
+          threadId: 'acme-interview-thread',
+          internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+        },
+      };
+    },
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['unavailable', 'updated']);
+  assert.equal(processedRows.get(missingId).outcome, 'ignored');
+  assert.equal(processedRows.get(validId).outcome, 'updated');
+  assert.equal(application.status, 'Interview');
+  assert.equal(application.interview_date, '2026-10-09');
+  assert.equal(application.interview_time, '08:30');
+});
+
+test('a fetch 404 without Gmail notFound reason is not treated as a missing message or cursor expiry', async () => {
+  const messageId = 'gmail-message-with-unrelated-404';
+  const error = new Error('Requested entity was not found.');
+  error.code = '404';
+  error.response = {
+    status: 404,
+    data: { error: { errors: [{ reason: 'backendError' }] } },
+  };
+  const { service, calls, processedRows } = createTestService({
+    historyList: async () => ({
+      data: {
+        historyId: 'history-unchanged',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => { throw error; },
+  });
+
+  await assert.rejects(service.syncConnection(7), /Gmail sync failed/);
+
+  assert.equal(calls.get, 1);
+  assert.equal(calls.historyResets, 0);
+  assert.equal(processedRows.has(messageId), false);
+  assert.deepEqual(calls.historyCursorUpdates, []);
+});
+
+test('a 404 from Gmail history listing still resets only the expired history cursor', async () => {
+  const { service, calls } = createTestService({
+    historyList: async () => {
+      const error = new Error('History ID is too old');
+      error.code = '404';
+      error.response = {
+        status: 404,
+        data: { error: { errors: [{ reason: 'notFound' }] } },
+      };
+      throw error;
+    },
+    messageList: async () => ({ data: { messages: [] } }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.equal(calls.historyResets, 1);
+  assert.equal(calls.profile, 1);
+  assert.equal(calls.list, 1);
+  assert.equal(result.initialSyncComplete, true);
 });
 
 test('scenario 12: processing the same Gmail message twice has one application and reminder effect', async () => {

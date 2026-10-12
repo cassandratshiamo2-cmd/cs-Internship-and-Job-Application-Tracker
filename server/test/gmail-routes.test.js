@@ -5,7 +5,7 @@ const http = require('node:http');
 const { createGmailRouter } = require('../gmail-routes');
 
 function createTestPool(options) {
-  const { message, application, history = [], notifications } = options;
+  const { message, application, history = [], reviewMessages = [], notifications } = options;
   const applications = options.applications || [application];
   const client = {
     async query(sql, params = []) {
@@ -55,6 +55,9 @@ function createTestPool(options) {
     async query(sql) {
       if (sql.includes('FROM gmail_processed_messages AS message')) {
         return { rowCount: history.length, rows: history };
+      }
+      if (sql.includes('FROM gmail_processed_messages ')) {
+        return { rowCount: reviewMessages.length, rows: reviewMessages };
       }
       throw new Error(`Unexpected pool query: ${sql}`);
     },
@@ -409,4 +412,32 @@ test('history endpoint returns processed interview details and matched applicati
 
   assert.equal(response.status, 200);
   assert.deepEqual(payload.messages, history.map((message) => ({ ...message, retryable: false })));
+});
+
+test('review endpoint suppresses retry for unavailable Gmail source but keeps normal reviews retryable', async (t) => {
+  const reviewMessages = [
+    {
+      id: 88,
+      detected_status: 'Interview',
+      review_reason: 'This Gmail message is no longer available. Previously extracted details were preserved.',
+      reprocess_version: 0,
+    },
+    {
+      id: 89,
+      detected_status: 'Assessment',
+      review_reason: 'Application match was not sufficiently confident and unique.',
+      reprocess_version: 0,
+    },
+  ];
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    reviewMessages,
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/review`);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.messages.map((item) => item.retryable), [false, true]);
 });
