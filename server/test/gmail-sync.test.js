@@ -1685,6 +1685,14 @@ test('scenarios 8 and 9: Pnet and LinkedIn recommendations stay ignored even whe
       '',
       'Shoprite Cashier roles are recommended for you. You have been shortlisted for these roles.',
     ].join('\r\n')).toString('base64url'),
+    'generic-recommendation-alert': Buffer.from([
+      'From: jobs@example.test',
+      'To: applyflow@example.com',
+      'Subject: Recommended roles for you',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'These jobs match your profile, including Shoprite Cashier. You have been shortlisted for these roles.',
+    ].join('\r\n')).toString('base64url'),
   };
   const { service, processedRows, calls } = createTestService({
     applications: [application],
@@ -1694,6 +1702,7 @@ test('scenarios 8 and 9: Pnet and LinkedIn recommendations stay ignored even whe
         history: [{ messagesAdded: [
           { message: { id: 'pnet-alert' } },
           { message: { id: 'linkedin-alert' } },
+          { message: { id: 'generic-recommendation-alert' } },
         ] }],
       },
     }),
@@ -1702,9 +1711,10 @@ test('scenarios 8 and 9: Pnet and LinkedIn recommendations stay ignored even whe
 
   const result = await service.syncConnection(7);
 
-  assert.deepEqual(result.outcomes, ['ignored', 'ignored']);
+  assert.deepEqual(result.outcomes, ['ignored', 'ignored', 'ignored']);
   assert.equal(processedRows.get('pnet-alert').outcome, 'ignored');
   assert.equal(processedRows.get('linkedin-alert').outcome, 'ignored');
+  assert.equal(processedRows.get('generic-recommendation-alert').outcome, 'ignored');
   assert.equal(calls.applicationUpdates, 0);
   assert.equal(application.status, 'Applied');
 });

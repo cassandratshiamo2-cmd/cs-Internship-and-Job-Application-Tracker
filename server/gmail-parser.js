@@ -95,9 +95,47 @@ const GENERIC_JOB_ALERT_PATTERNS = [
   /\b(?:job alerts?|linkedin job recommendations?)\b/i,
   /\b\d+\s+(?:other\s+)?companies are looking for candidates like you\b/i,
   /\b(?:jobs|roles|opportunities) (?:you may be interested in|recommended for you|matching your profile)\b/i,
+  /\b(?:recommended|suggested|featured|trending)\s+(?:jobs|roles|opportunities)\b/i,
+  /\b(?:these|our|new)\s+(?:jobs|roles|opportunities)\s+(?:match|matched)\s+(?:your|the)\s+(?:profile|preferences|search)\b/i,
+  /\b(?:browse|explore|discover)\s+(?:our|these|the)\s+(?:latest|featured|recommended)?\s*(?:jobs|roles|opportunities)\b/i,
+  /\b(?:featured|sponsored|promoted)\s+(?:job|role|opportunit)/i,
+  /\b(?:our|the)\s+(?:latest|top|featured)\s+job offers\b/i,
+  /\b(?:weekly|daily|monthly)\s+(?:job\s+)?offers?\b/i,
+  /\b(?:job|career)\s+(?:recommendations?|suggestions?)\b/i,
   /\b(?:weekly|monthly)\s+(?:job|career|vacancy)?\s*newsletter\b/i,
   /\bnewsletter\b/i,
 ];
+const NON_APPLICATION_NOTIFICATION_PATTERNS = [
+  /\bsecurity alert\b/i,
+  /\bnew sign[- ]in\b/i,
+  /\bpassword reset\b/i,
+  /\bverify your account\b/i,
+  /\baccount verification\b/i,
+  /\btwo[- ]factor authentication\b/i,
+  /\bunusual account activity\b/i,
+  /\baccount security notification\b/i,
+];
+
+function hasPersonalizedApplicationOutcome({ subject = '', text = '' }) {
+  const content = `${subject}\n${text}`.slice(0, 100000);
+  return [
+    /\bthank you for applying\b/i,
+    /\bapplication received\b/i,
+    /\b(?:we have received|we received|we got|application received|application confirmation|your application has been submitted)\b[^.!?\n]{0,100}\b(?:your application|application|role|position)\b/i,
+    /\byour application\b[^.!?\n]{0,100}\b(?:received|submitted|shortlisted|rejected|unsuccessful|not selected|not progressing)\b/i,
+    /\byou\s+(?:are|'re|have been)\s+invited\b[^.!?\n]{0,100}\b(?:interview|assessment)\b/i,
+    /\b(?:invites?|invited)\s+you\b[^.!?\n]{0,100}\b(?:interview|assessment)\b/i,
+    /\byour interview invitation\b/i,
+    /\byou\s+(?:are|'re|have been)\s+shortlisted\b[^.!?\n]{0,80}\b(?:position|role|application)\b/i,
+    /\b(?:pleased|would like)\s+to\s+offer\s+you\b/i,
+    /\byou\s+(?:are|'re|have been)\s+offered\s+(?:a|the)\s+(?:position|role|job)\b/i,
+    /\byour\s+(?:job\s+)?offer(?:\s+(?:letter|of employment|details|for (?:the\s+)?(?:position|role))|\s+(?:is|has been)\s+(?:ready|attached|available))\b/i,
+    /\bregret to inform you\b[^.!?\n]{0,100}\b(?:not selected|unsuccessful|not progressing)\b/i,
+    /\byour application\b[^.!?\n]{0,100}\b(?:not selected|rejected|unsuccessful)\b/i,
+    /\b(?:your|the)\s+(?:online\s+)?assessment\b[^.!?\n]{0,100}\b(?:complete|submit|invitation|application|role|position|candidate)\b/i,
+    /\bplease\s+(?:complete|take|submit)\s+(?:the\s+)?(?:online\s+)?(?:assessment|coding challenge|technical assessment)\b[^.!?\n]{0,100}\b(?:application|candidate|position|role|your)\b/i,
+  ].some((pattern) => pattern.test(content));
+}
 
 function isGenericJobAlert({ subject = '', text = '', from = '' }) {
   const searchable = `${subject}\n${text}`.slice(0, 100000);
@@ -109,13 +147,23 @@ function isGenericJobAlert({ subject = '', text = '', from = '' }) {
 }
 
 function classifyApplicationEmail({ subject = '', text = '', from = '' }, { allowGenericJobAlert = false } = {}) {
-  if (!allowGenericJobAlert && isGenericJobAlert({ subject, text, from })) {
+  const personalizedOutcome = hasPersonalizedApplicationOutcome({ subject, text });
+  const genericJobAlert = isGenericJobAlert({ subject, text, from });
+  const nonApplicationNotification = NON_APPLICATION_NOTIFICATION_PATTERNS.some((pattern) =>
+    pattern.test(`${subject}\n${text}`.slice(0, 100000))
+  );
+  if (
+    !personalizedOutcome &&
+    (nonApplicationNotification || (!allowGenericJobAlert && genericJobAlert))
+  ) {
     return {
       status: null,
       confidence: 0,
       matchedRule: null,
       ignored: true,
-      reason: 'Generic job alert or newsletter.',
+      reason: genericJobAlert
+        ? 'Generic job promotion, recommendation, or newsletter.'
+        : 'Unrelated security or account notification.',
     };
   }
 

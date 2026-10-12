@@ -120,6 +120,79 @@ test('ignores newsletters and generic multi-company job recommendations', () => 
   }
 });
 
+test('ignores generic promotions and recommendations even when they contain status words', () => {
+  const emails = [
+    {
+      subject: 'Weekly job offers',
+      text: 'Browse our latest job offers, with interview and assessment tips for job seekers.',
+    },
+    {
+      subject: 'Recommended roles for you',
+      text: 'These jobs match your profile. You have been shortlisted for these roles.',
+    },
+    {
+      subject: 'Featured job opportunities',
+      text: 'Explore our featured jobs. Read about interview invitations, assessments, and employment offers.',
+    },
+  ];
+
+  for (const email of emails) {
+    const result = classifyApplicationEmail(email);
+    assert.equal(result.status, null, email.subject);
+    assert.equal(result.ignored, true, email.subject);
+  }
+});
+
+test('ignores unrelated account notifications without interpreting recruitment-like terms', () => {
+  const email = {
+    subject: 'Security alert: new sign-in',
+    text: 'We detected a new sign-in. Review your account security assessment and offer settings.',
+  };
+  const result = classifyApplicationEmail(email);
+
+  assert.equal(result.status, null);
+  assert.equal(result.ignored, true);
+  assert.equal(classifyApplicationEmail(email, { allowGenericJobAlert: true }).ignored, true);
+});
+
+test('does not classify unrelated mentions of offer, interview, or assessment', () => {
+  const emails = [
+    { subject: 'Company update', text: 'Our offer includes an interview guide and assessment of market trends.' },
+    { subject: 'Account notice', text: 'The interview feature and assessment settings are available in your account.' },
+    { subject: 'Benefits', text: 'This offer describes our employee benefits and training assessment process.' },
+  ];
+
+  for (const email of emails) {
+    const result = classifyApplicationEmail(email);
+    assert.equal(result.status, null, email.subject);
+  }
+});
+
+test('keeps a personalized application confirmation even if the subject recommends jobs', () => {
+  const result = classifyApplicationEmail({
+    subject: 'Recommended jobs',
+    text: 'Your application for the Cashier position at Shoprite has been received. Thank you for applying.',
+  });
+
+  assert.equal(result.status, 'Applied');
+  assert.equal(result.ignored, undefined);
+});
+
+test('keeps genuine personalized recruitment updates despite promotional-looking context', () => {
+  const cases = [
+    ['Recommended roles', 'You are invited for an interview at Shoprite for the Cashier role.', 'Interview'],
+    ['Featured jobs', 'Please complete the assessment for your Shoprite Cashier application.', 'Assessment'],
+    ['Weekly job offers', 'We are pleased to offer you the Cashier position at Shoprite.', 'Offer'],
+    ['Career newsletter', 'We regret to inform you that you were not selected for the Shoprite Cashier position.', 'Rejected'],
+  ];
+
+  for (const [subject, text, expectedStatus] of cases) {
+    const result = classifyApplicationEmail({ subject, text });
+    assert.equal(result.status, expectedStatus, subject);
+    assert.equal(result.ignored, undefined, subject);
+  }
+});
+
 test('does not suppress a transactional interview email from a job platform', () => {
   const email = {
     from: 'recruiter@linkedin.com',

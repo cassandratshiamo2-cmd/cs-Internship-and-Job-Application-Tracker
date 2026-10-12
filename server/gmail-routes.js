@@ -251,7 +251,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'AND connection.user_id = message.user_id ' +
         'LEFT JOIN applications AS application ON application.id = message.application_id ' +
           'AND application.user_id = message.user_id ' +
-        "WHERE message.user_id = $1 AND message.outcome IN ('updated', 'reviewed', 'dismissed', 'ignored') " +
+        "WHERE message.user_id = $1 AND message.outcome IN ('updated', 'reviewed', 'dismissed') " +
         'ORDER BY message.processed_at DESC, message.received_at DESC LIMIT 100',
         [req.user.id]
       );
