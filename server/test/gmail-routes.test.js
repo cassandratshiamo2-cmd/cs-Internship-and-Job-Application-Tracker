@@ -166,6 +166,25 @@ test('authenticated email retry is scoped to the signed-in user and existing his
   assert.deepEqual(payload.outcomes, ['updated']);
 });
 
+test('email retry clearly reports when Gmail no longer has the message', async (t) => {
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    syncService: {
+      async retryProcessedMessage() {
+        return { processed: 1, outcomes: ['unavailable'] };
+      },
+    },
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/messages/812/retry`, { method: 'POST' });
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.outcomes, ['unavailable']);
+  assert.match(payload.message, /no longer available in Gmail.*could not be retried/i);
+});
+
 test('email retry reports a concurrent sync instead of claiming success', async (t) => {
   const baseUrl = await withGmailReviewServer(t, {
     message: {},

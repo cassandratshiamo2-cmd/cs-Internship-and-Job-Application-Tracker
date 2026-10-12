@@ -669,6 +669,52 @@ test('a previously ignored Nova email can be explicitly retried in place without
   assert.equal(calls.notifications.length, 1);
 });
 
+test('a missing Gmail message during manual retry is recorded unavailable and cannot be retried again', async () => {
+  const messageId = 'gmail-review-message-no-longer-available';
+  const missingError = new Error('Requested entity was not found.');
+  missingError.code = '404';
+  missingError.response = {
+    status: 404,
+    data: { error: { errors: [{ reason: 'notFound' }] } },
+  };
+  const { calls, service, processedRows } = createTestService({
+    existingMessages: [{
+      id: 814,
+      messageId,
+      outcome: 'review',
+      detectedStatus: 'Interview',
+      reviewReason: 'Application match was not sufficiently confident and unique.',
+      sender: 'Hiring team',
+      subject: 'Interview invitation',
+      candidateApplicationIds: ['17', '18'],
+    }],
+    messageGet: async () => { throw missingError; },
+  });
+
+  const result = await service.retryProcessedMessage(4, 814);
+  const row = processedRows.get(messageId);
+
+  assert.deepEqual(result.outcomes, ['unavailable']);
+  assert.equal(calls.get, 1);
+  assert.equal(row.outcome, 'review');
+  assert.equal(row.detectedStatus, 'Interview');
+  assert.equal(row.sender, 'Hiring team');
+  assert.equal(row.subject, 'Interview invitation');
+  assert.deepEqual(row.candidateApplicationIds, ['17', '18']);
+  assert.match(row.reviewReason, /no longer available/i);
+  assert.equal(isRetryableProcessedMessage({
+    outcome: row.outcome,
+    review_reason: row.reviewReason,
+    reprocess_version: row.reprocessVersion,
+  }), false);
+
+  await assert.rejects(
+    service.retryProcessedMessage(4, 814),
+    (error) => error.code === 'GMAIL_MESSAGE_NOT_RETRYABLE'
+  );
+  assert.equal(calls.get, 1);
+});
+
 test('a Gmail message linked to a different owner connection cannot be retried', async () => {
   const { calls, service } = createTestService({
     existingMessages: [{
