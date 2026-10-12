@@ -13,11 +13,16 @@ function createTestPool(options) {
         return { rowCount: 1, rows: [] };
       }
       if (sql.startsWith('SELECT id, detected_status')) {
-        return { rowCount: 1, rows: [message] };
+        const isReviewForUser =
+          (!message.outcome || message.outcome === 'review') &&
+          (message.user_id === undefined || Number(message.user_id) === Number(params[1]));
+        return { rowCount: isReviewForUser ? 1 : 0, rows: isReviewForUser ? [message] : [] };
       }
       if (sql.startsWith('SELECT id, company, position, status')) {
         const selectedApplication = applications.find(
-          (item) => String(item.id) === String(params[0])
+          (item) =>
+            String(item.id) === String(params[0]) &&
+            (item.user_id === undefined || Number(item.user_id) === Number(params[1]))
         );
         return {
           rowCount: selectedApplication ? 1 : 0,
@@ -27,8 +32,11 @@ function createTestPool(options) {
       if (sql.startsWith('UPDATE applications SET')) {
         const [, , nextStatus, nextDate, preserveStatus, nextTime, nextType] = params;
         const selectedApplication = applications.find(
-          (item) => String(item.id) === String(params[0])
+          (item) =>
+            String(item.id) === String(params[0]) &&
+            (item.user_id === undefined || Number(item.user_id) === Number(params[1]))
         );
+        if (!selectedApplication) return { rowCount: 0, rows: [] };
         selectedApplication.status = preserveStatus ? nextStatus : selectedApplication.status;
         selectedApplication.interview_date = selectedApplication.interview_date || nextDate;
         selectedApplication.interview_time = selectedApplication.interview_time || nextTime;
@@ -48,6 +56,10 @@ function createTestPool(options) {
         message.new_status = message.detected_status;
         return { rowCount: 1, rows: [] };
       }
+      if (sql.startsWith('UPDATE gmail_processed_messages SET outcome = \'dismissed\'')) {
+        message.outcome = 'dismissed';
+        return { rowCount: 1, rows: [] };
+      }
       throw new Error(`Unexpected test query: ${sql}`);
     },
     release() {},
@@ -56,7 +68,10 @@ function createTestPool(options) {
   return {
     async query(sql) {
       if (sql.includes('FROM gmail_processed_messages AS message')) {
-        return { rowCount: history.length, rows: history };
+        const visibleHistory = sql.includes("outcome IN ('updated', 'reviewed', 'dismissed')")
+          ? history.filter((item) => ['updated', 'reviewed', 'dismissed'].includes(item.outcome))
+          : history;
+        return { rowCount: visibleHistory.length, rows: visibleHistory };
       }
       if (sql.includes('FROM gmail_processed_messages ')) {
         return { rowCount: reviewMessages.length, rows: reviewMessages };
@@ -431,19 +446,177 @@ test('applying an assessment review persists status on the selected application 
   assert.deepEqual(notifications[0].slice(7, 9), ['Applied', 'Assessment']);
 });
 
-test('history endpoint returns processed interview details and matched application', async (t) => {
-  const history = [{
-    id: 88,
-    subject: 'INTERVIEW INVITATION',
-    outcome: 'updated',
-    detected_status: 'Interview',
-    detected_interview_date: '2026-10-09',
-    detected_interview_time: '08:30',
+test('review application is owner-scoped and a processed review cannot be applied twice', async (t) => {
+  const selectedApplication = {
+    id: 17,
+    user_id: 7,
+    company: 'Test Company Alpha',
+    position: 'Software Developer Intern',
+    status: 'Applied',
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    interview_location: null,
+    interview_meeting_url: null,
+    notes: 'Keep this note',
+    application_link: 'https://jobs.example.test/role',
+    notification_channels: [],
+    interview_email: null,
+  };
+  const otherUsersApplication = {
+    ...selectedApplication,
+    id: 18,
+    user_id: 8,
+    company: 'Other User Company',
+  };
+  const message = {
+    id: 92,
+    user_id: 7,
+    outcome: 'review',
+    detected_status: 'Assessment',
+    detected_interview_date: null,
+    detected_interview_time: null,
     detected_interview_type: null,
-    application_company: 'Shoprite',
-    application_position: 'Graduate Programme',
-    application_status: 'Interview',
-  }];
+  };
+  const baseUrl = await withGmailReviewServer(t, {
+    message,
+    application: selectedApplication,
+    applications: [selectedApplication, otherUsersApplication],
+  });
+
+  const attemptToUseOtherUsersApplication = await fetch(`${baseUrl}/api/gmail/review/92`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'apply', applicationId: '18' }),
+  });
+  assert.equal(attemptToUseOtherUsersApplication.status, 404);
+  assert.equal(message.outcome, 'review');
+  assert.equal(otherUsersApplication.status, 'Applied');
+
+  const firstApply = await fetch(`${baseUrl}/api/gmail/review/92`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'apply', applicationId: '17' }),
+  });
+  assert.equal(firstApply.status, 200);
+  assert.equal(selectedApplication.status, 'Assessment');
+  assert.equal(selectedApplication.notes, 'Keep this note');
+  assert.equal(selectedApplication.application_link, 'https://jobs.example.test/role');
+  assert.equal(otherUsersApplication.status, 'Applied');
+
+  const secondApply = await fetch(`${baseUrl}/api/gmail/review/92`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'apply', applicationId: '17' }),
+  });
+  assert.equal(secondApply.status, 404);
+  assert.equal(selectedApplication.status, 'Assessment');
+  assert.equal(otherUsersApplication.status, 'Applied');
+});
+
+test('dismissing a review item changes no application and prevents later application', async (t) => {
+  const application = {
+    id: 19,
+    user_id: 7,
+    company: 'Test Company',
+    position: 'Analyst',
+    status: 'Applied',
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const message = {
+    id: 93,
+    user_id: 7,
+    outcome: 'review',
+    detected_status: 'Interview',
+    detected_interview_date: '2026-10-15',
+    detected_interview_time: '10:00',
+    detected_interview_type: 'Video',
+  };
+  const baseUrl = await withGmailReviewServer(t, { message, application });
+  const dismissResponse = await fetch(`${baseUrl}/api/gmail/review/93`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'dismiss' }),
+  });
+
+  assert.equal(dismissResponse.status, 200);
+  assert.equal(message.outcome, 'dismissed');
+  assert.equal(application.status, 'Applied');
+  assert.equal(application.interview_date, null);
+  assert.equal(application.interview_time, null);
+
+  const applyAfterDismiss = await fetch(`${baseUrl}/api/gmail/review/93`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'apply', applicationId: '19' }),
+  });
+  assert.equal(applyAfterDismiss.status, 404);
+  assert.equal(application.status, 'Applied');
+  assert.equal(application.interview_date, null);
+});
+
+test('manual review keeps backward status transitions in review', async (t) => {
+  const application = {
+    id: 20,
+    user_id: 7,
+    company: 'Test Company',
+    position: 'Analyst',
+    status: 'Rejected',
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const message = {
+    id: 94,
+    user_id: 7,
+    outcome: 'review',
+    detected_status: 'Interview',
+    detected_interview_date: '2026-10-15',
+    detected_interview_time: '10:00',
+    detected_interview_type: 'Video',
+  };
+  const baseUrl = await withGmailReviewServer(t, { message, application });
+  const response = await fetch(`${baseUrl}/api/gmail/review/94`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'apply', applicationId: '20' }),
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 409);
+  assert.match(payload.message, /earlier status|transition/i);
+  assert.equal(message.outcome, 'review');
+  assert.equal(application.status, 'Rejected');
+  assert.equal(application.interview_date, null);
+  assert.equal(application.interview_time, null);
+});
+
+test('history endpoint returns processed interview details and matched application', async (t) => {
+  const history = [
+    {
+      id: 88,
+      subject: 'INTERVIEW INVITATION',
+      outcome: 'updated',
+      detected_status: 'Interview',
+      detected_interview_date: '2026-10-09',
+      detected_interview_time: '08:30',
+      detected_interview_type: null,
+      application_company: 'Shoprite',
+      application_position: 'Graduate Programme',
+      application_status: 'Interview',
+    },
+    { id: 89, subject: 'Review item', outcome: 'reviewed' },
+    { id: 90, subject: 'Dismissed item', outcome: 'dismissed' },
+    { id: 91, subject: 'Irrelevant recommendation', outcome: 'ignored' },
+  ];
   const baseUrl = await withGmailReviewServer(t, {
     message: {},
     application: {},
@@ -454,7 +627,11 @@ test('history endpoint returns processed interview details and matched applicati
   const payload = await response.json();
 
   assert.equal(response.status, 200);
-  assert.deepEqual(payload.messages, history.map((message) => ({ ...message, retryable: false })));
+  assert.deepEqual(
+    payload.messages,
+    history.filter((message) => message.outcome !== 'ignored')
+      .map((message) => ({ ...message, retryable: false }))
+  );
 });
 
 test('review endpoint suppresses retry for unavailable Gmail source but keeps normal reviews retryable', async (t) => {

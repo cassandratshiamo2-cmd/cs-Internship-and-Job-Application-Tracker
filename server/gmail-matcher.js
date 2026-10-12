@@ -129,6 +129,7 @@ function scoreApplicationMatch(email, application) {
   return {
     score: Math.min(score, 1),
     companyMatch: companyTextMatch || companyWordMatches.length > 0 || domainMatch,
+    companyTextMatch,
     companySubjectMatch,
     companyBodyMatch,
     positionMatch,
@@ -141,7 +142,7 @@ function matchApplication(email, applications, options = {}) {
   const minimumGap = options.minimumGap ?? 0.2;
   const normalizedMessage = normalizeText(`${email.subject || ''} ${email.text || ''}`);
   const normalizedSubject = normalizeText(email.subject || '');
-  const candidates = applications
+  const allCandidates = applications
     .map((application) => {
       const match = scoreApplicationMatch(email, application);
       const shadowedCompanyMatch = companyMatchIsOnlyNested(
@@ -161,10 +162,13 @@ function matchApplication(email, applications, options = {}) {
         application,
         ...match,
         score,
+        rawScore: match.score,
+        candidateIdEligible: match.companyTextMatch && !shadowedCompanyMatch,
       };
     })
-    .filter((candidate) => candidate.score > 0)
-    .sort((left, right) => right.score - left.score);
+    .sort((left, right) => right.score - left.score || right.rawScore - left.rawScore);
+
+  const candidates = allCandidates.filter((candidate) => candidate.score > 0);
 
   const top = candidates[0];
   const next = candidates[1];
@@ -178,7 +182,7 @@ function matchApplication(email, applications, options = {}) {
       outcome: 'matched',
       application: top.application,
       confidence: top.score,
-      candidateIds: candidates.slice(0, 5).map(({ application }) => String(application.id)),
+      candidateIds: candidates.map(({ application }) => String(application.id)),
     };
   }
 
@@ -186,7 +190,9 @@ function matchApplication(email, applications, options = {}) {
     outcome: 'review',
     application: null,
     confidence: top?.score || 0,
-    candidateIds: candidates.slice(0, 5).map(({ application }) => String(application.id)),
+    candidateIds: allCandidates
+      .filter(({ candidateIdEligible }) => candidateIdEligible)
+      .map(({ application }) => String(application.id)),
   };
 }
 

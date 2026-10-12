@@ -322,6 +322,24 @@ test('scenario 11: multiple named company matches require manual review', () => 
   assert.deepEqual(result.candidateIds, ['31', '32']);
 });
 
+test('ambiguous same-company matches retain every candidate beyond the first five', () => {
+  const possibleApplications = Array.from({ length: 7 }, (_, index) => ({
+    id: String(61 + index),
+    company: 'Acme Technology',
+    position: `Role ${index + 1}`,
+    status: 'Applied',
+  }));
+  const result = matchApplication({
+    subject: 'Application update from Acme Technology',
+    text: 'Acme Technology has an update about your application.',
+    from: '',
+  }, possibleApplications);
+
+  assert.equal(result.outcome, 'review');
+  assert.equal(result.application, null);
+  assert.deepEqual(result.candidateIds, ['61', '62', '63', '64', '65', '66', '67']);
+});
+
 test('keeps generic Pnet multi-company alerts in review despite an exact listed company', () => {
   const result = matchApplication({
     subject: 'Werkie and 6 other companies are looking for candidates like you',
