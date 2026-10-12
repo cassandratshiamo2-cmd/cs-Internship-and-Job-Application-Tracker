@@ -3,7 +3,10 @@ const assert = require('node:assert/strict');
 const { simpleParser } = require('mailparser');
 const {
   classifyApplicationEmail,
+  extractInterviewDetails,
   extractInterviewDateTime,
+  extractInterviewLocation,
+  extractInterviewMeetingUrl,
   extractInterviewType,
   getInterviewDetailsToFill,
   getInterviewDetailsToUpdate,
@@ -18,6 +21,7 @@ test('classifies supported application status email language', () => {
     ['Nova application', 'Please complete an assessment for the role.', 'Assessment'],
     ['You have been shortlisted', 'Your application was shortlisted.', 'Shortlisted'],
     ['Interview invitation', 'We would like to interview you.', 'Interview'],
+    ['Interview update', 'Your interview has been rescheduled for October 14, 2026 at 9:00 AM.', 'Interview'],
     ['Interview invitation', 'You have been shortlisted for an interview. Please confirm your availability.', 'Interview'],
     ['Offer of employment', 'We are pleased to offer you the position.', 'Offer'],
     ['Job offer', 'Dear candidate, you are offered a position at Microsoft. Kind regards, Microsoft recruitment team', 'Offer'],
@@ -159,6 +163,56 @@ test('extracts the date and time from the Shoprite interview invitation wording'
     ambiguous: false,
     hasUnsupportedTimezone: false,
   });
+});
+
+test('extracts interview schedule from a natural invitation mentioning a company and position', () => {
+  const email = {
+    subject: 'Interview invitation',
+    text: 'You are invited for an interview at Spar on 13 October 2026 at 08:30',
+  };
+
+  assert.equal(classifyApplicationEmail(email).status, 'Interview');
+  assert.deepEqual(extractInterviewDateTime(email), {
+    interviewDate: '2026-10-13',
+    interviewTime: '08:30',
+    ambiguous: false,
+    hasUnsupportedTimezone: false,
+  });
+});
+
+test('extracts date and time from a generic interview reschedule notice', () => {
+  const email = {
+    subject: 'Interview update',
+    text: 'Your interview has been rescheduled for October 14, 2026 at 9:00 AM.',
+  };
+
+  assert.equal(classifyApplicationEmail(email).status, 'Interview');
+  assert.deepEqual(extractInterviewDateTime(email), {
+    interviewDate: '2026-10-14',
+    interviewTime: '09:00',
+    ambiguous: false,
+    hasUnsupportedTimezone: false,
+  });
+});
+
+test('supports invitation date and time wording variants without inventing details', () => {
+  const examples = [
+    ['You are invited to interview on October 13, 2026 at 8:30 AM.', '2026-10-13', '08:30'],
+    ['You are invited to interview on October 13, 2026, at 8:30 AM.', '2026-10-13', '08:30'],
+    ['Your interview is scheduled for 13 October 2026 at 08:30.', '2026-10-13', '08:30'],
+    ['We would like to invite you for an interview on 2026-10-13 at 14:00.', '2026-10-13', '14:00'],
+    ['Your interview will take place on 13 October 2026.', '2026-10-13', null],
+  ];
+
+  for (const [text, expectedDate, expectedTime] of examples) {
+    const result = extractInterviewDateTime({ text });
+    assert.equal(result.interviewDate, expectedDate, text);
+    assert.equal(result.interviewTime, expectedTime, text);
+  }
+
+  assert.deepEqual(extractInterviewDateTime({
+    text: 'We would like to interview you. The office opens at 08:30.',
+  }).interviewDate, null);
 });
 
 test('extracts interview time when MIME line breaks separate the date and time phrase', () => {
@@ -307,20 +361,75 @@ test('extracts only explicitly stated supported interview types', () => {
   }
 });
 
+test('extracts explicit interview location, street addresses, and one meeting URL', () => {
+  assert.equal(
+    extractInterviewLocation({ text: 'Interview location: Spar Sandton office, Johannesburg.' }),
+    'Spar Sandton office, Johannesburg'
+  );
+  assert.equal(
+    extractInterviewLocation({ text: 'Please attend at 123 Main Street, Johannesburg.' }),
+    '123 Main Street, Johannesburg'
+  );
+  assert.equal(extractInterviewLocation({ text: 'You are invited to an interview at Spar on 13 October 2026.' }), null);
+  assert.equal(
+    extractInterviewMeetingUrl({ text: 'Join the video interview: https://meet.google.com/abc-defg-hij' }),
+    'https://meet.google.com/abc-defg-hij'
+  );
+  assert.equal(
+    extractInterviewMeetingUrl({ text: 'Please read our privacy policy at https://example.com/privacy.' }),
+    null
+  );
+  assert.equal(
+    extractInterviewMeetingUrl({ text: 'Join meeting: https://meet.example.test/one or https://meet.example.test/two' }),
+    null
+  );
+});
+
+test('extracts meeting URLs from HTML anchor targets without inventing an interview type', () => {
+  const details = extractInterviewDetails({
+    text: 'You are invited for an interview at Spar on 13 October 2026 at 08:30.',
+    html: '<p>Join the interview</p><a href="https://meet.example.test/room?a=1&amp;b=2">Join meeting</a>',
+  });
+
+  assert.equal(details.interviewDate, '2026-10-13');
+  assert.equal(details.interviewTime, '08:30');
+  assert.equal(details.interviewType, null);
+  assert.equal(details.interviewLocation, null);
+  assert.equal(details.interviewMeetingUrl, 'https://meet.example.test/room?a=1&b=2');
+});
+
 test('does not replace existing interview details with extracted values', () => {
   assert.deepEqual(
     getInterviewDetailsToFill(
       { interview_date: '2026-10-15', interview_time: '10:00:00', interview_type: 'Panel' },
       { interviewDate: '2026-10-16', interviewTime: '11:00', interviewType: 'Video' }
     ),
-    { interviewDate: null, interviewTime: null, interviewType: null }
+    {
+      interviewDate: null,
+      interviewTime: null,
+      interviewType: null,
+      interviewLocation: null,
+      interviewMeetingUrl: null,
+    }
   );
   assert.deepEqual(
     getInterviewDetailsToFill(
-      { interview_date: '2026-10-15', interview_time: null, interview_type: null },
+      {
+        interview_date: '2026-10-15',
+        interview_time: null,
+        interview_type: null,
+        interview_location: 'Existing office',
+        interview_meeting_url: 'https://meet.example.test/existing',
+      },
       { interviewDate: '2026-10-16', interviewTime: '11:00', interviewType: 'Video' }
     ),
-    { interviewDate: null, interviewTime: '11:00', interviewType: 'Video' }
+    {
+      interviewDate: null,
+      interviewTime: '11:00',
+      interviewType: 'Video',
+      interviewLocation: null,
+      interviewMeetingUrl: null,
+    }
   );
 });
 
@@ -330,13 +439,52 @@ test('identifies changed interview details without inventing or replacing absent
       { interview_date: '2026-10-09', interview_time: '07:30:00', interview_type: 'Panel' },
       { interviewDate: '2026-10-09', interviewTime: '08:30', interviewType: null }
     ),
-    { interviewDate: null, interviewTime: '08:30', interviewType: null }
+    {
+      interviewDate: null,
+      interviewTime: '08:30',
+      interviewType: null,
+      interviewLocation: null,
+      interviewMeetingUrl: null,
+    }
   );
   assert.deepEqual(
     getInterviewDetailsToUpdate(
       { interview_date: '2026-10-09', interview_time: '08:30:00', interview_type: 'Panel' },
       { interviewDate: '2026-10-09', interviewTime: '08:30', interviewType: 'Video' }
     ),
-    { interviewDate: null, interviewTime: null, interviewType: 'Video' }
+    {
+      interviewDate: null,
+      interviewTime: null,
+      interviewType: 'Video',
+      interviewLocation: null,
+      interviewMeetingUrl: null,
+    }
+  );
+});
+
+test('updates reliable rescheduled location and meeting link without clearing existing values when absent', () => {
+  const current = {
+    interview_date: '2026-10-13',
+    interview_time: '08:30:00',
+    interview_type: 'Video',
+    interview_location: 'Existing office',
+    interview_meeting_url: 'https://meet.example.test/old',
+  };
+
+  assert.deepEqual(
+    getInterviewDetailsToUpdate(current, {
+      interviewDate: '2026-10-14',
+      interviewTime: '09:00',
+      interviewType: null,
+      interviewLocation: 'Updated office, Johannesburg',
+      interviewMeetingUrl: 'https://meet.example.test/new',
+    }),
+    {
+      interviewDate: '2026-10-14',
+      interviewTime: '09:00',
+      interviewType: null,
+      interviewLocation: 'Updated office, Johannesburg',
+      interviewMeetingUrl: 'https://meet.example.test/new',
+    }
   );
 });

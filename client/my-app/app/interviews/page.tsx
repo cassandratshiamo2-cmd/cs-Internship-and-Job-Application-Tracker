@@ -100,13 +100,11 @@ export default function InterviewsPage() {
         }
 
         const loadedApplications = rows
-          .map(normalizeInterviewApplication)
-          .filter((application): application is Application => Boolean(
-            application &&
-            application.status.trim().toLowerCase() === "interview" &&
-            application.interviewDate &&
-            application.interviewTime
-          ));
+        .map(normalizeInterviewApplication)
+        .filter((application): application is Application => Boolean(
+          application &&
+          application.status.trim().toLowerCase() === "interview"
+        ));
 
         if (isMounted) {
           setApplications(loadedApplications);
@@ -209,12 +207,18 @@ export default function InterviewsPage() {
                     <StatusBadge status={interviewStatus} />
                   </div>
                   <div className="space-y-2 text-sm text-slate-600">
-                    <p><span className="font-semibold text-slate-700">Type:</span> {application.interviewType || "Not specified"}</p>
-                    <p><span className="font-semibold text-slate-700">Date:</span> {application.interviewDate}</p>
-                    <p><span className="font-semibold text-slate-700">Time:</span> {application.interviewTime}</p>
-                    {application.interviewType === "In-person" ? (
-                      <p className="whitespace-pre-line"><span className="font-semibold text-slate-700">Location / Address:</span> {application.interviewLocation || "Not confirmed"}</p>
-                    ) : null}
+                    <p><span className="font-semibold text-slate-700">Type:</span> {application.interviewType || "Needs confirmation"}</p>
+                    <p><span className="font-semibold text-slate-700">Date:</span> {application.interviewDate || "Needs confirmation"}</p>
+                    <p><span className="font-semibold text-slate-700">Time:</span> {application.interviewTime || "Needs confirmation"}</p>
+                    <p className="whitespace-pre-line"><span className="font-semibold text-slate-700">Location / Address:</span> {application.interviewLocation || "Needs confirmation"}</p>
+                    <p>
+                      <span className="font-semibold text-slate-700">Meeting Link:</span>{" "}
+                      {application.interviewMeetingUrl ? (
+                        <a href={application.interviewMeetingUrl} target="_blank" rel="noopener noreferrer" className="break-all text-[#0f766e] underline">
+                          {application.interviewMeetingUrl}
+                        </a>
+                      ) : "Not provided"}
+                    </p>
                     <p><span className="font-semibold text-slate-700">Reminders:</span> {application.notificationChannels?.join(", ") || "In-app"}</p>
                   </div>
                 </div>

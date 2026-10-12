@@ -121,12 +121,15 @@ export default function ApplicationDetailPage() {
           <InfoRow label="Notes" value={application.notes} />
           {application.status === "Interview" ? (
             <>
-              <InfoRow label="Interview Type" value={application.interviewType || "Not specified"} />
-              <InfoRow label="Interview Date" value={application.interviewDate || "Not scheduled"} />
-              <InfoRow label="Interview Time" value={application.interviewTime || "Not scheduled"} />
-              {application.interviewType === "In-person" ? (
-                <InfoRow label="Interview Location / Address" value={application.interviewLocation || "Not confirmed"} />
-              ) : null}
+              <InfoRow label="Interview Type" value={application.interviewType || "Needs confirmation"} />
+              <InfoRow label="Interview Date" value={application.interviewDate || "Needs confirmation"} />
+              <InfoRow label="Interview Time" value={application.interviewTime || "Needs confirmation"} />
+              <InfoRow label="Interview Address or Location" value={application.interviewLocation || "Needs confirmation"} />
+              {application.interviewMeetingUrl ? (
+                <InfoRow label="Meeting Link" value={application.interviewMeetingUrl} link={application.interviewMeetingUrl} />
+              ) : (
+                <InfoRow label="Meeting Link" value="Not provided" />
+              )}
               <InfoRow label="Reminders" value={application.notificationChannels?.join(", ") || "In-app"} />
             </>
           ) : null}

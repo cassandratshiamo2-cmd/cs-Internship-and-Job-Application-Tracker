@@ -69,6 +69,11 @@ function createTestService({
       id: message.id,
       outcome: message.outcome,
       detectedStatus: message.detectedStatus || null,
+      detectedInterviewDate: message.detectedInterviewDate || null,
+      detectedInterviewTime: message.detectedInterviewTime || null,
+      detectedInterviewType: message.detectedInterviewType || null,
+      detectedInterviewLocation: message.detectedInterviewLocation || null,
+      detectedInterviewMeetingUrl: message.detectedInterviewMeetingUrl || null,
       reviewReason: message.reviewReason || null,
       sender: message.sender || '',
       subject: message.subject || '',
@@ -194,6 +199,11 @@ function createTestService({
             id: row.id,
             outcome: row.outcome,
             detected_status: row.detectedStatus,
+            detected_interview_date: row.detectedInterviewDate,
+            detected_interview_time: row.detectedInterviewTime,
+            detected_interview_type: row.detectedInterviewType,
+            detected_interview_location: row.detectedInterviewLocation,
+            detected_interview_meeting_url: row.detectedInterviewMeetingUrl,
             sender: row.sender || '',
             subject: row.subject || '',
             candidate_application_ids: row.candidateApplicationIds || [],
@@ -330,6 +340,11 @@ function createTestService({
               sender: params[4],
               subject: params[5],
               detectedStatus: params[7],
+              detectedInterviewDate: params[8],
+              detectedInterviewTime: params[9],
+              detectedInterviewType: params[10],
+              detectedInterviewLocation: params[11],
+              detectedInterviewMeetingUrl: params[12],
             });
             return { rowCount: 1, rows: [{ id }] };
           }
@@ -363,8 +378,13 @@ function createTestService({
             if (row) {
               row.outcome = 'processing';
               row.detectedStatus = params[4];
+              row.detectedInterviewDate = params[5];
+              row.detectedInterviewTime = params[6];
+              row.detectedInterviewType = params[7];
+              row.detectedInterviewLocation = params[8];
+              row.detectedInterviewMeetingUrl = params[9];
               row.reviewReason = null;
-              if (params[10]) row.reprocessVersion = (row.reprocessVersion || 0) + 1;
+              if (params[12]) row.reprocessVersion = (row.reprocessVersion || 0) + 1;
             }
             return { rowCount: 1, rows: [] };
           }
@@ -389,6 +409,12 @@ function createTestService({
             application.interview_type = params[9]
               ? (params[8] || application.interview_type)
               : (application.interview_type || params[8]);
+            application.interview_location = params[12]
+              ? (params[10] || application.interview_location)
+              : (application.interview_location || params[10]);
+            application.interview_meeting_url = params[12]
+              ? (params[11] || application.interview_meeting_url)
+              : (application.interview_meeting_url || params[11]);
             return { rowCount: 1, rows: [{ ...application }] };
           }
           if (sql.startsWith('UPDATE gmail_processed_messages SET outcome =')) {
@@ -2318,6 +2344,197 @@ test('a stale same-status interview email is sent for review without changing ne
   assert.equal(processedRows.get('stale-interview-details').outcome, 'review');
 });
 
+test('the exact Spar interview email persists date and time without inventing missing details', async () => {
+  const application = {
+    id: 37,
+    company: 'Spar',
+    position: 'Graduate Engineer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    interview_location: null,
+    interview_meeting_url: null,
+    notification_channels: ['In-app'],
+    application_link: null,
+    interview_email: null,
+  };
+  const otherApplication = {
+    id: 95,
+    company: 'Woolworths',
+    position: 'Retail Assistant',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+  };
+  const raw = Buffer.from([
+    'From: recruitment@example.test',
+    'To: applyflow@example.com',
+    'Subject: Interview invitation',
+    'Date: Mon, 12 Oct 2026 08:00:00 +0200',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/alternative; boundary="applyflow-interview"',
+    '',
+    '--applyflow-interview',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Dear candidate,',
+    'You are invited for an interview at Spar on 13 October 2026 at 08:30',
+    '--applyflow-interview',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    '<p>Dear candidate,</p>',
+    '<p>You are invited for an interview at Spar on 13 October 2026 at 08:30</p>',
+    '--applyflow-interview--',
+  ].join('\r\n')).toString('base64url');
+  let reminderCount = 0;
+  const messageId = 'spar-generic-interview';
+  const { service, processedRows, calls } = createTestService({
+    applications: [application, otherApplication],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-spar-interview',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'spar-interview-thread',
+        internalDate: String(new Date('2026-10-12T06:00:00Z').getTime()),
+      },
+    }),
+    async scheduleInterviewReminder() { reminderCount += 1; },
+  });
+
+  const first = await service.syncConnection(7);
+  const second = await service.syncConnection(7);
+
+  assert.deepEqual(first.outcomes, ['updated']);
+  assert.deepEqual(second.outcomes, ['duplicate']);
+  assert.deepEqual(
+    [
+      application.status,
+      application.interview_date,
+      application.interview_time,
+      application.interview_type,
+      application.interview_location,
+      application.interview_meeting_url,
+    ],
+    [
+      'Interview',
+      '2026-10-13',
+      '08:30',
+      null,
+      null,
+      null,
+    ]
+  );
+  assert.equal(otherApplication.status, 'Applied');
+  assert.equal(processedRows.get(messageId).applicationId, application.id);
+  assert.equal(processedRows.get(messageId).detectedInterviewDate, '2026-10-13');
+  assert.equal(processedRows.get(messageId).detectedInterviewTime, '08:30');
+  assert.equal(processedRows.get(messageId).detectedInterviewType, null);
+  assert.equal(processedRows.get(messageId).detectedInterviewLocation, null);
+  assert.equal(processedRows.get(messageId).detectedInterviewMeetingUrl, null);
+  assert.equal(calls.applicationUpdates, 1);
+  assert.equal(reminderCount, 1);
+});
+
+test('a newer reschedule email updates the existing interview without creating a duplicate', async () => {
+  const application = {
+    id: 96,
+    company: 'Microsoft',
+    position: 'Full stack developer',
+    status: 'Interview',
+    updated_at: new Date('2026-10-11T06:00:00Z'),
+    interview_date: '2026-10-13',
+    interview_time: '08:30:00',
+    interview_type: 'Video',
+    interview_location: 'Microsoft office',
+    interview_meeting_url: 'https://meet.example.test/old',
+    notification_channels: ['In-app'],
+    application_link: null,
+    interview_email: null,
+  };
+  const messageData = {
+    'reschedule-original': {
+      raw: Buffer.from([
+        'From: recruitment@example.test',
+        'To: applyflow@example.com',
+        'Subject: Interview update',
+        'Date: Mon, 12 Oct 2026 08:00:00 +0200',
+        'Content-Type: text/plain; charset=utf-8',
+        '',
+        'Microsoft Full stack developer interview rescheduled for October 14, 2026 at 9:00 AM.',
+      ].join('\r\n')).toString('base64url'),
+      internalDate: '1791784800000',
+    },
+  };
+  let historyPoll = 0;
+  let reminderCount = 0;
+  const { service, processedRows, calls } = createTestService({
+    applications: [application],
+    historyList: async () => {
+      const messageId = historyPoll++ < 2 ? 'reschedule-original' : 'reschedule-new';
+      return {
+        data: {
+          historyId: `history-reschedule-${historyPoll}`,
+          history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+        },
+      };
+    },
+    messageGet: async (messageId) => ({
+      data: {
+        labelIds: [],
+        raw: messageData[messageId].raw,
+        threadId: `thread-${messageId}`,
+        internalDate: messageData[messageId].internalDate,
+      },
+    }),
+    async scheduleInterviewReminder() { reminderCount += 1; },
+  });
+  messageData['reschedule-new'] = {
+    raw: Buffer.from([
+      'From: recruitment@example.test',
+      'To: applyflow@example.com',
+      'Subject: Interview rescheduled',
+      'Date: Tue, 13 Oct 2026 08:00:00 +0200',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'Microsoft has rescheduled your Full stack developer interview for October 15, 2026 at 10:30 AM.',
+      'Location: Microsoft Building 2, Johannesburg',
+      'Join meeting: https://meet.example.test/new',
+    ].join('\r\n')).toString('base64url'),
+    internalDate: '1791871200000',
+  };
+
+  const first = await service.syncConnection(7);
+  const duplicate = await service.syncConnection(7);
+  const rescheduled = await service.syncConnection(7);
+
+  assert.deepEqual(first.outcomes, ['updated']);
+  assert.deepEqual(duplicate.outcomes, ['duplicate']);
+  assert.deepEqual(rescheduled.outcomes, ['updated']);
+  assert.deepEqual(
+    [
+      application.interview_date,
+      application.interview_time,
+      application.interview_location,
+      application.interview_meeting_url,
+    ],
+    [
+      '2026-10-15',
+      '10:30',
+      'Microsoft Building 2, Johannesburg',
+      'https://meet.example.test/new',
+    ]
+  );
+  assert.equal(processedRows.size, 2);
+  assert.equal(calls.applicationUpdates, 2);
+  assert.equal(reminderCount, 2);
+});
 test('a Microsoft offer updates only a confident unique match and protects ambiguous or stale applications', async () => {
   const raw = Buffer.from([
     'From: cassandratshiamo2@gmail.com',

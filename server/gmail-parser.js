@@ -46,6 +46,8 @@ const STATUS_RULES = [
       /interview.{0,30}invitation/i,
       /would like to interview you/i,
       /interview.{0,20}availability/i,
+      /\binterview\b[^.!?\n]{0,60}\b(?:rescheduled|moved|changed)\b/i,
+      /\b(?:rescheduled|moved|changed)\b[^.!?\n]{0,60}\binterview\b/i,
     ],
   },
   {
@@ -239,7 +241,9 @@ function interviewDateIsExplicitlyAssociated(prefix) {
   return (
     /\binterview(?:\s+invitation)?\s*[:\-]\s*$/i.test(recentPrefix) ||
     /\binterview\s+date\s*[:\-]\s*$/i.test(recentPrefix) ||
-    /\binterview\b[^.!?\n]{0,90}\b(?:scheduled|set|booked|planned|held|takes place|will take place)\b[^.!?\n]{0,45}\b(?:for|on)\s*$/i.test(recentPrefix) ||
+    /\binterview\b[^.!?\n]{0,90}\b(?:scheduled|rescheduled|set|booked|planned|held|takes place|will take place)\b[^.!?\n]{0,45}\b(?:for|on)\s*$/i.test(recentPrefix) ||
+    /\b(?:rescheduled|moved|changed)\b[^.!?\n]{0,60}\binterview\b[^.!?\n]{0,60}\b(?:for|to|on)\s*$/i.test(recentPrefix) ||
+    /\binvit(?:e|ed)\b[^.!?\n]{0,100}\binterview\b[^.!?\n]{0,100}\b(?:on|for)\s+(?:the\s+)?$/i.test(recentPrefix) ||
     /\binterview\s+(?:date\s*)?(?:is\s+)?(?:on|for)\s+(?:the\s+)?$/i.test(recentPrefix) ||
     /\binterview\s+will\s+be\s+(?:held\s+)?(?:on|for)\s*$/i.test(recentPrefix)
   );
@@ -318,6 +322,12 @@ function getInterviewDetailsToFill(existing, extracted) {
     interviewType: existing?.interview_type || existing?.interviewType
       ? null
       : extracted?.interviewType || null,
+    interviewLocation: existing?.interview_location || existing?.interviewLocation
+      ? null
+      : extracted?.interviewLocation || null,
+    interviewMeetingUrl: existing?.interview_meeting_url || existing?.interviewMeetingUrl
+      ? null
+      : extracted?.interviewMeetingUrl || null,
   };
 }
 
@@ -329,6 +339,8 @@ function getInterviewDetailsToUpdate(existing, extracted) {
     ? String(existing.interview_time).slice(0, 5)
     : null;
   const existingType = existing?.interview_type || existing?.interviewType || null;
+  const existingLocation = existing?.interview_location || existing?.interviewLocation || null;
+  const existingMeetingUrl = existing?.interview_meeting_url || existing?.interviewMeetingUrl || null;
 
   return {
     interviewDate: extracted?.interviewDate && extracted.interviewDate !== existingDate
@@ -340,12 +352,89 @@ function getInterviewDetailsToUpdate(existing, extracted) {
     interviewType: extracted?.interviewType && extracted.interviewType !== existingType
       ? extracted.interviewType
       : null,
+    interviewLocation: extracted?.interviewLocation && extracted.interviewLocation !== existingLocation
+      ? extracted.interviewLocation
+      : null,
+    interviewMeetingUrl: extracted?.interviewMeetingUrl && extracted.interviewMeetingUrl !== existingMeetingUrl
+      ? extracted.interviewMeetingUrl
+      : null,
   };
 }
 
 function extractInterviewType({ subject = '', text = '' }) {
   const content = `${subject}\n${text}`.slice(0, 100000);
   return INTERVIEW_TYPE_PATTERNS.find(({ pattern }) => pattern.test(content))?.type || null;
+}
+
+function decodeHtmlAttribute(value) {
+  return value
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+}
+
+function normalizeHttpUrl(value) {
+  const candidate = String(value || '').trim().replace(/[),.;!?]+$/, '');
+  try {
+    const url = new URL(candidate);
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function extractInterviewMeetingUrl({ text = '', html = '' }) {
+  const plainText = String(text || '').slice(0, 100000);
+  const htmlText = typeof html === 'string' ? html.slice(0, 100000) : '';
+  const candidates = [];
+
+  const meetingLinkContext =
+    /\b(?:join|click|connect|enter|attend)\b[^.!?\n]{0,60}\b(?:meeting|interview|call|video|conference)\b|\b(?:meeting|interview|call|video|conference)\b[^.!?\n]{0,60}\b(?:link|url|join|below|here)\b/i;
+  const addCandidate = (rawUrl, context) => {
+    const url = normalizeHttpUrl(rawUrl);
+    if (!url) return;
+    const host = new URL(url).hostname.toLowerCase();
+    const knownMeetingHost =
+      /(?:^|\.)zoom\.us$|(?:^|\.)teams\.microsoft\.com$|(?:^|\.)meet\.google\.com$|(?:^|\.)webex\.com$|(?:^|\.)whereby\.com$|(?:^|\.)gotomeet\.me$/.test(host);
+    if (!knownMeetingHost && !meetingLinkContext.test(context)) return;
+    candidates.push(url);
+  };
+
+  const urlPattern = /https?:\/\/[^\s<>"')]+/gi;
+  let match;
+  while ((match = urlPattern.exec(plainText)) !== null) {
+    addCandidate(match[0], plainText.slice(Math.max(0, match.index - 100), match.index + match[0].length + 40));
+  }
+
+  const anchorPattern = /<a\b([^>]*?)href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))([^>]*)>([\s\S]*?)<\/a\s*>/gi;
+  while ((match = anchorPattern.exec(htmlText)) !== null) {
+    const rawUrl = match[2] || match[3] || match[4] || '';
+    const anchorText = match[6].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+    const context = `${match[1]} ${anchorText} ${match[5]} ${htmlText.slice(Math.max(0, match.index - 100), match.index)}`;
+    addCandidate(decodeHtmlAttribute(rawUrl), context);
+  }
+
+  const uniqueCandidates = [...new Set(candidates)];
+  return uniqueCandidates.length === 1 ? uniqueCandidates[0] : null;
+}
+
+function extractInterviewLocation({ text = '' }) {
+  const content = String(text || '').slice(0, 100000);
+  const explicitLocation = /\b(?:interview\s+)?(?:location|venue|address)\s*[:\-]\s*([^\r\n;]{3,240})/i.exec(content);
+  if (explicitLocation) {
+    return explicitLocation[1].replace(/\s+/g, ' ').trim().replace(/[.,;]+$/, '') || null;
+  }
+
+  const addressPattern = /\b\d{1,6}\s+[\w.'’#-]+(?:\s+[\w.'’#-]+){0,7}\s+(?:street|st|road|rd|avenue|ave|drive|dr|lane|ln|boulevard|blvd|way|crescent|close|place|plaza|parkway|pkwy)\b[^\r\n.!?]{0,100}/gi;
+  const addresses = [...content.matchAll(addressPattern)]
+    .map((match) => match[0].replace(/\s+/g, ' ').trim().replace(/[.,;]+$/, ''));
+  const uniqueAddresses = [...new Set(addresses)];
+  return uniqueAddresses.length === 1 ? uniqueAddresses[0] : null;
 }
 
 function extractInterviewDateTime({ subject = '', text = '' }) {
@@ -364,7 +453,7 @@ function extractInterviewDateTime({ subject = '', text = '' }) {
 
       const suffixEnd = getSentenceEnd(content, pattern.regex.lastIndex);
       const suffix = content.slice(pattern.regex.lastIndex, Math.min(suffixEnd, pattern.regex.lastIndex + 80));
-      const timeMatch = /^\s*(?:at|from|@|,)\s*(\d{1,2})(?::(\d{2}))?(?:\s*([ap]\.?(?:m)\.?))?/i.exec(suffix);
+      const timeMatch = /^\s*(?:at|from|@|,\s*(?:at\s*)?)\s*(\d{1,2})(?::(\d{2}))?(?:\s*([ap]\.?(?:m)\.?))?/i.exec(suffix);
       const zoneMatch = timeMatch
         ? /^\s*\(?\s*((?:UTC|GMT)[+-]\d{1,2}(?::?\d{2})?|[A-Z]{1,5})\b\s*\)?/.exec(suffix.slice(timeMatch[0].length))
         : null;
@@ -397,10 +486,22 @@ function extractInterviewDateTime({ subject = '', text = '' }) {
   };
 }
 
+function extractInterviewDetails(email) {
+  return {
+    ...extractInterviewDateTime(email),
+    interviewType: extractInterviewType(email),
+    interviewLocation: extractInterviewLocation(email),
+    interviewMeetingUrl: extractInterviewMeetingUrl(email),
+  };
+}
+
 module.exports = {
   classifyApplicationEmail,
   isGenericJobAlert,
   extractInterviewDateTime,
+  extractInterviewDetails,
+  extractInterviewLocation,
+  extractInterviewMeetingUrl,
   extractInterviewType,
   getInterviewDetailsToFill,
   getInterviewDetailsToUpdate,

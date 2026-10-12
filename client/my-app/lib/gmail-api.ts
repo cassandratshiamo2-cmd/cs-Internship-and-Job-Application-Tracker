@@ -20,6 +20,11 @@ export type GmailReviewMessage = {
   retryable: boolean;
   candidate_application_ids: string[];
   review_reason: string | null;
+  detected_interview_date: string | null;
+  detected_interview_time: string | null;
+  detected_interview_type: Application['interviewType'] | null;
+  detected_interview_location: string | null;
+  detected_interview_meeting_url: string | null;
 };
 
 export type GmailProcessedMessage = {
@@ -32,7 +37,9 @@ export type GmailProcessedMessage = {
   detected_status: Application['status'] | null;
   detected_interview_date: string | null;
   detected_interview_time: string | null;
-  detected_interview_type: string | null;
+  detected_interview_type: Application['interviewType'] | null;
+  detected_interview_location: string | null;
+  detected_interview_meeting_url: string | null;
   outcome: 'updated' | 'reviewed' | 'dismissed' | 'ignored';
   application_company: string | null;
   application_position: string | null;
@@ -40,6 +47,8 @@ export type GmailProcessedMessage = {
   application_interview_date: string | null;
   application_interview_time: string | null;
   application_interview_type: string | null;
+  application_interview_location: string | null;
+  application_interview_meeting_url: string | null;
   review_reason: string | null;
   retryable: boolean;
 };

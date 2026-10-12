@@ -330,6 +330,24 @@ export default function GmailIntegrationPage() {
                     <p className="mt-3 text-sm text-slate-600">
                       {message.review_reason || 'Choose the matching application to apply the detected status.'}
                     </p>
+                    {message.detected_status === 'Interview' ? (
+                      <dl className="mt-3 grid gap-x-6 gap-y-1 text-sm text-slate-600 sm:grid-cols-2 lg:grid-cols-3">
+                        <div><dt className="inline font-medium">Proposed interview date: </dt><dd className="inline">{message.detected_interview_date || 'Needs confirmation'}</dd></div>
+                        <div><dt className="inline font-medium">Proposed interview time: </dt><dd className="inline">{message.detected_interview_time?.slice(0, 5) || 'Needs confirmation'}</dd></div>
+                        <div><dt className="inline font-medium">Proposed interview type: </dt><dd className="inline">{message.detected_interview_type || 'Needs confirmation'}</dd></div>
+                        <div><dt className="inline font-medium">Proposed location / address: </dt><dd className="inline">{message.detected_interview_location || 'Needs confirmation'}</dd></div>
+                        <div>
+                          <dt className="inline font-medium">Proposed meeting link: </dt>
+                          <dd className="inline">
+                            {message.detected_interview_meeting_url ? (
+                              <a href={message.detected_interview_meeting_url} target="_blank" rel="noopener noreferrer" className="break-all text-[#0f766e] underline">
+                                {message.detected_interview_meeting_url}
+                              </a>
+                            ) : 'Not provided'}
+                          </dd>
+                        </div>
+                      </dl>
+                    ) : null}
                     <div className="mt-4 flex flex-col gap-2 sm:flex-row">
                       <select
                         aria-label={`Application for ${message.subject || 'email'}`}
@@ -405,6 +423,22 @@ export default function GmailIntegrationPage() {
                     <div><dt className="inline font-medium">Interview date: </dt><dd className="inline">{message.detected_interview_date || message.application_interview_date || 'Not detected'}</dd></div>
                     <div><dt className="inline font-medium">Interview time: </dt><dd className="inline">{message.detected_interview_time?.slice(0, 5) || message.application_interview_time?.slice(0, 5) || 'Not detected'}</dd></div>
                     <div><dt className="inline font-medium">Interview type: </dt><dd className="inline">{message.detected_interview_type || message.application_interview_type || 'Not specified'}</dd></div>
+                    <div><dt className="inline font-medium">Interview location: </dt><dd className="inline">{message.detected_interview_location || message.application_interview_location || 'Not provided'}</dd></div>
+                    <div>
+                      <dt className="inline font-medium">Meeting link: </dt>
+                      <dd className="inline">
+                        {message.detected_interview_meeting_url || message.application_interview_meeting_url ? (
+                          <a
+                            href={message.detected_interview_meeting_url || message.application_interview_meeting_url || undefined}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="break-all text-[#0f766e] underline"
+                          >
+                            {message.detected_interview_meeting_url || message.application_interview_meeting_url}
+                          </a>
+                        ) : 'Not provided'}
+                      </dd>
+                    </div>
                   </dl>
                   {message.retryable ? (
                     <button type="button" disabled={isWorking} onClick={() => void handleRetry(message.id)} className="mt-4 rounded-full border border-[#b9e7e4] bg-[#f0fbfa] px-4 py-2 text-sm font-semibold text-[#0f766e] disabled:opacity-60">

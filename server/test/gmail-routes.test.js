@@ -33,6 +33,8 @@ function createTestPool(options) {
         selectedApplication.interview_date = selectedApplication.interview_date || nextDate;
         selectedApplication.interview_time = selectedApplication.interview_time || nextTime;
         selectedApplication.interview_type = selectedApplication.interview_type || nextType;
+        selectedApplication.interview_location = selectedApplication.interview_location || params[8];
+        selectedApplication.interview_meeting_url = selectedApplication.interview_meeting_url || params[9];
         return { rowCount: 1, rows: [{ ...selectedApplication }] };
       }
       if (sql.startsWith('INSERT INTO notification_jobs')) {
@@ -222,6 +224,8 @@ test('review endpoint fills an already-Interview application and schedules its c
     interview_date: null,
     interview_time: null,
     interview_type: null,
+    interview_location: null,
+    interview_meeting_url: null,
     notification_channels: ['In-app'],
     application_link: null,
     interview_email: null,
@@ -234,6 +238,8 @@ test('review endpoint fills an already-Interview application and schedules its c
       detected_interview_date: '2026-10-15',
       detected_interview_time: '10:00',
       detected_interview_type: 'Video',
+      detected_interview_location: 'Spar Sandton office',
+      detected_interview_meeting_url: 'https://meet.example.test/interview',
     },
     application,
     async scheduleInterviewReminder(data) { reminderCall = data; },
@@ -249,10 +255,47 @@ test('review endpoint fills an already-Interview application and schedules its c
   assert.equal(application.status, 'Interview');
   assert.equal(application.interview_date, '2026-10-15');
   assert.equal(application.interview_time, '10:00');
+  assert.equal(application.interview_meeting_url, 'https://meet.example.test/interview');
+  assert.equal(application.interview_location, 'Spar Sandton office');
   assert.equal(application.interview_type, 'Video');
   assert.equal(reminderCall.applicationId, '13');
   assert.equal(reminderCall.interviewDate, '2026-10-15');
   assert.equal(reminderCall.interviewTime, '10:00');
+});
+
+test('processing history returns extracted and saved interview schedule, location, and meeting link', async (t) => {
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    history: [{
+      id: 91,
+      gmail_message_id: 'history-meeting-link',
+      detected_status: 'Interview',
+      detected_interview_date: '2026-10-13',
+      detected_interview_time: '08:30:00',
+      detected_interview_type: 'Video',
+      detected_interview_location: 'Spar Sandton office',
+      detected_interview_meeting_url: 'https://meet.example.test/interview',
+      application_interview_date: '2026-10-13',
+      application_interview_time: '08:30:00',
+      application_interview_location: 'Spar Sandton office',
+      application_interview_meeting_url: 'https://meet.example.test/interview',
+      outcome: 'updated',
+      review_reason: null,
+    }],
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/history`);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(payload.messages[0].detected_interview_date, '2026-10-13');
+  assert.equal(payload.messages[0].detected_interview_time, '08:30:00');
+  assert.equal(payload.messages[0].application_interview_date, '2026-10-13');
+  assert.equal(payload.messages[0].application_interview_time, '08:30:00');
+  assert.equal(payload.messages[0].detected_interview_location, 'Spar Sandton office');
+  assert.equal(payload.messages[0].detected_interview_meeting_url, 'https://meet.example.test/interview');
+  assert.equal(payload.messages[0].application_interview_meeting_url, 'https://meet.example.test/interview');
 });
 
 test('review endpoint marks an already-Interview application with no new details as up to date', async (t) => {
