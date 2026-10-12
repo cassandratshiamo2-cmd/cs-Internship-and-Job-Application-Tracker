@@ -40,6 +40,7 @@ export type GmailProcessedMessage = {
   application_interview_date: string | null;
   application_interview_time: string | null;
   application_interview_type: string | null;
+  review_reason: string | null;
   retryable: boolean;
 };
 

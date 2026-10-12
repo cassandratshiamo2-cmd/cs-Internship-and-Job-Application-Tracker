@@ -3,7 +3,6 @@ const { google } = require('googleapis');
 const {
   getSafeSyncErrorDetails,
   isRetryableProcessedMessage,
-  MAX_REPROCESS_ATTEMPTS,
 } = require('./gmail-sync');
 const { decideApplicationEmailUpdate } = require('./gmail-matcher');
 const { getInterviewDetailsToFill, getInterviewDetailsToUpdate } = require('./gmail-parser');
@@ -219,7 +218,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       return res.status(200).json({
         messages: result.rows.map((message) => ({
           ...message,
-          retryable: Number(message.reprocess_version || 0) < MAX_REPROCESS_ATTEMPTS,
+          retryable: isRetryableProcessedMessage({ ...message, outcome: 'review' }),
         })),
       });
     } catch (error) {
