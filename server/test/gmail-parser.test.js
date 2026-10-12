@@ -169,28 +169,57 @@ test('does not classify unrelated mentions of offer, interview, or assessment', 
 });
 
 test('keeps a personalized application confirmation even if the subject recommends jobs', () => {
-  const result = classifyApplicationEmail({
+  const email = {
     subject: 'Recommended jobs',
     text: 'Your application for the Cashier position at Shoprite has been received. Thank you for applying.',
-  });
+  };
+  const initialClassification = classifyApplicationEmail(email);
+  const result = classifyApplicationEmail(email, { allowGenericJobAlert: true });
 
+  assert.equal(initialClassification.ignored, true);
   assert.equal(result.status, 'Applied');
   assert.equal(result.ignored, undefined);
 });
 
 test('keeps genuine personalized recruitment updates despite promotional-looking context', () => {
   const cases = [
-    ['Recommended roles', 'You are invited for an interview at Shoprite for the Cashier role.', 'Interview'],
+    ['Recommended roles', 'You are invited for an interview at Shoprite for the Cashier role after your application was reviewed.', 'Interview'],
     ['Featured jobs', 'Please complete the assessment for your Shoprite Cashier application.', 'Assessment'],
-    ['Weekly job offers', 'We are pleased to offer you the Cashier position at Shoprite.', 'Offer'],
-    ['Career newsletter', 'We regret to inform you that you were not selected for the Shoprite Cashier position.', 'Rejected'],
+    ['Weekly job offers', 'We are pleased to offer you the Cashier position at Shoprite following your application.', 'Offer'],
+    ['Career newsletter', 'We regret to inform you that your application for the Shoprite Cashier position was unsuccessful.', 'Rejected'],
   ];
 
   for (const [subject, text, expectedStatus] of cases) {
-    const result = classifyApplicationEmail({ subject, text });
+    const result = classifyApplicationEmail({ subject, text }, { allowGenericJobAlert: true });
     assert.equal(result.status, expectedStatus, subject);
     assert.equal(result.ignored, undefined, subject);
   }
+});
+
+test('generic Pnet newsletters remain ignored when promotional copy contains offer language', () => {
+  const email = {
+    from: 'alerts@pnet.co.za',
+    subject: 'Pnet Job Alert: Shoprite Cashier opportunities',
+    text: 'Your application profile matches Shoprite Cashier vacancies, and we are pleased to offer you access to these recommended roles and interview tips.',
+  };
+  const result = classifyApplicationEmail(email);
+  const explicitAlertRetry = classifyApplicationEmail(email, { allowGenericJobAlert: true });
+
+  assert.equal(result.status, null);
+  assert.equal(result.ignored, true);
+  assert.equal(explicitAlertRetry.status, null);
+  assert.equal(explicitAlertRetry.ignored, true);
+});
+
+test('Pnet alerts preserve explicit offers of a matched job position', () => {
+  const result = classifyApplicationEmail({
+    from: 'alerts@pnet.co.za',
+    subject: 'Pnet Job Alert - update on your application',
+    text: 'Shoprite Cashier: We are pleased to offer you the Cashier position following your application.',
+  }, { allowGenericJobAlert: true });
+
+  assert.equal(result.status, 'Offer');
+  assert.equal(result.ignored, undefined);
 });
 
 test('does not suppress a transactional interview email from a job platform', () => {

@@ -67,6 +67,13 @@ function createTestPool(options) {
 
   return {
     async query(sql) {
+      if (sql.includes('FROM gmail_connections WHERE user_id = $1')) {
+        const connection = options.gmailConnection;
+        return {
+          rowCount: connection ? 1 : 0,
+          rows: connection ? [connection] : [],
+        };
+      }
       if (sql.includes('FROM gmail_processed_messages AS message')) {
         const visibleHistory = sql.includes("outcome IN ('updated', 'reviewed', 'dismissed')")
           ? history.filter((item) => ['updated', 'reviewed', 'dismissed'].includes(item.outcome))
@@ -99,6 +106,32 @@ async function withGmailReviewServer(t, options) {
   t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
   return `http://127.0.0.1:${server.address().port}`;
 }
+
+test('Gmail status exposes last attempt and last successful sync separately', async (t) => {
+  const lastSyncAttemptAt = '2026-10-12T09:10:00.000Z';
+  const lastSuccessfulSyncAt = '2026-10-12T08:00:00.000Z';
+  const baseUrl = await withGmailReviewServer(t, {
+    message: {},
+    application: {},
+    gmailConnection: {
+      gmail_address: 'connected@example.test',
+      is_connected: true,
+      last_sync_at: lastSyncAttemptAt,
+      last_sync_attempt_at: lastSyncAttemptAt,
+      last_successful_sync_at: lastSuccessfulSyncAt,
+      last_sync_error: 'Temporary Gmail service failure.',
+    },
+  });
+
+  const response = await fetch(`${baseUrl}/api/gmail/status`);
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(payload.lastSyncAttemptAt, lastSyncAttemptAt);
+  assert.equal(payload.lastSuccessfulSyncAt, lastSuccessfulSyncAt);
+  assert.equal(payload.lastSyncError, 'Temporary Gmail service failure.');
+});
 
 test('manual sync returns a retryable response for Gmail quota cooldowns', async (t) => {
   const baseUrl = await withGmailReviewServer(t, {

@@ -21,13 +21,17 @@ type NotificationFetchResult = {
 export type NotificationState = {
   notifications: NotificationItem[];
   isLoading: boolean;
+  hasLoaded: boolean;
   message?: string;
   unauthorized?: boolean;
+  newNotification?: NotificationItem | null;
 };
 
 const initialNotificationState: NotificationState = {
   notifications: [],
   isLoading: true,
+  hasLoaded: false,
+  newNotification: null,
 };
 
 let notificationState = initialNotificationState;
@@ -58,7 +62,12 @@ export function clearNotificationState() {
   activeToken = null;
   refreshVersion += 1;
   inFlightRefresh = null;
-  publishNotificationState({ notifications: [], isLoading: false });
+  publishNotificationState({
+    notifications: [],
+    isLoading: false,
+    hasLoaded: false,
+    newNotification: null,
+  });
 }
 
 export async function refreshUserNotifications(options: { force?: boolean } = {}) {
@@ -73,7 +82,12 @@ export async function refreshUserNotifications(options: { force?: boolean } = {}
     activeToken = token;
     refreshVersion += 1;
     inFlightRefresh = null;
-    publishNotificationState({ notifications: [], isLoading: true });
+    publishNotificationState({
+      notifications: [],
+      isLoading: true,
+      hasLoaded: false,
+      newNotification: null,
+    });
   }
 
   if (inFlightRefresh && !options.force) {
@@ -87,11 +101,28 @@ export async function refreshUserNotifications(options: { force?: boolean } = {}
         return;
       }
 
+      if (result.message && !result.unauthorized) {
+        publishNotificationState({
+          ...notificationState,
+          isLoading: false,
+          message: result.message,
+        });
+        return;
+      }
+
+      const newlyArrived = notificationState.hasLoaded
+        ? result.notifications.find((notification) =>
+            !notificationState.notifications.some((previous) => previous.id === notification.id) &&
+            (notification.status === "sent" || !notification.status)
+          ) || notificationState.newNotification || null
+        : null;
       publishNotificationState({
         notifications: result.notifications,
         isLoading: false,
+        hasLoaded: true,
         message: result.message,
         unauthorized: result.unauthorized,
+        newNotification: result.unauthorized ? null : newlyArrived,
       });
     })
     .finally(() => {
@@ -102,6 +133,16 @@ export async function refreshUserNotifications(options: { force?: boolean } = {}
 
   inFlightRefresh = currentRefresh;
   return currentRefresh;
+}
+
+export function dismissNotificationToast(notificationId: string) {
+  if (notificationState.newNotification?.id !== notificationId) {
+    return;
+  }
+  publishNotificationState({
+    ...notificationState,
+    newNotification: null,
+  });
 }
 
 export async function setNotificationReadState(notificationId: string, read: boolean) {
@@ -267,6 +308,7 @@ export async function getUserNotifications(): Promise<NotificationFetchResult> {
 
   try {
     const response = await fetch(`${API_URL}/api/notifications`, {
+      cache: "no-store",
       headers: { Authorization: `Bearer ${token}` },
     });
     const payload = (await response.json()) as {

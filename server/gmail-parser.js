@@ -127,7 +127,7 @@ function hasPersonalizedApplicationOutcome({ subject = '', text = '' }) {
     /\b(?:invites?|invited)\s+you\b[^.!?\n]{0,100}\b(?:interview|assessment)\b/i,
     /\byour interview invitation\b/i,
     /\byou\s+(?:are|'re|have been)\s+shortlisted\b[^.!?\n]{0,80}\b(?:position|role|application)\b/i,
-    /\b(?:pleased|would like)\s+to\s+offer\s+you\b/i,
+    /\b(?:pleased|would like)\s+to\s+offer\s+you\s+(?:(?:a|an|the)\s+)?(?:[a-z][a-z0-9-]*\s+){0,5}(?:position|role|job)\b/i,
     /\byou\s+(?:are|'re|have been)\s+offered\s+(?:a|the)\s+(?:position|role|job)\b/i,
     /\byour\s+(?:job\s+)?offer(?:\s+(?:letter|of employment|details|for (?:the\s+)?(?:position|role))|\s+(?:is|has been)\s+(?:ready|attached|available))\b/i,
     /\bregret to inform you\b[^.!?\n]{0,100}\b(?:not selected|unsuccessful|not progressing)\b/i,
@@ -153,8 +153,8 @@ function classifyApplicationEmail({ subject = '', text = '', from = '' }, { allo
     pattern.test(`${subject}\n${text}`.slice(0, 100000))
   );
   if (
-    !personalizedOutcome &&
-    (nonApplicationNotification || (!allowGenericJobAlert && genericJobAlert))
+    nonApplicationNotification ||
+    (genericJobAlert && (!allowGenericJobAlert || !personalizedOutcome))
   ) {
     return {
       status: null,

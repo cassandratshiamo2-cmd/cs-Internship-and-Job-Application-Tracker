@@ -6,6 +6,7 @@ import { useEffect, useSyncExternalStore, type ReactNode } from "react";
 import { getCurrentUserName, setCurrentUser, subscribeToUserChanges } from "@/lib/mock-data";
 import {
   clearNotificationState,
+  dismissNotificationToast,
   getNotificationState,
   getServerNotificationState,
   refreshUserNotifications,
@@ -36,6 +37,7 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
   const unreadCount = notificationState.notifications.filter(
     (notification) => notification.status === "sent" && notification.read === false
   ).length;
+  const newNotification = notificationState.newNotification;
 
   useEffect(() => {
     void refreshUserNotifications();
@@ -58,6 +60,14 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
       document.removeEventListener("visibilitychange", refreshWhenFocused);
     };
   }, [pathname, userName]);
+
+  useEffect(() => {
+    if (!newNotification) return;
+    const timeout = window.setTimeout(() => {
+      dismissNotificationToast(newNotification.id);
+    }, 8000);
+    return () => window.clearTimeout(timeout);
+  }, [newNotification]);
 
   const handleLogout = () => {
     clearNotificationState();
@@ -131,6 +141,39 @@ export function AppShell({ children, title }: { children: ReactNode; title: stri
           })}
         </nav>
       </header>
+
+      {newNotification ? (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="fixed right-4 top-4 z-50 w-[min(24rem,calc(100vw-2rem))] rounded-2xl border border-[#bfe8df] bg-white p-4 shadow-[0_12px_36px_rgba(15,118,110,0.2)]"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="font-semibold text-slate-800">{newNotification.title}</p>
+              <p className="mt-1 whitespace-pre-line text-sm text-slate-600">{newNotification.message}</p>
+              {newNotification.applicationId ? (
+                <Link
+                  href={`/applications/${encodeURIComponent(newNotification.applicationId)}`}
+                  onClick={() => dismissNotificationToast(newNotification.id)}
+                  className="mt-2 inline-block text-sm font-semibold text-[#147d82] underline-offset-2 hover:underline"
+                >
+                  View application
+                </Link>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              aria-label="Dismiss notification"
+              onClick={() => dismissNotificationToast(newNotification.id)}
+              className="rounded-full px-2 py-1 text-slate-500 hover:bg-slate-100"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</main>
     </div>

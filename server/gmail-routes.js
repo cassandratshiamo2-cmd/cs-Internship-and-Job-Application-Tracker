@@ -91,9 +91,11 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
   });
 
   router.get('/status', authenticateRequest, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
     try {
       const result = await pool.query(
-        'SELECT gmail_address, is_connected, last_sync_at, last_sync_error ' +
+        'SELECT gmail_address, is_connected, last_sync_at, last_sync_attempt_at, ' +
+          'last_successful_sync_at, last_sync_error ' +
           'FROM gmail_connections WHERE user_id = $1',
         [req.user.id]
       );
@@ -102,6 +104,8 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         connected: Boolean(connection?.is_connected),
         email: connection?.is_connected ? connection.gmail_address : null,
         lastSyncAt: connection?.last_sync_at || null,
+        lastSyncAttemptAt: connection?.last_sync_attempt_at || null,
+        lastSuccessfulSyncAt: connection?.last_successful_sync_at || null,
         lastSyncError: connection?.last_sync_error || null,
       });
     } catch (error) {

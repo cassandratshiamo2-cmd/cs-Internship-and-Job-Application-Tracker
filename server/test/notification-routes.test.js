@@ -79,6 +79,7 @@ test('GET notifications returns only rows whose linked application has the same 
   const payload = await response.json();
 
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.deepEqual(payload.notifications.map(({ id }) => id), ['51']);
   assert.match(pool.queries[1].sql, /notification\.user_id = \$1/);
   assert.match(pool.queries[1].sql, /application\.user_id = notification\.user_id/);

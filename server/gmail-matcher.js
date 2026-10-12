@@ -132,6 +132,7 @@ function scoreApplicationMatch(email, application) {
     companyTextMatch,
     companySubjectMatch,
     companyBodyMatch,
+    domainMatch,
     positionMatch,
     exactPositionMatch,
   };
@@ -163,7 +164,10 @@ function matchApplication(email, applications, options = {}) {
         ...match,
         score,
         rawScore: match.score,
-        candidateIdEligible: match.companyTextMatch && !shadowedCompanyMatch,
+        contentEvidence: match.companyTextMatch || match.positionMatch,
+        candidateIdEligible:
+          (match.companyTextMatch || match.positionMatch || match.domainMatch) &&
+          !shadowedCompanyMatch,
       };
     })
     .sort((left, right) => right.score - left.score || right.rawScore - left.rawScore);
@@ -177,7 +181,13 @@ function matchApplication(email, applications, options = {}) {
     `${email.subject || ''} ${email.text || ''}`
   );
 
-  if (top && top.score >= minimumConfidence && unique && (!genericMultiCompanyAlert || options.allowMultiCompanyAlert)) {
+  if (
+    top &&
+    top.score >= minimumConfidence &&
+    unique &&
+    top.contentEvidence &&
+    (!genericMultiCompanyAlert || options.allowMultiCompanyAlert)
+  ) {
     return {
       outcome: 'matched',
       application: top.application,

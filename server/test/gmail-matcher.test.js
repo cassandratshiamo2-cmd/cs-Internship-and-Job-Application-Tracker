@@ -51,6 +51,21 @@ test('matches company aliases with legal and holdings suffixes', () => {
   assert.equal(result.application.id, '18');
 });
 
+test('sender domain alone can propose an application but cannot trigger an automatic match', () => {
+  const result = matchApplication({
+    from: 'recruiting@acme.com',
+    subject: 'Application update',
+    text: 'We are pleased to offer you a position. Please review the attached details.',
+  }, [
+    { id: '19', company: 'Acme Technology', position: 'Junior Software Engineer', status: 'Interview' },
+  ]);
+
+  assert.equal(result.outcome, 'review');
+  assert.equal(result.application, null);
+  assert.deepEqual(result.candidateIds, ['19']);
+  assert.ok(result.confidence >= 0.72);
+});
+
 test('queues an email when multiple applications at the same company are plausible', () => {
   const result = matchApplication({
     from: 'recruiting@acme.com',
@@ -399,7 +414,7 @@ test('exact company matching does not bypass terminal status transition protecti
 test('matches the Shoprite interview invitation and fills status, date, and time', () => {
   const email = {
     from: 'careers@shoprite.co.za',
-    subject: 'INTERVIEW INVITATION',
+    subject: 'Shoprite Graduate - INTERVIEW INVITATION',
     text: 'YOU ARE INVITED TO AN INTERVIEW ON THE 09 OCTOBER 2026 AT 08:30',
   };
   const application = {

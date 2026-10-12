@@ -6,6 +6,8 @@ export type GmailConnectionStatus = {
   connected: boolean;
   email: string | null;
   lastSyncAt: string | null;
+  lastSyncAttemptAt: string | null;
+  lastSuccessfulSyncAt: string | null;
   lastSyncError: string | null;
 };
 
@@ -71,7 +73,10 @@ async function apiRequest<T>(path: string, options: ApiOptions): Promise<T> {
 }
 
 export function getGmailStatus(token: string) {
-  return apiRequest<GmailConnectionStatus>('/status', { token });
+  return apiRequest<GmailConnectionStatus>('/status', {
+    token,
+    cache: 'no-store',
+  });
 }
 
 export async function getGmailReviewQueue(token: string) {
