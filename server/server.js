@@ -17,6 +17,7 @@ const {
 const { validateApplicationInput } = require('./application-validation');
 const { checkDatabaseHealth } = require('./health-check');
 const { createStatusChangeNotification } = require('./gmail-notifications');
+const { buildApplicationUpdateQuery } = require('./application-update-query');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -1425,71 +1426,28 @@ app.put(
           await client.query('ROLLBACK');
           return res.status(404).json({ message: 'Application not found.' });
         }
-        const result = await client.query(
-        'UPDATE applications ' +
-          'SET ' +
-          'company = $3, ' +
-          'position = $4, ' +
-          'application_date = $5::date, ' +
-          'type = $6, ' +
-          'status = $7, ' +
-          'arrangement = $8, ' +
-          'notes = $9, ' +
-          'application_link = $10, ' +
-          'interview_date = $11::date, ' +
-          'interview_time = $12::time, ' +
-          'interview_type = $13, ' +
-          'interview_location = CASE ' +
-            "WHEN $7 <> 'Interview' THEN NULL " +
-            'WHEN $16::boolean THEN NULLIF($17, \'\') ' +
-            'ELSE interview_location END, ' +
-          'interview_meeting_url = CASE ' +
-            "WHEN $7 <> 'Interview' THEN NULL " +
-            'WHEN $18::boolean THEN NULLIF($19, \'\') ' +
-            'ELSE interview_meeting_url END, ' +
-          'notification_channels = $14::text[], ' +
-          'interview_email = $15, ' +
-          'updated_at = NOW() ' +
-        'WHERE id = $1 AND user_id = $2 ' +
-        'RETURNING ' +
-          'id, ' +
-          'company, ' +
-          'position, ' +
-          'application_date::text AS date, ' +
-          'type, ' +
-          'status, ' +
-          'arrangement, ' +
-          'notes, ' +
-          'application_link AS "applicationLink", ' +
-          'interview_date::text AS "interviewDate", ' +
-          'interview_time AS "interviewTime", ' +
-          'interview_type AS "interviewType", ' +
-          'interview_location AS "interviewLocation", ' +
-          'interview_meeting_url AS "interviewMeetingUrl", ' +
-          'notification_channels AS "notificationChannels", ' +
-          'interview_email AS "interviewEmail"',
-          [
-            applicationId,
-            req.user.id,
-            company,
-            position,
-            date,
-            type,
-            status,
-            arrangement,
-            notes,
-            applicationLink || null,
-            status === 'Interview' ? interviewDate : null,
-            status === 'Interview' ? interviewTime : null,
-            status === 'Interview' ? interviewType || null : null,
-            status === 'Interview' ? normalizedChannels : [],
-            status === 'Interview' ? interviewEmail || null : null,
-            hasInterviewLocation,
-            interviewLocation,
-            hasInterviewMeetingUrl,
-            interviewMeetingUrl,
-          ]
-        );
+        const updateQuery = buildApplicationUpdateQuery({
+          applicationId,
+          userId: req.user.id,
+          company,
+          position,
+          date,
+          type,
+          status,
+          arrangement,
+          notes,
+          applicationLink,
+          interviewDate,
+          interviewTime,
+          interviewType,
+          notificationChannels: normalizedChannels,
+          interviewEmail,
+          hasInterviewLocation,
+          interviewLocation,
+          hasInterviewMeetingUrl,
+          interviewMeetingUrl,
+        });
+        const result = await client.query(updateQuery.text, updateQuery.values);
 
         if (result.rowCount === 0) {
           await client.query('ROLLBACK');
