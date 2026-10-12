@@ -1063,7 +1063,15 @@ function createGmailSyncService({
         const gmail = await buildGmailClient(connection);
         let syncResult;
         if (retryMessageId) {
-          const outcome = await processMessage(connection, gmail, retryMessageId, true, assertLeaseOwned);
+          let outcome;
+          try {
+            outcome = await processMessage(connection, gmail, retryMessageId, true, assertLeaseOwned);
+          } catch (error) {
+            if (error.code !== 'GMAIL_MESSAGE_NOT_FOUND') throw error;
+            console.info('Gmail message unavailable during retry:', getSafeSyncErrorDetails(error));
+            await recordUnavailableMessage(connection, retryMessageId);
+            outcome = 'unavailable';
+          }
           syncResult = {
             processed: 1,
             outcomes: [outcome],

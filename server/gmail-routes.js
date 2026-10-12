@@ -289,8 +289,11 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           retryAfterSeconds,
         });
       }
+      const unavailable = result.outcomes?.includes('unavailable');
       return res.status(200).json({
-        message: 'Email retry completed.',
+        message: unavailable
+          ? 'This email is no longer available in Gmail, so it could not be retried.'
+          : 'Email retry completed.',
         processed: result.processed,
         outcomes: result.outcomes,
       });
