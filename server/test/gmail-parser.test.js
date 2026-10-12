@@ -20,6 +20,7 @@ test('classifies supported application status email language', () => {
     ['Interview invitation', 'We would like to interview you.', 'Interview'],
     ['Interview invitation', 'You have been shortlisted for an interview. Please confirm your availability.', 'Interview'],
     ['Offer of employment', 'We are pleased to offer you the position.', 'Offer'],
+    ['Job offer', 'Dear candidate, you are offered a position at Microsoft. Kind regards, Microsoft recruitment team', 'Offer'],
     ['Position selected', 'You have been selected for the position of Analyst.', 'Offer'],
     ['Application update', 'We regret to inform you that you were not selected.', 'Rejected'],
     ['Application saved', 'Your application has been saved.', 'Saved'],
@@ -42,6 +43,7 @@ test('status wording in a subject alone is not enough to classify a message', ()
   const cases = [
     ['Interview invitation', 'Here is our quarterly careers newsletter.'],
     ['Offer of employment', 'Please see the company news update below.'],
+    ['Job offer', 'We are excited to announce company news.'],
     ['Application received', 'This is a general account notification.'],
     ['You have been shortlisted', 'We are sharing this months opportunities.'],
     ['Application rejected', 'Please review the attached company update.'],

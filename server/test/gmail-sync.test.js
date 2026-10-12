@@ -2318,6 +2318,119 @@ test('a stale same-status interview email is sent for review without changing ne
   assert.equal(processedRows.get('stale-interview-details').outcome, 'review');
 });
 
+test('a Microsoft offer updates only a confident unique match and protects ambiguous or stale applications', async () => {
+  const raw = Buffer.from([
+    'From: cassandratshiamo2@gmail.com',
+    'To: applyflow@example.com',
+    'Subject: Job offer',
+    'Date: Thu, 08 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Dear candidate, you are offered a position at Microsoft. Kind regards, Microsoft recruitment team',
+  ].join('\r\n')).toString('base64url');
+  const scenarios = [
+    {
+      name: 'unique company match',
+      applications: [
+        {
+          id: 101,
+          company: 'Microsoft',
+          position: 'Full stack developer',
+          status: 'Interview',
+          updated_at: new Date('2026-10-07T06:00:00Z'),
+        },
+        {
+          id: 102,
+          company: 'Google',
+          position: 'Software Engineer',
+          status: 'Applied',
+          updated_at: new Date('2026-10-07T06:00:00Z'),
+        },
+      ],
+      expectedOutcome: 'updated',
+      expectedApplicationId: 101,
+      expectedStatuses: ['Offer', 'Applied'],
+      expectedWrites: 1,
+    },
+    {
+      name: 'ambiguous same-company match',
+      applications: [
+        {
+          id: 103,
+          company: 'Microsoft',
+          position: 'Full stack developer',
+          status: 'Interview',
+          updated_at: new Date('2026-10-07T06:00:00Z'),
+        },
+        {
+          id: 104,
+          company: 'Microsoft',
+          position: 'Data Analyst',
+          status: 'Applied',
+          updated_at: new Date('2026-10-07T06:00:00Z'),
+        },
+      ],
+      expectedOutcome: 'review',
+      expectedApplicationId: undefined,
+      expectedStatuses: ['Interview', 'Applied'],
+      expectedWrites: 0,
+    },
+    {
+      name: 'stale email',
+      applications: [
+        {
+          id: 105,
+          company: 'Microsoft',
+          position: 'Full stack developer',
+          status: 'Interview',
+          updated_at: new Date('2026-10-08T07:00:00Z'),
+        },
+      ],
+      expectedOutcome: 'review',
+      expectedApplicationId: 105,
+      expectedStatuses: ['Interview'],
+      expectedWrites: 0,
+    },
+  ];
+
+  for (const [index, scenario] of scenarios.entries()) {
+    const messageId = `microsoft-job-offer-${index}`;
+    const { service, calls, processedRows } = createTestService({
+      applications: scenario.applications,
+      historyList: async () => ({
+        data: {
+          historyId: `history-${messageId}`,
+          history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+        },
+      }),
+      messageGet: async () => ({
+        data: {
+          labelIds: [],
+          raw,
+          threadId: `thread-${messageId}`,
+          internalDate: String(new Date('2026-10-08T06:00:00Z').getTime()),
+        },
+      }),
+    });
+
+    const result = await service.syncConnection(7);
+
+    assert.deepEqual(result.outcomes, [scenario.expectedOutcome], scenario.name);
+    assert.deepEqual(
+      scenario.applications.map((application) => application.status),
+      scenario.expectedStatuses,
+      scenario.name
+    );
+    assert.equal(calls.applicationUpdates, scenario.expectedWrites, scenario.name);
+    assert.equal(
+      processedRows.get(messageId).applicationId,
+      scenario.expectedApplicationId,
+      scenario.name
+    );
+    assert.equal(processedRows.get(messageId).detectedStatus, 'Offer', scenario.name);
+  }
+});
+
 test('scenarios 1-7: status transitions run through matching, persistence, and application updates', async () => {
   const cases = [
     { current: 'Applied', detected: 'Interview', expected: 'updated', expectedStatus: 'Interview', interview: true },

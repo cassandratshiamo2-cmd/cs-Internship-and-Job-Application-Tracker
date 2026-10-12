@@ -29,6 +29,7 @@ const STATUS_RULES = [
       /employment offer/i,
       /pleased to offer/i,
       /we would like to offer you/i,
+      /\byou\s+(?:are|'re|have been)\s+offered\s+(?:a|the)\s+(?:position|role|job)\b/i,
       /selected for the (?:position|role|job) of/i,
     ],
   },
