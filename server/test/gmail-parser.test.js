@@ -79,6 +79,15 @@ test('assessment invitation subject with unrelated body content is not enough to
   assert.equal(classification.status, null);
 });
 
+test('interview invitation subject contributes when the body has no interview wording', () => {
+  const classification = classifyApplicationEmail({
+    subject: 'Interview Invitation – Test Company Alpha',
+    text: 'Dear applicant, please review the schedule details below.',
+  });
+
+  assert.equal(classification.status, 'Interview');
+});
+
 test('does not classify unrelated email content', () => {
   assert.equal(
     classifyApplicationEmail({ subject: 'Monthly newsletter', text: 'Here are this month updates.' }).status,
@@ -194,6 +203,36 @@ test('keeps genuine personalized recruitment updates despite promotional-looking
     assert.equal(result.status, expectedStatus, subject);
     assert.equal(result.ignored, undefined, subject);
   }
+});
+
+test('retains personalized outcomes in job-alert contexts but ignores generic promotions', () => {
+  const outcomes = [
+    ['Thank you for applying for the Shoprite Cashier position.', 'Applied'],
+    ['You are invited to an interview for the Shoprite Cashier position.', 'Interview'],
+    ['Please complete the assessment for your Shoprite Cashier application.', 'Assessment'],
+    ['We are pleased to offer you the Cashier position at Shoprite.', 'Offer'],
+    ['We regret to inform you that your Shoprite Cashier application was unsuccessful.', 'Rejected'],
+  ];
+
+  for (const [text, expectedStatus] of outcomes) {
+    const email = { subject: 'Weekly job offers', text };
+    const normalClassification = classifyApplicationEmail(email);
+    const alertOverrideClassification = classifyApplicationEmail(email, {
+      allowGenericJobAlert: true,
+    });
+
+    assert.equal(normalClassification.ignored, true, expectedStatus);
+    assert.equal(alertOverrideClassification.status, expectedStatus, expectedStatus);
+    assert.equal(alertOverrideClassification.ignored, undefined, expectedStatus);
+  }
+
+  const genericPromotion = classifyApplicationEmail({
+    subject: 'Weekly job offers',
+    text: 'Browse our latest job offers and read interview and assessment tips for job seekers.',
+  }, { allowGenericJobAlert: true });
+
+  assert.equal(genericPromotion.status, null);
+  assert.equal(genericPromotion.ignored, true);
 });
 
 test('generic Pnet newsletters remain ignored when promotional copy contains offer language', () => {
@@ -411,6 +450,32 @@ test('uses SAST by default and honors supported explicit timezones', () => {
   assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00.' }).interviewTime, '10:00');
   assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 SAST.' }).interviewTime, '10:00');
   assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 UTC.' }).interviewTime, '12:00');
+});
+
+test('rejects invalid interview times and converts UTC across midnight into SAST', () => {
+  for (const time of ['25:00', '10:60']) {
+    assert.deepEqual(
+      extractInterviewDateTime({ text: `Interview: 15 October 2026 at ${time}.` }),
+      {
+        interviewDate: '2026-10-15',
+        interviewTime: null,
+        ambiguous: false,
+        hasUnsupportedTimezone: false,
+      },
+    );
+  }
+
+  assert.deepEqual(
+    extractInterviewDateTime({
+      text: 'Interview: 15 October 2026 at 23:30 UTC.',
+    }),
+    {
+      interviewDate: '2026-10-16',
+      interviewTime: '01:30',
+      ambiguous: false,
+      hasUnsupportedTimezone: false,
+    },
+  );
 });
 
 test('rejects ambiguous numeric dates and unsupported explicit timezones', () => {
