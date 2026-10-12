@@ -1077,7 +1077,7 @@ test('the worker releases its database lock when loading connections fails', asy
   assert.equal(heldLocks.has('worker:worker'), false);
 });
 
-test('the Gmail worker waits for its first interval and does not overlap local sweeps', async () => {
+test('the Gmail worker starts an initial sweep and does not overlap local sweeps', async () => {
   let runWorker;
   let scheduledInterval;
   let workerCalls = 0;
@@ -1103,15 +1103,12 @@ test('the Gmail worker waits for its first interval and does not overlap local s
 
   assert.equal(returnedTimer, timer);
   assert.equal(scheduledInterval, 60000);
-  assert.equal(workerCalls, 0);
-
-  const firstTick = runWorker();
   await firstSweepStarted;
   await runWorker();
   assert.equal(workerCalls, 1);
 
   releaseFirstSweep();
-  await firstTick;
+  await new Promise((resolve) => setImmediate(resolve));
   await runWorker();
   assert.equal(workerCalls, 2);
 });
@@ -1134,7 +1131,7 @@ test('the Gmail worker clamps short intervals and defaults invalid intervals', (
   } finally {
     console.warn = originalWarn;
   }
-  assert.equal(invalidInterval, 120000);
+  assert.equal(invalidInterval, 60000);
   assert.equal(warningCount, 1);
 });
 
@@ -1217,7 +1214,7 @@ test('an ambiguous lease acquisition failure is cleaned up by its owner token', 
   assert.equal(isLockHeld(), false);
 });
 
-test('a hanging Gmail request times out, releases its lock, and recovers on retry', async () => {
+test('a wrapper-generated Gmail timeout retries once and completes after a successful request', async () => {
   let historyAttempts = 0;
   let timedOutSignal;
   const { calls, service, isLockHeld } = createTestService({
@@ -1228,7 +1225,32 @@ test('a hanging Gmail request times out, releases its lock, and recovers on retr
         timedOutSignal = requestOptions.signal;
         return new Promise(() => {});
       }
-      return { data: { historyId: 'history-after-timeout', history: [] } };
+      return { data: { historyId: 'history-after-timeout-retry', history: [] } };
+    },
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.equal(timedOutSignal.aborted, true);
+  assert.equal(historyAttempts, 2);
+  assert.deepEqual(calls.delays, [100]);
+  assert.deepEqual(calls.historyCursorUpdates, ['history-after-timeout-retry']);
+  assert.deepEqual(result.outcomes, []);
+  assert.equal(isLockHeld(), false);
+});
+
+test('repeated wrapper-generated Gmail timeouts stop at the retry limit and recover on a later sync', async () => {
+  let historyAttempts = 0;
+  let timedOutSignal;
+  const { calls, service, isLockHeld } = createTestService({
+    requestTimeoutMs: 10,
+    historyList: async (requestOptions) => {
+      historyAttempts += 1;
+      if (historyAttempts <= 4) {
+        timedOutSignal = requestOptions.signal;
+        return new Promise(() => {});
+      }
+      return { data: { historyId: 'history-after-timeout-exhaustion', history: [] } };
     },
   });
 
@@ -1237,13 +1259,15 @@ test('a hanging Gmail request times out, releases its lock, and recovers on retr
   assert.equal(calls.oauthTimeout, 10);
   assert.deepEqual(calls.lockQueryTimeouts, []);
   assert.deepEqual(calls.historyCursorUpdates, []);
+  assert.equal(historyAttempts, 4);
+  assert.deepEqual(calls.delays, [100, 200, 400]);
   assert.equal(isLockHeld(), false);
 
   const retryResult = await service.syncConnection(7);
   assert.equal(retryResult.inProgress, undefined);
-  assert.equal(historyAttempts, 2);
+  assert.equal(historyAttempts, 5);
   assert.equal(isLockHeld(), false);
-  assert.deepEqual(calls.historyCursorUpdates, ['history-after-timeout']);
+  assert.deepEqual(calls.historyCursorUpdates, ['history-after-timeout-exhaustion']);
 });
 
 test('an expired Gmail history cursor resets and falls back to initial message sync', async () => {
@@ -1263,6 +1287,26 @@ test('an expired Gmail history cursor resets and falls back to initial message s
   assert.equal(calls.list, 1);
   assert.equal(result.initialSyncComplete, true);
   assert.deepEqual(calls.initialSyncCursorUpdates, ['initial-history', 'initial-history']);
+});
+
+test('a non-expiry Gmail history 404 fails without resetting the cursor', async () => {
+  const { calls, service } = createTestService({
+    historyList: async () => {
+      const error = new Error('Unexpected history service failure.');
+      error.code = '404';
+      error.response = {
+        status: 404,
+        data: { error: { errors: [{ reason: 'backendError' }] } },
+      };
+      throw error;
+    },
+  });
+
+  await assert.rejects(service.syncConnection(7), /Gmail sync failed/);
+
+  assert.equal(calls.historyResets, 0);
+  assert.equal(calls.profile, 0);
+  assert.equal(calls.list, 0);
 });
 
 test('scenario 13: malformed message records a warning and the next valid email still applies', async () => {
@@ -1808,6 +1852,94 @@ test('a Pnet alert with explicit existing-application context can still be appli
   assert.equal(application.status, 'Rejected');
 });
 
+test('the exact Pnet promotional offer wording cannot update an application or create a notification', async () => {
+  const application = {
+    id: 76,
+    company: 'Shoprite',
+    position: 'Cashier',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: alerts@pnet.co.za',
+    'To: applyflow@example.com',
+    'Subject: Pnet Job Alert - Shoprite Cashier opportunities',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Your application profile matches Shoprite Cashier vacancies, and we are pleased to offer you access to these recommended roles and interview tips.',
+  ].join('\r\n')).toString('base64url');
+  const { service, processedRows, calls } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-pnet-promotional-offer',
+        history: [{ messagesAdded: [{ message: { id: 'pnet-promotional-offer' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: { labelIds: [], raw, internalDate: String(Date.now()) },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['ignored']);
+  assert.equal(processedRows.get('pnet-promotional-offer').outcome, 'ignored');
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(calls.notifications.length, 0);
+  assert.equal(application.status, 'Applied');
+});
+
+test('a genuine transactional Pnet job offer updates only the matching application', async () => {
+  const application = {
+    id: 78,
+    company: 'Shoprite',
+    position: 'Cashier',
+    status: 'Applied',
+    updated_at: new Date('2026-10-07T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: alerts@pnet.co.za',
+    'To: applyflow@example.com',
+    'Subject: Pnet Job Alert - update on your application',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Shoprite Cashier: We are pleased to offer you the Cashier position following your application.',
+  ].join('\r\n')).toString('base64url');
+  const { service, processedRows, calls } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-pnet-transactional-offer',
+        history: [{ messagesAdded: [{ message: { id: 'pnet-transactional-offer' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: { labelIds: [], raw, internalDate: String(Date.now()) },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(processedRows.get('pnet-transactional-offer').outcome, 'updated');
+  assert.equal(calls.applicationUpdates, 1);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(application.status, 'Offer');
+});
+
 test('Shoprite outcome email matches Cashier and records Interview to Rejected in history', async () => {
   const application = {
     id: 77,
@@ -2127,10 +2259,30 @@ test('a Gmail API authentication failure remains fatal and releases the connecti
   });
 
   await assert.rejects(service.syncConnection(7), /Reconnect Gmail/);
+  assert.equal(calls.get, 1);
+  assert.deepEqual(calls.delays, []);
   assert.equal(calls.unlocks, 1);
   assert.equal(isLockHeld(), false);
   assert.ok(calls.connectionUpdates.some((sql) =>
-    sql.includes('last_sync_at = NOW(), last_sync_error = $2')
+    sql.includes('last_sync_at = NOW(), last_sync_attempt_at = NOW()') &&
+    sql.includes('last_sync_error = $2')
+  ));
+});
+
+test('successful sync persists distinct last-attempt and last-success timestamps', async () => {
+  const { calls, service } = createTestService({
+    historyList: async () => ({
+      data: { historyId: 'history-success-timestamps', history: [] },
+    }),
+  });
+
+  await service.syncConnection(7);
+
+  assert.ok(calls.connectionUpdates.some((sql) =>
+    sql.includes('last_sync_attempt_at = NOW()')
+  ));
+  assert.ok(calls.connectionUpdates.some((sql) =>
+    sql.includes('last_successful_sync_at = NOW()')
   ));
 });
 
@@ -2156,6 +2308,66 @@ test('quota errors use bounded exponential retry and then a persisted cooldown',
   assert.equal(repeatedResult.quotaLimited, true);
   assert.equal(repeatedResult.retryAfterSeconds, 90);
   assert.equal(attemptCount, 4);
+});
+
+test('transient Gmail server failures use bounded exponential retries', async () => {
+  let attemptCount = 0;
+  const { calls, service } = createTestService({
+    historyList: async () => {
+      attemptCount += 1;
+      if (attemptCount < 4) {
+        const error = attemptCount % 2 === 0
+          ? new Error('Temporary Gmail service failure.')
+          : new Error('Temporary Gmail network failure.');
+        if (attemptCount === 1) error.code = 'ETIMEDOUT';
+        if (attemptCount === 2) error.response = { status: 503 };
+        if (attemptCount === 3) error.code = 'ECONNRESET';
+        throw error;
+      }
+      return { data: { historyId: 'history-after-retry', history: [] } };
+    },
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.equal(attemptCount, 4);
+  assert.deepEqual(calls.delays, [100, 200, 400]);
+  assert.deepEqual(calls.historyCursorUpdates, ['history-after-retry']);
+  assert.deepEqual(result.outcomes, []);
+});
+
+test('transient Gmail server failures stop after the retry limit', async () => {
+  let attemptCount = 0;
+  const { calls, service } = createTestService({
+    historyList: async () => {
+      attemptCount += 1;
+      const error = new Error('Temporary Gmail service failure.');
+      error.response = { status: 503 };
+      throw error;
+    },
+  });
+
+  await assert.rejects(service.syncConnection(7), /Gmail sync failed/);
+
+  assert.equal(attemptCount, 4);
+  assert.deepEqual(calls.delays, [100, 200, 400]);
+});
+
+test('permanent Gmail request errors are not retried', async () => {
+  let attemptCount = 0;
+  const { calls, service } = createTestService({
+    historyList: async () => {
+      attemptCount += 1;
+      const error = new Error('Invalid Gmail request.');
+      error.response = { status: 400 };
+      throw error;
+    },
+  });
+
+  await assert.rejects(service.syncConnection(7), /Gmail sync failed/);
+
+  assert.equal(attemptCount, 1);
+  assert.deepEqual(calls.delays, []);
 });
 
 test('quota detection distinguishes quota-related 403 responses from permission errors', () => {

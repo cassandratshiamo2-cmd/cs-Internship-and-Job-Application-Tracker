@@ -18,6 +18,7 @@ const { validateApplicationInput } = require('./application-validation');
 const { checkDatabaseHealth } = require('./health-check');
 const { createStatusChangeNotification } = require('./gmail-notifications');
 const { buildApplicationUpdateQuery } = require('./application-update-query');
+const { ensureGmailSyncTimestamps } = require('./gmail-connection-schema');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -240,6 +241,8 @@ async function ensureDatabase() {
       'quota_failure_count INTEGER NOT NULL DEFAULT 0, ' +
       'is_connected BOOLEAN NOT NULL DEFAULT TRUE, ' +
       'last_sync_at TIMESTAMPTZ, ' +
+      'last_sync_attempt_at TIMESTAMPTZ, ' +
+      'last_successful_sync_at TIMESTAMPTZ, ' +
       'last_sync_error TEXT, ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
       'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
@@ -264,6 +267,8 @@ async function ensureDatabase() {
     'ALTER TABLE gmail_connections ' +
       'ADD COLUMN IF NOT EXISTS quota_failure_count INTEGER NOT NULL DEFAULT 0'
   );
+
+  await ensureGmailSyncTimestamps(pool);
 
   await pool.query(
     'CREATE TABLE IF NOT EXISTS gmail_oauth_states (' +

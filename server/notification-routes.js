@@ -4,6 +4,7 @@ function createNotificationRouter({ pool, authenticateRequest }) {
   const router = express.Router();
 
   router.get('/', authenticateRequest, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
     try {
       await pool.query(
         'DELETE FROM notification_jobs ' +

@@ -53,6 +53,8 @@ export default function GmailIntegrationPage() {
   const [isWorking, setIsWorking] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [statusRefreshError, setStatusRefreshError] = useState('');
+  const [statusCheckedAt, setStatusCheckedAt] = useState<string | null>(null);
 
   async function loadIntegrationData(activeToken: string) {
     const [nextStatus, nextMessages, nextHistory, applicationsResponse] = await Promise.all([
@@ -71,6 +73,7 @@ export default function GmailIntegrationPage() {
       throw new Error(applicationsPayload.message || 'Unable to load applications.');
     }
     setStatus(nextStatus);
+    setStatusCheckedAt(new Date().toISOString());
     setMessages(nextMessages);
     setHistory(nextHistory);
     setApplications(applicationsPayload.applications || []);
@@ -108,6 +111,46 @@ export default function GmailIntegrationPage() {
       .catch((loadError) => setError(loadError instanceof Error ? loadError.message : 'Unable to load Gmail settings.'))
       .finally(() => setIsLoading(false));
   }, [token]);
+
+  useEffect(() => {
+    if (!token || !status?.connected) return;
+
+    let active = true;
+    let requestInFlight = false;
+    const refreshStatus = async () => {
+      if (!active || document.visibilityState !== 'visible' || requestInFlight) return;
+      requestInFlight = true;
+      try {
+        const nextStatus = await getGmailStatus(token);
+        if (active) {
+          setStatus(nextStatus);
+          setStatusRefreshError('');
+          setStatusCheckedAt(new Date().toISOString());
+        }
+      } catch (refreshError) {
+        if (active) {
+          setStatusRefreshError(
+            refreshError instanceof Error
+              ? refreshError.message
+              : 'Unable to refresh Gmail sync status.'
+          );
+        }
+      } finally {
+        requestInFlight = false;
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void refreshStatus();
+    };
+    const intervalId = window.setInterval(() => void refreshStatus(), 30000);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [status?.connected, token]);
 
   async function refreshData() {
     if (!token) return null;
@@ -276,7 +319,17 @@ export default function GmailIntegrationPage() {
                 <>
                   <p className="mt-1 text-sm text-slate-600">Connected as {status.email}</p>
                   <p className="mt-1 text-xs text-slate-500">
-                    Last sync attempt: {status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : 'Not synced yet'}
+                    Last sync attempt: {status.lastSyncAttemptAt || status.lastSyncAt
+                      ? new Date(status.lastSyncAttemptAt || status.lastSyncAt || '').toLocaleString()
+                      : 'Not synced yet'}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Last successful sync: {status.lastSuccessfulSyncAt
+                      ? new Date(status.lastSuccessfulSyncAt).toLocaleString()
+                      : 'No successful sync yet'}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Status checked: {statusCheckedAt ? new Date(statusCheckedAt).toLocaleString() : 'Checking...'} · refreshes while this page is visible
                   </p>
                 </>
               ) : (
@@ -303,6 +356,11 @@ export default function GmailIntegrationPage() {
           {status?.lastSyncError ? (
             <p role="alert" className="mt-4 rounded-xl border border-[#f8c8d5] bg-[#fff4f7] px-3 py-2 text-sm text-[#b3506e]">
               Last sync error: {status.lastSyncError}
+            </p>
+          ) : null}
+          {statusRefreshError ? (
+            <p role="alert" className="mt-4 text-sm text-[#b3506e]">
+              Unable to refresh Gmail sync status: {statusRefreshError}
             </p>
           ) : null}
           {notice ? <p role="status" className="mt-4 text-sm text-[#0f766e]">{notice}</p> : null}
