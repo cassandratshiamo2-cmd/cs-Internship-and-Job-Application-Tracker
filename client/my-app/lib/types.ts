@@ -29,6 +29,7 @@ export interface Application {
   interviewTime?: string;
   interviewType?: InterviewType;
   interviewLocation?: string;
+  interviewMeetingUrl?: string;
   notificationChannels?: NotificationChannel[];
   interviewEmail?: string;
 }

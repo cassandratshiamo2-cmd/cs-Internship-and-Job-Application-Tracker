@@ -15,6 +15,7 @@ const validApplication = {
   interviewDate: '',
   interviewTime: '',
   interviewType: '',
+  interviewMeetingUrl: '',
   interviewEmail: '',
 };
 
@@ -37,6 +38,14 @@ test('application payload validation rejects invalid enums, dates, links, and in
   assert.match(validateApplicationInput({ ...validApplication, arrangement: 'Flexible' }), /arrangement/i);
   assert.match(validateApplicationInput({ ...validApplication, date: '2026-02-30' }), /date/i);
   assert.match(validateApplicationInput({ ...validApplication, applicationLink: 'javascript:alert(1)' }), /http/i);
+  assert.match(validateApplicationInput({
+    ...validApplication,
+    interviewMeetingUrl: 'javascript:alert(1)',
+  }), /meeting link/i);
+  assert.equal(validateApplicationInput({
+    ...validApplication,
+    interviewMeetingUrl: 'https://meet.example.test/room',
+  }), null);
   assert.match(validateApplicationInput({
     ...validApplication,
     status: 'Interview',

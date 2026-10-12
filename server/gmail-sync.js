@@ -3,8 +3,7 @@ const { simpleParser } = require('mailparser');
 const { randomUUID } = require('node:crypto');
 const {
   classifyApplicationEmail,
-  extractInterviewDateTime,
-  extractInterviewType,
+  extractInterviewDetails,
   getInterviewDetailsToFill,
   getInterviewDetailsToUpdate,
 } = require('./gmail-parser');
@@ -437,6 +436,7 @@ function createGmailSyncService({
       from: asHeaderText(parsed.from),
       subject: String(parsed.subject || '').slice(0, 998),
       text: String(parsed.text || '').slice(0, MESSAGE_TEXT_LIMIT),
+      html: typeof parsed.html === 'string' ? parsed.html.slice(0, MESSAGE_TEXT_LIMIT) : '',
       receivedAt: result.data.internalDate
         ? new Date(Number(result.data.internalDate))
         : parsed.date || new Date(),
@@ -452,8 +452,9 @@ function createGmailSyncService({
         'INSERT INTO gmail_processed_messages (' +
           'connection_id, user_id, gmail_message_id, gmail_thread_id, sender, subject, ' +
             'received_at, detected_status, detected_interview_date, detected_interview_time, detected_interview_type, ' +
-          'confidence, candidate_application_ids, outcome' +
-          ') VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10::time, $11, $12, $13::jsonb, \'processing\') ' +
+              'detected_interview_location, detected_interview_meeting_url, ' +
+            'confidence, candidate_application_ids, outcome' +
+            ') VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10::time, $11, $12, $13, $14, $15::jsonb, \'processing\') ' +
         'ON CONFLICT (connection_id, gmail_message_id) DO NOTHING ' +
         'RETURNING id',
         [
@@ -468,6 +469,8 @@ function createGmailSyncService({
           interviewDetails?.interviewDate || null,
           interviewDetails?.interviewTime || null,
           interviewDetails?.interviewType || null,
+          interviewDetails?.interviewLocation || null,
+          interviewDetails?.interviewMeetingUrl || null,
           classification.confidence,
           JSON.stringify(match.candidateIds || []),
         ]
@@ -493,9 +496,10 @@ function createGmailSyncService({
           'UPDATE gmail_processed_messages SET ' +
             'sender = $2, subject = $3, received_at = $4, detected_status = $5, ' +
             'detected_interview_date = $6::date, detected_interview_time = $7::time, ' +
-            'detected_interview_type = $8, confidence = $9, candidate_application_ids = $10::jsonb, outcome = \'processing\', ' +
+            'detected_interview_type = $8, detected_interview_location = $9, ' +
+            'detected_interview_meeting_url = $10, confidence = $11, candidate_application_ids = $12::jsonb, outcome = \'processing\', ' +
             'review_reason = NULL, processed_at = NULL, ' +
-            'reprocess_version = CASE WHEN $11::boolean THEN reprocess_version + 1 ELSE reprocess_version END WHERE id = $1',
+            'reprocess_version = CASE WHEN $13::boolean THEN reprocess_version + 1 ELSE reprocess_version END WHERE id = $1',
           [
             messageRowId,
             email.from.slice(0, 998),
@@ -505,6 +509,8 @@ function createGmailSyncService({
             interviewDetails?.interviewDate || null,
             interviewDetails?.interviewTime || null,
             interviewDetails?.interviewType || null,
+            interviewDetails?.interviewLocation || null,
+            interviewDetails?.interviewMeetingUrl || null,
             classification.confidence,
             JSON.stringify(match.candidateIds || []),
             isRetryableProcessedMessage(existingMessage),
@@ -535,7 +541,8 @@ function createGmailSyncService({
       const applicationResult = await client.query(
         'SELECT id, company, position, status, updated_at, ' +
           'interview_date::text AS interview_date, interview_time::text AS interview_time, ' +
-          'interview_type, notification_channels, application_link, interview_email ' +
+          'interview_type, interview_location, interview_meeting_url, ' +
+          'notification_channels, application_link, interview_email ' +
           'FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
         [match.application.id, connection.user_id]
       );
@@ -550,10 +557,16 @@ function createGmailSyncService({
       const interviewDetailsWereDetected = Boolean(
         interviewDetails?.interviewDate ||
         interviewDetails?.interviewTime ||
-        interviewDetails?.interviewType
+        interviewDetails?.interviewType ||
+        interviewDetails?.interviewLocation ||
+        interviewDetails?.interviewMeetingUrl
       );
       const interviewDetailsChanged = Boolean(
-        detailsToFill.interviewDate || detailsToFill.interviewTime || detailsToFill.interviewType
+        detailsToFill.interviewDate ||
+        detailsToFill.interviewTime ||
+        detailsToFill.interviewType ||
+        detailsToFill.interviewLocation ||
+        detailsToFill.interviewMeetingUrl
       );
       const updateDecision = decideApplicationEmailUpdate({
         currentStatus: application?.status,
@@ -586,11 +599,14 @@ function createGmailSyncService({
         'UPDATE applications SET status = CASE WHEN $8::boolean THEN $3 ELSE status END, updated_at = NOW() ' +
           ', interview_date = CASE WHEN $10::boolean THEN COALESCE($6::date, interview_date) ELSE COALESCE(interview_date, $6::date) END, ' +
           'interview_time = CASE WHEN $10::boolean THEN COALESCE($7::time, interview_time) ELSE COALESCE(interview_time, $7::time) END, ' +
-          'interview_type = CASE WHEN $10::boolean THEN COALESCE($9, interview_type) ELSE COALESCE(interview_type, $9) END ' +
+          'interview_type = CASE WHEN $10::boolean THEN COALESCE($9, interview_type) ELSE COALESCE(interview_type, $9) END, ' +
+          'interview_location = CASE WHEN $13::boolean THEN COALESCE($11, interview_location) ELSE COALESCE(interview_location, $11) END, ' +
+          'interview_meeting_url = CASE WHEN $13::boolean THEN COALESCE($12, interview_meeting_url) ELSE COALESCE(interview_meeting_url, $12) END ' +
           'WHERE id = $1 AND user_id = $2 AND status = $4 ' +
           'AND (updated_at <= $5 OR NOT ($8::boolean OR $10::boolean)) ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
-          'interview_time::text AS interview_time, interview_type, notification_channels, application_link, interview_email',
+          'interview_time::text AS interview_time, interview_type, interview_location, interview_meeting_url, ' +
+          'notification_channels, application_link, interview_email',
         [
           application.id,
           connection.user_id,
@@ -601,6 +617,9 @@ function createGmailSyncService({
           classification.status === 'Interview' ? detailsToFill.interviewTime : null,
           updateDecision.applyStatus,
           classification.status === 'Interview' ? detailsToFill.interviewType : null,
+          Boolean(updateDecision.applyInterviewDetails && isExistingInterview),
+          classification.status === 'Interview' ? detailsToFill.interviewLocation : null,
+          classification.status === 'Interview' ? detailsToFill.interviewMeetingUrl : null,
           Boolean(updateDecision.applyInterviewDetails && isExistingInterview),
         ]
       );
@@ -711,10 +730,7 @@ function createGmailSyncService({
     }
 
     const interviewDetails = classification.status === 'Interview'
-      ? {
-          ...extractInterviewDateTime(email),
-          interviewType: extractInterviewType(email),
-        }
+      ? extractInterviewDetails(email)
       : null;
     if (classification.status) {
       try {

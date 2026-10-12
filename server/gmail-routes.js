@@ -206,7 +206,9 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       const result = await pool.query(
         "SELECT id, gmail_message_id, sender, subject, received_at, detected_status, confidence, " +
           'reprocess_version, ' +
-          "candidate_application_ids, review_reason FROM gmail_processed_messages " +
+          "candidate_application_ids, review_reason, detected_interview_date::text AS detected_interview_date, " +
+          'detected_interview_time::text AS detected_interview_time, detected_interview_type, ' +
+          'detected_interview_location, detected_interview_meeting_url FROM gmail_processed_messages ' +
           "WHERE user_id = $1 AND outcome = 'review' " +
           'AND EXISTS (' +
             'SELECT 1 FROM gmail_connections AS connection ' +
@@ -235,12 +237,15 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'message.reprocess_version, message.review_reason, ' +
           'message.detected_interview_date::text AS detected_interview_date, ' +
           'message.detected_interview_time::text AS detected_interview_time, ' +
-          'message.detected_interview_type, message.outcome, ' +
+          'message.detected_interview_type, message.detected_interview_location, ' +
+          'message.detected_interview_meeting_url, message.outcome, ' +
           'application.company AS application_company, application.position AS application_position, ' +
           'application.status AS application_status, ' +
           'application.interview_date::text AS application_interview_date, ' +
           'application.interview_time::text AS application_interview_time, ' +
-          'application.interview_type AS application_interview_type ' +
+          'application.interview_type AS application_interview_type, ' +
+          'application.interview_location AS application_interview_location, ' +
+          'application.interview_meeting_url AS application_interview_meeting_url ' +
         'FROM gmail_processed_messages AS message ' +
         'JOIN gmail_connections AS connection ON connection.id = message.connection_id ' +
           'AND connection.user_id = message.user_id ' +
@@ -309,7 +314,8 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       await client.query('BEGIN');
       const messageResult = await client.query(
         "SELECT id, detected_status, detected_interview_date::text AS detected_interview_date, " +
-          "detected_interview_time::text AS detected_interview_time, detected_interview_type " +
+          "detected_interview_time::text AS detected_interview_time, detected_interview_type, " +
+          "detected_interview_location, detected_interview_meeting_url " +
         'FROM gmail_processed_messages AS message ' +
         'JOIN gmail_connections AS connection ON connection.id = message.connection_id ' +
           'AND connection.user_id = message.user_id ' +
@@ -340,7 +346,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
 
       const applicationResult = await client.query(
         'SELECT id, company, position, status, interview_date::text AS interview_date, ' +
-          'interview_time::text AS interview_time, interview_type, interview_location, ' +
+        'interview_time::text AS interview_time, interview_type, interview_location, interview_meeting_url, ' +
           'notification_channels, application_link, interview_email ' +
           'FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
         [applicationId, req.user.id]
@@ -354,6 +360,8 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         interviewDate: message.detected_interview_date,
         interviewTime: message.detected_interview_time,
         interviewType: message.detected_interview_type,
+        interviewLocation: message.detected_interview_location,
+        interviewMeetingUrl: message.detected_interview_meeting_url,
       };
       const isExistingInterview =
         message.detected_status === 'Interview' && application.status === 'Interview';
@@ -364,10 +372,18 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         currentStatus: application.status,
         detectedStatus: message.detected_status,
         interviewDetailsDetected: Boolean(
-          interviewDetails.interviewDate || interviewDetails.interviewTime || interviewDetails.interviewType
+          interviewDetails.interviewDate ||
+          interviewDetails.interviewTime ||
+          interviewDetails.interviewType ||
+          interviewDetails.interviewLocation ||
+          interviewDetails.interviewMeetingUrl
         ),
         interviewDetailsChanged: Boolean(
-          detailsToFill.interviewDate || detailsToFill.interviewTime || detailsToFill.interviewType
+          detailsToFill.interviewDate ||
+          detailsToFill.interviewTime ||
+          detailsToFill.interviewType ||
+          detailsToFill.interviewLocation ||
+          detailsToFill.interviewMeetingUrl
         ),
         manual: true,
       });
@@ -390,10 +406,13 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'interview_date = CASE WHEN $8::boolean THEN COALESCE($4::date, interview_date) ELSE COALESCE(interview_date, $4::date) END, ' +
           'interview_time = CASE WHEN $8::boolean THEN COALESCE($6::time, interview_time) ELSE COALESCE(interview_time, $6::time) END, ' +
           'interview_type = CASE WHEN $8::boolean THEN COALESCE($7, interview_type) ELSE COALESCE(interview_type, $7) END, ' +
+          'interview_location = CASE WHEN $11::boolean THEN COALESCE($9, interview_location) ELSE COALESCE(interview_location, $9) END, ' +
+          'interview_meeting_url = CASE WHEN $11::boolean THEN COALESCE($10, interview_meeting_url) ELSE COALESCE(interview_meeting_url, $10) END, ' +
           'updated_at = NOW() ' +
           'WHERE id = $1 AND user_id = $2 ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
-          'interview_time::text AS interview_time, notification_channels, application_link, interview_email',
+          'interview_time::text AS interview_time, interview_type, interview_location, interview_meeting_url, ' +
+          'notification_channels, application_link, interview_email',
         [
           applicationId,
           req.user.id,
@@ -402,6 +421,9 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           updateDecision.applyStatus,
           detailsToFill.interviewTime,
           detailsToFill.interviewType,
+          Boolean(updateDecision.applyInterviewDetails && isExistingInterview),
+          detailsToFill.interviewLocation,
+          detailsToFill.interviewMeetingUrl,
           Boolean(updateDecision.applyInterviewDetails && isExistingInterview),
         ]
       );

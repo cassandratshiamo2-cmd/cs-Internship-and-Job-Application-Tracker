@@ -104,6 +104,7 @@ async function ensureDatabase() {
       'interview_time TIME, ' +
       'interview_type VARCHAR(32) CHECK (interview_type IN (\'Phone\', \'Video\', \'In-person\', \'Technical\', \'Panel\', \'Other\')), ' +
       'interview_location TEXT, ' +
+      'interview_meeting_url TEXT, ' +
       'notification_channels TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[], ' +
       'interview_email VARCHAR(255), ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
@@ -119,6 +120,11 @@ async function ensureDatabase() {
   await pool.query(
     'ALTER TABLE applications ' +
       'ADD COLUMN IF NOT EXISTS interview_location TEXT'
+  );
+
+  await pool.query(
+    'ALTER TABLE applications ' +
+      'ADD COLUMN IF NOT EXISTS interview_meeting_url TEXT'
   );
 
   await pool.query(
@@ -281,6 +287,8 @@ async function ensureDatabase() {
       'detected_interview_date DATE, ' +
       'detected_interview_time TIME, ' +
       'detected_interview_type VARCHAR(32), ' +
+      'detected_interview_location TEXT, ' +
+      'detected_interview_meeting_url TEXT, ' +
       'confidence NUMERIC(4, 3) NOT NULL DEFAULT 0, ' +
       'candidate_application_ids JSONB NOT NULL DEFAULT \'[]\'::jsonb, ' +
       'application_id INTEGER REFERENCES applications(id) ON DELETE SET NULL, ' +
@@ -337,6 +345,16 @@ async function ensureDatabase() {
   await pool.query(
     'ALTER TABLE gmail_processed_messages ' +
       'ADD COLUMN IF NOT EXISTS detected_interview_type VARCHAR(32)'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS detected_interview_location TEXT'
+  );
+
+  await pool.query(
+    'ALTER TABLE gmail_processed_messages ' +
+      'ADD COLUMN IF NOT EXISTS detected_interview_meeting_url TEXT'
   );
 
   await pool.query(
@@ -1221,6 +1239,7 @@ app.get(
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
           'interview_location AS "interviewLocation", ' +
+          'interview_meeting_url AS "interviewMeetingUrl", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail" ' +
         'FROM applications ' +
@@ -1244,6 +1263,7 @@ app.get(
           interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
           interviewType: application.interviewType || undefined,
           interviewLocation: application.interviewLocation || undefined,
+          interviewMeetingUrl: application.interviewMeetingUrl || undefined,
           notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
           interviewEmail: application.interviewEmail || undefined,
         };
@@ -1282,6 +1302,7 @@ function serializeApplication(application) {
     interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
     interviewType: application.interviewType || undefined,
     interviewLocation: application.interviewLocation || undefined,
+    interviewMeetingUrl: application.interviewMeetingUrl || undefined,
     notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
     interviewEmail: application.interviewEmail || undefined,
   };
@@ -1315,6 +1336,7 @@ app.get(
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
           'interview_location AS "interviewLocation", ' +
+          'interview_meeting_url AS "interviewMeetingUrl", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail" ' +
         'FROM applications ' +
@@ -1367,13 +1389,15 @@ app.put(
       const interviewType = String(body.interviewType || '').trim();
       const hasInterviewLocation = Object.hasOwn(body, 'interviewLocation');
       const interviewLocation = String(body.interviewLocation || '').trim();
+      const hasInterviewMeetingUrl = Object.hasOwn(body, 'interviewMeetingUrl');
+      const interviewMeetingUrl = String(body.interviewMeetingUrl || '').trim();
       const interviewEmail = String(body.interviewEmail || '').trim();
       const notificationChannels = Array.isArray(body.notificationChannels) ? body.notificationChannels : [];
       const normalizedChannels = normalizeNotificationChannels(notificationChannels);
 
       const validationError = validateApplicationInput({
         company, position, date, type, status, arrangement, notes, applicationLink,
-        interviewDate, interviewTime, interviewType, interviewEmail,
+        interviewDate, interviewTime, interviewType, interviewLocation, interviewMeetingUrl, interviewEmail,
       });
       if (validationError) return res.status(400).json({ message: validationError });
 
@@ -1417,9 +1441,12 @@ app.put(
           'interview_type = $13, ' +
           'interview_location = CASE ' +
             "WHEN $7 <> 'Interview' THEN NULL " +
-            "WHEN $13 <> 'In-person' THEN NULL " +
             'WHEN $16::boolean THEN NULLIF($17, \'\') ' +
             'ELSE interview_location END, ' +
+          'interview_meeting_url = CASE ' +
+            "WHEN $7 <> 'Interview' THEN NULL " +
+            'WHEN $18::boolean THEN NULLIF($19, \'\') ' +
+            'ELSE interview_meeting_url END, ' +
           'notification_channels = $14::text[], ' +
           'interview_email = $15, ' +
           'updated_at = NOW() ' +
@@ -1438,6 +1465,7 @@ app.put(
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
           'interview_location AS "interviewLocation", ' +
+          'interview_meeting_url AS "interviewMeetingUrl", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail"',
           [
@@ -1458,6 +1486,8 @@ app.put(
             status === 'Interview' ? interviewEmail || null : null,
             hasInterviewLocation,
             interviewLocation,
+            hasInterviewMeetingUrl,
+            interviewMeetingUrl,
           ]
         );
 
@@ -1543,13 +1573,15 @@ app.post(
       const interviewDate = String(body.interviewDate || '').trim();
       const interviewTime = String(body.interviewTime || '').trim();
       const interviewType = String(body.interviewType || '').trim();
+      const interviewLocation = String(body.interviewLocation || '').trim();
+      const interviewMeetingUrl = String(body.interviewMeetingUrl || '').trim();
       const interviewEmail = String(body.interviewEmail || '').trim();
       const notificationChannels = Array.isArray(body.notificationChannels) ? body.notificationChannels : [];
       const normalizedChannels = normalizeNotificationChannels(notificationChannels);
 
       const validationError = validateApplicationInput({
         company, position, date, type, status, arrangement, notes, applicationLink,
-        interviewDate, interviewTime, interviewType, interviewEmail,
+        interviewDate, interviewTime, interviewType, interviewLocation, interviewMeetingUrl, interviewEmail,
       });
       if (validationError) return res.status(400).json({ message: validationError });
 
@@ -1583,9 +1615,10 @@ app.post(
           'interview_time, ' +
           'interview_type, ' +
           'interview_location, ' +
+          'interview_meeting_url, ' +
           'notification_channels, ' +
           'interview_email' +
-        ') VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10::date, $11::time, $12, $13, $14::text[], $15) ' +
+        ') VALUES ($1, $2, $3, $4::date, $5, $6, $7, $8, $9, $10::date, $11::time, $12, $13, $14, $15::text[], $16) ' +
         'RETURNING ' +
           'id, ' +
           'company, ' +
@@ -1600,6 +1633,7 @@ app.post(
           'interview_time AS "interviewTime", ' +
           'interview_type AS "interviewType", ' +
           'interview_location AS "interviewLocation", ' +
+          'interview_meeting_url AS "interviewMeetingUrl", ' +
           'notification_channels AS "notificationChannels", ' +
           'interview_email AS "interviewEmail"',
           [
@@ -1615,9 +1649,8 @@ app.post(
             status === 'Interview' ? interviewDate : null,
             status === 'Interview' ? interviewTime : null,
             status === 'Interview' ? interviewType || null : null,
-            status === 'Interview' && interviewType === 'In-person'
-              ? String(body.interviewLocation || '').trim() || null
-              : null,
+            status === 'Interview' ? interviewLocation || null : null,
+            status === 'Interview' ? interviewMeetingUrl || null : null,
             status === 'Interview' ? normalizedChannels : [],
             status === 'Interview' ? interviewEmail || null : null,
           ]
@@ -1660,6 +1693,7 @@ app.post(
             interviewTime: application.interviewTime ? application.interviewTime.slice(0, 5) : undefined,
             interviewType: application.interviewType || undefined,
             interviewLocation: application.interviewLocation || undefined,
+            interviewMeetingUrl: application.interviewMeetingUrl || undefined,
             notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
             interviewEmail: application.interviewEmail || undefined,
           },

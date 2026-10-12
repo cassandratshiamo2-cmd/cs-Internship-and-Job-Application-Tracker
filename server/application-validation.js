@@ -32,6 +32,19 @@ function isValidTime(value) {
     /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,6})?)?$/.test(value);
 }
 
+function isValidHttpUrl(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) &&
+      Boolean(url.hostname) &&
+      !url.username &&
+      !url.password;
+  } catch {
+    return false;
+  }
+}
+
 function validateApplicationInput(fields) {
   if (
     !fields.company ||
@@ -59,6 +72,9 @@ function validateApplicationInput(fields) {
   if (fields.applicationLink && !/^https?:\/\//i.test(fields.applicationLink)) {
     return 'The application link must start with http:// or https://.';
   }
+  if (fields.interviewMeetingUrl && !isValidHttpUrl(fields.interviewMeetingUrl)) {
+    return 'The interview meeting link must be a valid http:// or https:// URL.';
+  }
   if (fields.interviewEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fields.interviewEmail)) {
     return 'Enter a valid interview contact email.';
   }
@@ -76,4 +92,4 @@ function validateApplicationInput(fields) {
   return null;
 }
 
-module.exports = { isValidDateOnly, isValidTime, validateApplicationInput };
+module.exports = { isValidDateOnly, isValidHttpUrl, isValidTime, validateApplicationInput };
