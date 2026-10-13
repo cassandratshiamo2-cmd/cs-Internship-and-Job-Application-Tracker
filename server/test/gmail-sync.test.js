@@ -3670,3 +3670,107 @@ test('scenarios 1-7: status transitions run through matching, persistence, and a
     }
   }
 });
+
+test('sync persists DataWave interview details when only the HTML MIME part contains the schedule', async () => {
+  const application = {
+    id: 121,
+    company: 'DataWave Technologies',
+    position: 'Graduate Data Analyst',
+    status: 'Applied',
+    updated_at: new Date('2026-10-08T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    interview_location: null,
+    interview_meeting_url: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const subject = 'Interview Invitation – Graduate Data Analyst – DataWave Technologies';
+  const html = [
+    '<p>You are invited to an interview.</p>',
+    '<p>Company: DataWave Technologies</p>',
+    '<p>Position: Graduate Data Analyst</p>',
+    '<p>Date: 22 October 2026</p>',
+    '<p>Time: 11:00 AM</p>',
+    '<p>Interview Type: Video Interview</p>',
+    '<p>Meeting Link: <a href="https://meet.google.com/xyz-abcd-efg">Join meeting</a></p>',
+  ].join('');
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
+  const raw = Buffer.from([
+    'From: DataWave Recruiting <recruiter@example.test>',
+    'To: applyflow@example.com',
+    `Subject: ${encodedSubject}`,
+    'Date: Mon, 12 Oct 2026 08:00:00 +0200',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/alternative; boundary="datawave-sync"',
+    '',
+    '--datawave-sync',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'You are invited to an interview at DataWave Technologies for the Graduate Data Analyst position.',
+    '--datawave-sync',
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from(html, 'utf8').toString('base64'),
+    '--datawave-sync--',
+    '',
+  ].join('\r\n')).toString('base64url');
+  const messageId = 'datawave-html-schedule';
+  const { service, processedRows, calls } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'datawave-html-schedule-history',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'datawave-html-schedule-thread',
+        internalDate: String(new Date('2026-10-12T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.deepEqual(
+    [
+      application.status,
+      application.interview_date,
+      application.interview_time,
+      application.interview_type,
+      application.interview_meeting_url,
+    ],
+    [
+      'Interview',
+      '2026-10-22',
+      '11:00',
+      'Video',
+      'https://meet.google.com/xyz-abcd-efg',
+    ],
+  );
+  assert.deepEqual(
+    [
+      processedRows.get(messageId).detectedStatus,
+      processedRows.get(messageId).detectedInterviewDate,
+      processedRows.get(messageId).detectedInterviewTime,
+      processedRows.get(messageId).detectedInterviewType,
+      processedRows.get(messageId).detectedInterviewMeetingUrl,
+    ],
+    [
+      'Interview',
+      '2026-10-22',
+      '11:00',
+      'Video',
+      'https://meet.google.com/xyz-abcd-efg',
+    ],
+  );
+  assert.equal(calls.applicationUpdates, 1);
+});

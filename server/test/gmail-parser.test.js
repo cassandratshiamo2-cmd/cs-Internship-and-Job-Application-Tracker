@@ -892,3 +892,86 @@ test('updates reliable rescheduled location and meeting link without clearing ex
     }
   );
 });
+
+test('extracts the DataWave interview details from HTML and encoded multipart alternatives', async () => {
+  const subject = 'Interview Invitation – Graduate Data Analyst – DataWave Technologies';
+  const text = [
+    'You are invited to an interview.',
+    'Company: DataWave Technologies',
+    'Position: Graduate Data Analyst',
+    'Date: 22 October 2026',
+    'Time: 11:00 AM',
+    'Interview Type: Video Interview',
+    'Meeting Link: https://meet.google.com/xyz-abcd-efg',
+  ].join('\n');
+  const html = [
+    '<p>You are invited to an interview.</p>',
+    '<p>Company: DataWave Technologies</p>',
+    '<p>Position: Graduate Data Analyst</p>',
+    '<p>Date: 22 October 2026</p>',
+    '<p>Time: 11:00 AM</p>',
+    '<p>Interview Type: Video Interview</p>',
+    '<p>Meeting Link: <a href="https://meet.google.com/xyz-abcd-efg">Join meeting</a></p>',
+  ].join('');
+  const expected = {
+    interviewDate: '2026-10-22',
+    interviewTime: '11:00',
+    ambiguous: false,
+    hasUnsupportedTimezone: false,
+    interviewType: 'Video',
+    interviewLocation: null,
+    interviewMeetingUrl: 'https://meet.google.com/xyz-abcd-efg',
+  };
+
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
+  const rawEmail = [
+    'From: recruiter@example.test',
+    'To: candidate@example.test',
+    `Subject: ${encodedSubject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/alternative; boundary="datawave-boundary"',
+    '',
+    '--datawave-boundary',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'You are invited to an interview at DataWave Technologies for the Graduate Data Analyst position.',
+    '--datawave-boundary',
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from(html, 'utf8').toString('base64'),
+    '--datawave-boundary--',
+    '',
+  ].join('\r\n');
+  const parsed = await simpleParser(Buffer.from(rawEmail, 'utf8'));
+
+  assert.equal(parsed.subject, subject);
+  assert.equal(
+    classifyApplicationEmail({ subject: parsed.subject, text: parsed.text }).status,
+    'Interview',
+  );
+  assert.deepEqual(
+    extractInterviewDetails({
+      subject: parsed.subject,
+      text: parsed.text,
+      html: parsed.html,
+    }),
+    expected,
+  );
+  assert.deepEqual(extractInterviewDetails({ subject, text }), expected);
+  assert.deepEqual(extractInterviewDetails({ subject, html }), expected);
+});
+
+test('does not invent DataWave interview details omitted from both MIME alternatives', () => {
+  const result = extractInterviewDetails({
+    subject: 'Interview Invitation – Graduate Data Analyst – DataWave Technologies',
+    text: 'You are invited to interview for the Graduate Data Analyst position.',
+    html: '<p>You are invited to interview for the Graduate Data Analyst position.</p>',
+  });
+
+  assert.equal(result.interviewDate, null);
+  assert.equal(result.interviewTime, null);
+  assert.equal(result.interviewType, null);
+  assert.equal(result.interviewLocation, null);
+  assert.equal(result.interviewMeetingUrl, null);
+});
