@@ -12,7 +12,7 @@ function createTestPool(options) {
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
         return { rowCount: 1, rows: [] };
       }
-      if (sql.startsWith('SELECT id, detected_status')) {
+      if (sql.startsWith('SELECT message.id, detected_status')) {
         const isReviewForUser =
           (!message.outcome || message.outcome === 'review') &&
           (message.user_id === undefined || Number(message.user_id) === Number(params[1]));

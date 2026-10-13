@@ -8,6 +8,7 @@ const {
   extractInterviewLocation,
   extractInterviewMeetingUrl,
   extractInterviewType,
+  extractCurrentMessageText,
   getInterviewDetailsToFill,
   getInterviewDetailsToUpdate,
 } = require('../gmail-parser');
@@ -86,6 +87,81 @@ test('interview invitation subject contributes when the body has no interview wo
   });
 
   assert.equal(classification.status, 'Interview');
+});
+
+test('current-message extraction excludes clear quoted, forwarded, and signature sections', () => {
+  const quotedReply = [
+    'Thanks for the update. I will review the details.',
+    '',
+    'On Monday, October 12, 2026 at 9:00 AM, Recruiter wrote:',
+    '> We are pleased to offer you the Cashier position.',
+    '> Your interview is scheduled for 15 October 2026 at 10:00 SAST.',
+  ].join('\n');
+  const forwardedMessage = [
+    'I received the forwarded email.',
+    '',
+    '---------- Forwarded message ----------',
+    'Subject: Job offer',
+    'We are pleased to offer you the Cashier position.',
+  ].join('\n');
+  const signedMessage = [
+    'We received your application for the Software Developer role.',
+    '',
+    'Kind regards,',
+    'Recruitment Team',
+    'We are pleased to offer you a different position.',
+  ].join('\n');
+
+  assert.equal(
+    extractCurrentMessageText(quotedReply),
+    'Thanks for the update. I will review the details.',
+  );
+  assert.equal(
+    extractCurrentMessageText(forwardedMessage),
+    'I received the forwarded email.',
+  );
+  assert.equal(
+    extractCurrentMessageText(signedMessage),
+    'We received your application for the Software Developer role.',
+  );
+  assert.equal(
+    classifyApplicationEmail({ subject: 'Re: update', text: quotedReply }).status,
+    null,
+  );
+  assert.equal(
+    extractInterviewDateTime({ subject: 'Re: update', text: quotedReply }).interviewDate,
+    null,
+  );
+  assert.equal(
+    classifyApplicationEmail({ subject: 'FYI', text: forwardedMessage }).status,
+    null,
+  );
+  assert.equal(
+    classifyApplicationEmail({ subject: 'Application update', text: signedMessage }).status,
+    'Applied',
+  );
+});
+
+test('routes conflicting current status evidence and contradictory subjects to review', () => {
+  const conflictingBody = classifyApplicationEmail({
+    subject: 'Application update',
+    text: 'We invite you to interview for this role, and we are pleased to offer you the position.',
+  });
+  const contradictorySubject = classifyApplicationEmail({
+    subject: 'Interview Invitation',
+    text: 'We are pleased to offer you the Software Developer position.',
+  });
+  const misleadingSubject = classifyApplicationEmail({
+    subject: 'Interview Invitation',
+    text: 'This is a weekly careers newsletter. No interview has been scheduled.',
+  });
+
+  assert.equal(conflictingBody.status, null);
+  assert.equal(conflictingBody.requiresReview, true);
+  assert.equal(contradictorySubject.status, null);
+  assert.equal(contradictorySubject.requiresReview, true);
+  assert.equal(misleadingSubject.status, null);
+  assert.equal(misleadingSubject.ignored, true);
 });
 
 test('does not classify unrelated email content', () => {
@@ -336,6 +412,99 @@ test('extracts date and time from a generic interview reschedule notice', () => 
   });
 });
 
+test('pairs separately labelled dates and times only within their own interview schedule', () => {
+  const separateFields = extractInterviewDateTime({
+    text: [
+      'Interview details:',
+      'Date: October 13, 2026',
+      'Time: 9:00 AM SAST',
+      'Location: Main office',
+    ].join('\n'),
+  });
+  const multipleSchedules = extractInterviewDateTime({
+    text: [
+      'Interview details:',
+      'Date: October 13, 2026',
+      'Time: 9:00 AM SAST',
+      'Interview details:',
+      'Date: October 14, 2026',
+      'Time: 10:30 AM SAST',
+    ].join('\n'),
+  });
+
+  assert.equal(separateFields.interviewDate, '2026-10-13');
+  assert.equal(separateFields.interviewTime, '09:00');
+  assert.deepEqual(multipleSchedules, {
+    interviewDate: null,
+    interviewTime: null,
+    ambiguous: true,
+  });
+});
+
+test('selects the clearly rescheduled date and its paired time instead of the old schedule', () => {
+  assert.deepEqual(
+    extractInterviewDateTime({
+      text: 'Your interview was scheduled for October 14, 2026 at 9:00 AM. It has been rescheduled for October 15, 2026 at 10:30 AM.',
+    }),
+    {
+      interviewDate: '2026-10-15',
+      interviewTime: '10:30',
+      ambiguous: false,
+      hasUnsupportedTimezone: false,
+    },
+  );
+});
+
+test('does not pair an interview date with an unrelated office-hours time', () => {
+  assert.deepEqual(
+    extractInterviewDateTime({
+      text: 'Your interview is scheduled for October 15, 2026. Our office opens at 8:30 AM.',
+    }),
+    {
+      interviewDate: '2026-10-15',
+      interviewTime: null,
+      ambiguous: false,
+      hasUnsupportedTimezone: false,
+    },
+  );
+});
+
+test('returns an uncertain time when one interview date has multiple possible times', () => {
+  assert.deepEqual(
+    extractInterviewDateTime({
+      text: 'Interview: 15 October 2026 at 10:00 AM and 11:00 AM SAST.',
+    }),
+    {
+      interviewDate: '2026-10-15',
+      interviewTime: null,
+      ambiguous: true,
+      hasUnsupportedTimezone: false,
+    },
+  );
+});
+
+test('rejects interview date ranges rather than choosing an endpoint', () => {
+  for (const text of [
+    'Your interview is scheduled October 13-15, 2026 at 10:00 SAST.',
+    'Your interview is scheduled from 13 through 15 October 2026.',
+    'Your interview is scheduled from October 13, 2026 to October 15, 2026.',
+    'Your interview is scheduled from 13 October to 15 October 2026.',
+  ]) {
+    const result = extractInterviewDateTime({ text });
+    assert.equal(result.interviewDate, null, text);
+    assert.equal(result.interviewTime, null, text);
+  }
+});
+
+test('rejects impossible calendar dates without extracting an attached time', () => {
+  const result = extractInterviewDateTime({
+    text: 'Interview: 31 February 2026 at 10:00 SAST.',
+  });
+
+  assert.equal(result.interviewDate, null);
+  assert.equal(result.interviewTime, null);
+});
+
 test('supports invitation date and time wording variants without inventing details', () => {
   const examples = [
     ['You are invited to interview on October 13, 2026 at 8:30 AM.', '2026-10-13', '08:30'],
@@ -480,7 +649,15 @@ test('rejects invalid interview times and converts UTC across midnight into SAST
 
 test('rejects ambiguous numeric dates and unsupported explicit timezones', () => {
   assert.equal(extractInterviewDateTime({ text: 'Interview: 10/11/2026 at 10:00.' }).interviewDate, null);
-  assert.equal(extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 IST.' }).interviewTime, null);
+  assert.deepEqual(
+    extractInterviewDateTime({ text: 'Interview: 15 October 2026 at 10:00 IST.' }),
+    {
+      interviewDate: null,
+      interviewTime: null,
+      ambiguous: false,
+      hasUnsupportedTimezone: true,
+    },
+  );
 });
 
 test('ignores unrelated dates and date ranges not precisely scheduled for an interview', () => {
@@ -516,6 +693,7 @@ test('extracts only explicitly stated supported interview types', () => {
   const examples = [
     ['We would like to invite you to a phone interview.', 'Phone'],
     ['Your video interview is scheduled for tomorrow.', 'Video'],
+    ['Your interview will take place on Zoom.', 'Video'],
     ['Interview Type: Video', 'Video'],
     ['The in-person interview will take place at our office.', 'In-person'],
     ['You are invited to a technical interview.', 'Technical'],
@@ -526,6 +704,17 @@ test('extracts only explicitly stated supported interview types', () => {
   for (const [text, expectedType] of examples) {
     assert.equal(extractInterviewType({ text }), expectedType);
   }
+});
+
+test('does not invent one interview type when multiple incompatible types are stated', () => {
+  assert.equal(
+    extractInterviewType({ text: 'You are invited to a technical panel interview.' }),
+    null,
+  );
+  assert.equal(
+    extractInterviewType({ text: 'Interview type: Video\nInterview type: Phone' }),
+    null,
+  );
 });
 
 test('extracts explicit interview location, street addresses, and one meeting URL', () => {
@@ -550,6 +739,22 @@ test('extracts explicit interview location, street addresses, and one meeting UR
     extractInterviewMeetingUrl({ text: 'Join meeting: https://meet.example.test/one or https://meet.example.test/two' }),
     null
   );
+  assert.equal(
+    extractInterviewLocation({ text: 'Company address: 123 Main Street, Johannesburg.' }),
+    null,
+  );
+  assert.equal(
+    extractInterviewLocation({ text: 'Interview details:\nAddress: 123 Main Street, Johannesburg.' }),
+    '123 Main Street, Johannesburg',
+  );
+  assert.equal(
+    extractInterviewMeetingUrl({ text: 'Video interview scheduled. Application link: https://meet.google.com/application-form' }),
+    null,
+  );
+  assert.equal(
+    extractInterviewMeetingUrl({ text: 'This unrelated message mentions Zoom: https://zoom.us/j/123456789' }),
+    null,
+  );
 });
 
 test('extracts meeting URLs from HTML anchor targets without inventing an interview type', () => {
@@ -563,6 +768,38 @@ test('extracts meeting URLs from HTML anchor targets without inventing an interv
   assert.equal(details.interviewType, null);
   assert.equal(details.interviewLocation, null);
   assert.equal(details.interviewMeetingUrl, 'https://meet.example.test/room?a=1&b=2');
+});
+
+test('quoted historical schedules and meeting links do not replace current interview details', () => {
+  const details = extractInterviewDetails({
+    subject: 'Updated interview invitation',
+    text: [
+      'Your interview is rescheduled for October 16, 2026 at 11:00 SAST.',
+      '',
+      'On Monday, October 12, 2026, Recruiter wrote:',
+      '> Your interview was scheduled for October 14, 2026 at 9:00 AM SAST.',
+      '> Join the interview: https://meet.example.test/old',
+    ].join('\n'),
+  });
+
+  assert.equal(details.interviewDate, '2026-10-16');
+  assert.equal(details.interviewTime, '11:00');
+  assert.equal(details.interviewMeetingUrl, null);
+});
+
+test('does not extract meeting links from Gmail-style quoted HTML sections', () => {
+  const meetingUrl = extractInterviewMeetingUrl({
+    text: 'Your interview is scheduled for October 16, 2026.',
+    html: [
+      '<p>Your interview details are above.</p>',
+      '<div class="gmail_quote">',
+      '<p>Join the interview:</p>',
+      '<a href="https://meet.example.test/old">Join meeting</a>',
+      '</div>',
+    ].join(''),
+  });
+
+  assert.equal(meetingUrl, null);
 });
 
 test('does not replace existing interview details with extracted values', () => {

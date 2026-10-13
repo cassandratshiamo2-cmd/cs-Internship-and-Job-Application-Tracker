@@ -54,6 +54,22 @@ function senderDomain(from) {
   return normalizeText(domain.split('.').slice(0, -1).join(' '));
 }
 
+function referenceIds(value) {
+  const ids = [];
+  const referencePattern =
+    /\b(?:(?:application|candidate|job|vacancy|requisition)\s+)?(?:reference|ref|requisition|vacancy|job|application|candidate)(?:\s+(?:id|number|no\.?|code))?\s*[:#=-]\s*([a-z0-9][a-z0-9/-]{2,})\b/gi;
+  const referenceParameterPattern =
+    /\b(?:application|candidate|job|vacancy|requisition|reference|ref)[_-]?(?:id|number|no|code)\s*[=:]\s*([a-z0-9][a-z0-9/-]{2,})\b/gi;
+  const text = String(value || '');
+  for (const pattern of [referencePattern, referenceParameterPattern]) {
+    for (const match of text.matchAll(pattern)) {
+      const normalized = match[1].replace(/[^a-z0-9]/gi, '').toLowerCase();
+      if (/\d/.test(normalized)) ids.push(normalized);
+    }
+  }
+  return [...new Set(ids)];
+}
+
 function exactPhraseRanges(normalizedText, phrase) {
   const paddedText = ` ${normalizedText} `;
   const paddedPhrase = ` ${phrase} `;
@@ -113,6 +129,14 @@ function scoreApplicationMatch(email, application) {
     ? matchedPositionWords.length / positionWords.length
     : 0;
   const positionMatch = exactPositionMatch || (positionWords.length > 0 && positionRatio >= 0.6);
+  const emailReferences = referenceIds(`${email.subject || ''}\n${email.text || ''}`);
+  const applicationReferences = referenceIds(
+    `${application.notes || ''}\n${application.application_link || ''}`
+  );
+  const referenceMatch = emailReferences.some((reference) =>
+    applicationReferences.includes(reference)
+  );
+  const threadMatch = Boolean(application.gmailThreadAssociated);
   const companyEvidence = companySubjectMatch
     ? 0.79
     : companyBodyMatch
@@ -122,12 +146,17 @@ function scoreApplicationMatch(email, application) {
         : companyWordMatches.length
           ? 0.25
           : 0;
-  const senderEvidence = domainMatch ? (companyTextMatch ? 0.04 : 0.75) : 0;
+  const senderEvidence = domainMatch ? (companyTextMatch ? 0.04 : 0.35) : 0;
   const positionEvidence = exactPositionMatch ? 0.28 : positionMatch ? 0.14 : 0;
-  const score = Math.min(companyEvidence + senderEvidence + positionEvidence, 1);
+  const textualScore = Math.min(companyEvidence + senderEvidence + positionEvidence, 1);
+  const score = Math.max(
+    textualScore,
+    referenceMatch ? 0.99 : 0,
+    threadMatch ? 0.86 : 0,
+  );
 
   return {
-    score: Math.min(score, 1),
+    score,
     companyMatch: companyTextMatch || companyWordMatches.length > 0 || domainMatch,
     companyTextMatch,
     companySubjectMatch,
@@ -135,6 +164,11 @@ function scoreApplicationMatch(email, application) {
     domainMatch,
     positionMatch,
     exactPositionMatch,
+    referenceMatch,
+    threadMatch,
+    reliableCompanyEvidence: companyTextMatch || companyWordRatio >= 0.75,
+    companyWordMatches,
+    matchedPositionWords,
   };
 }
 
@@ -156,17 +190,23 @@ function matchApplication(email, applications, options = {}) {
       );
       const requiresRoleEvidence =
         sameCompanyApplications.length > 1 &&
-        !match.exactPositionMatch;
+        !match.exactPositionMatch &&
+        !match.referenceMatch &&
+        !match.threadMatch;
       const requiresPositionMatch = options.requirePositionMatch && !match.positionMatch;
-      const score = shadowedCompanyMatch || requiresRoleEvidence || requiresPositionMatch ? 0 : match.score;
+      const score = shadowedCompanyMatch || requiresRoleEvidence || requiresPositionMatch
+        ? 0
+        : match.score;
       return {
         application,
         ...match,
         score,
         rawScore: match.score,
-        contentEvidence: match.companyTextMatch || match.positionMatch,
+        contentEvidence: match.companyTextMatch || match.positionMatch ||
+          match.referenceMatch || match.threadMatch,
         candidateIdEligible:
-          (match.companyTextMatch || match.positionMatch || match.domainMatch) &&
+          (match.companyTextMatch || match.positionMatch || match.domainMatch ||
+            match.referenceMatch || match.threadMatch) &&
           !shadowedCompanyMatch,
       };
     })
@@ -180,12 +220,20 @@ function matchApplication(email, applications, options = {}) {
   const genericMultiCompanyAlert = /\band\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|several|many)\s+(?:other|more)\s+companies\b/i.test(
     `${email.subject || ''} ${email.text || ''}`
   );
+  const competingEntityEvidence = allCandidates.some((candidate) =>
+    candidate !== top &&
+    ((candidate.companySubjectMatch || candidate.companyBodyMatch) &&
+      !top?.companySubjectMatch && !top?.companyBodyMatch ||
+      candidate.exactPositionMatch && !top?.exactPositionMatch)
+  );
 
   if (
     top &&
     top.score >= minimumConfidence &&
     unique &&
     top.contentEvidence &&
+    (top.reliableCompanyEvidence || top.referenceMatch || top.threadMatch) &&
+    !competingEntityEvidence &&
     (!genericMultiCompanyAlert || options.allowMultiCompanyAlert)
   ) {
     return {
@@ -196,22 +244,50 @@ function matchApplication(email, applications, options = {}) {
     };
   }
 
+  const reviewCandidates = allCandidates
+    .filter(({ candidateIdEligible }) => candidateIdEligible)
+    .map((candidate) => {
+      const evidence = [];
+      if (candidate.companySubjectMatch) evidence.push('company name in subject');
+      if (candidate.companyBodyMatch) evidence.push('company name in message');
+      if (candidate.companyWordMatches.length && !candidate.companyTextMatch) {
+        evidence.push('company-name terms in message');
+      }
+      if (candidate.domainMatch) evidence.push('sender domain (supporting evidence only)');
+      if (candidate.exactPositionMatch) evidence.push('job title in subject or message');
+      else if (candidate.positionMatch) evidence.push('job-title terms in message');
+      if (candidate.referenceMatch) evidence.push('application/reference ID');
+      if (candidate.threadMatch) evidence.push('previously matched Gmail thread');
+      return {
+        id: String(candidate.application.id),
+        company: String(candidate.application.company || 'Unknown company'),
+        position: String(candidate.application.position || 'Unknown position'),
+        evidence,
+        confidence: candidate.rawScore,
+      };
+    });
+  const reviewReason = reviewCandidates.length
+    ? `Possible application matches: ${reviewCandidates.map((candidate) =>
+      `${candidate.company} — ${candidate.position} (application ${candidate.id}; ${candidate.evidence.join(', ') || 'weak matching evidence'})`
+    ).join('; ')}. No unique, sufficiently confident match was established.`
+    : 'No application had enough matching evidence. Check the company and job title before applying this update.';
+
   return {
     outcome: 'review',
     application: null,
     confidence: top?.score || 0,
-    candidateIds: allCandidates
-      .filter(({ candidateIdEligible }) => candidateIdEligible)
-      .map(({ application }) => String(application.id)),
+    candidateIds: reviewCandidates.map(({ id }) => id),
+    candidateExplanations: reviewCandidates,
+    reviewReason,
   };
 }
 
 const STATUS_TRANSITIONS = {
-  Saved: new Set(['Applied', 'Assessment', 'Shortlisted', 'Interview', 'Offer', 'Rejected']),
-  Applied: new Set(['Assessment', 'Shortlisted', 'Interview', 'Offer', 'Rejected']),
-  Assessment: new Set(['Shortlisted', 'Interview', 'Offer', 'Rejected']),
-  Shortlisted: new Set(['Interview', 'Offer', 'Rejected']),
-  Interview: new Set(['Offer', 'Rejected']),
+  Saved: new Set(['Applied', 'Assessment', 'Shortlisted', 'Interview', 'Offer', 'Rejected', 'Withdrawn']),
+  Applied: new Set(['Assessment', 'Shortlisted', 'Interview', 'Offer', 'Rejected', 'Withdrawn']),
+  Assessment: new Set(['Shortlisted', 'Interview', 'Offer', 'Rejected', 'Withdrawn']),
+  Shortlisted: new Set(['Interview', 'Offer', 'Rejected', 'Withdrawn']),
+  Interview: new Set(['Offer', 'Rejected', 'Withdrawn']),
   Offer: new Set(),
   Rejected: new Set(),
   Withdrawn: new Set(),
@@ -240,7 +316,7 @@ function decideApplicationEmailUpdate({
   interviewDetailsDetected = false,
   interviewDetailsChanged = false,
   manual = false,
-  allowEmailStatusCorrection = false,
+  allowNewerEmployerCorrection = false,
 }) {
   if (!detectedStatus) {
     return {
@@ -297,8 +373,18 @@ function decideApplicationEmailUpdate({
     STATUS_ORDER[detectedStatus] !== undefined &&
     STATUS_ORDER[currentStatus] !== undefined &&
     STATUS_ORDER[detectedStatus] < STATUS_ORDER[currentStatus];
+  const receivedTime = receivedAt ? new Date(receivedAt).getTime() : NaN;
+  const updatedTime = updatedAt ? new Date(updatedAt).getTime() : NaN;
+  const isConfirmedNewerMessage = Number.isFinite(receivedTime) &&
+    Number.isFinite(updatedTime) &&
+    receivedTime > updatedTime;
+  const isPermittedEmployerCorrection = !manual &&
+    allowNewerEmployerCorrection &&
+    STATUS_ORDER[currentStatus] !== undefined &&
+    STATUS_ORDER[detectedStatus] !== undefined &&
+    isConfirmedNewerMessage;
 
-  if ((!allowedTransition && !allowEmailStatusCorrection) || isStale) {
+  if ((!allowedTransition && !isPermittedEmployerCorrection) || isStale) {
     return {
       action: 'manual_review',
       applyStatus: false,

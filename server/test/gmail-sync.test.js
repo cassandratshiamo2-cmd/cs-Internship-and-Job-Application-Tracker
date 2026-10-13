@@ -25,6 +25,7 @@ function createTestService({
   messageList,
   parseMessage,
   applications = [],
+  threadAssociations = [],
   existingMessages = [],
   scheduleInterviewReminder,
   wait = async () => {},
@@ -33,6 +34,7 @@ function createTestService({
   scheduleLeaseRenewal,
   cancelLeaseRenewal,
   failLeaseRenewal = false,
+  failWarningPersistenceForMessage,
 } = {}) {
   const calls = {
     profile: 0,
@@ -54,6 +56,7 @@ function createTestService({
     lockQueryTimeouts: [],
     connectionUpdates: [],
     locks: 0,
+    threadAssociationQueries: [],
   };
   const processedRows = new Map();
   let nextProcessedId = 100;
@@ -218,7 +221,7 @@ function createTestService({
           .map(([gmailMessageId]) => ({ gmail_message_id: gmailMessageId }));
         return { rowCount: rows.length, rows };
       }
-      if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
+      if (sql.startsWith('SELECT id, company, position, status, updated_at, notes, application_link FROM applications')) {
         assert.match(sql, /WHERE user_id = \$1 AND EXISTS/);
         assert.match(sql, /id = \$2 AND user_id = \$1 AND is_connected = TRUE/);
         assert.equal(params[1], connection.id);
@@ -229,6 +232,24 @@ function createTestService({
           }))
           .filter((application) => application.user_id === params[0]);
         return { rowCount: rows.length, rows };
+      }
+      if (sql.startsWith('SELECT MIN(message.application_id) AS application_id')) {
+        assert.match(sql, /message.connection_id = \$1 AND message.user_id = \$2/);
+        assert.match(sql, /application.id = message.application_id AND application.user_id = \$2/);
+        calls.threadAssociationQueries.push([...params]);
+        const associatedIds = [...new Set(threadAssociations.filter((item) =>
+          item.threadId === params[2] &&
+          (item.connectionId ?? connection.id) === params[0] &&
+          (item.userId ?? connection.user_id) === params[1] &&
+          ['updated', 'reviewed'].includes(item.outcome ?? 'updated')
+        ).map((item) => String(item.applicationId)))];
+        const uniquelyAssociatedId = associatedIds.length === 1 ? associatedIds[0] : null;
+        return {
+          rowCount: uniquelyAssociatedId ? 1 : 0,
+          rows: uniquelyAssociatedId
+            ? [{ application_id: uniquelyAssociatedId, application_count: 1 }]
+            : [],
+        };
       }
       if (sql.startsWith('UPDATE gmail_connections SET quota_failure_count')) {
         calls.connectionUpdates.push(sql);
@@ -306,6 +327,9 @@ function createTestService({
           if (sql.startsWith('INSERT INTO gmail_processed_messages')) {
             const messageId = String(params[2]);
             if (sql.includes('review_reason, processed_at')) {
+              if (messageId === failWarningPersistenceForMessage) {
+                throw new Error('Synthetic review persistence failure');
+              }
               if (sql.includes("'ignored', $4, NOW()")) {
                 if (!processedRows.has(messageId)) {
                   processedRows.set(messageId, {
@@ -345,6 +369,8 @@ function createTestService({
               detectedInterviewType: params[10],
               detectedInterviewLocation: params[11],
               detectedInterviewMeetingUrl: params[12],
+              threadId: params[3],
+              candidateApplicationIds: JSON.parse(params[14] || '[]'),
             });
             return { rowCount: 1, rows: [{ id }] };
           }
@@ -422,9 +448,9 @@ function createTestService({
             if (row) {
               row.outcome = /SET outcome = '([^']+)'/.exec(sql)?.[1] || row.outcome;
               if (sql.includes('review_reason = $2')) row.reviewReason = params[1];
-              row.applicationId = params[1];
-              row.previousStatus = params[2];
-              row.newStatus = params[3];
+              if (sql.includes('application_id = $2')) row.applicationId = params[1];
+              if (sql.includes('previous_status = $3')) row.previousStatus = params[2];
+              if (sql.includes('new_status = $4')) row.newStatus = params[3];
             }
             return { rowCount: 1, rows: [] };
           }
@@ -565,7 +591,7 @@ test('the exact Nova assessment email is classified, matched, and updates the ap
   };
   const raw = Buffer.from([
     'From: Tshiamo Malefo <tshiamomalefo0@gmail.com>',
-    'To: cassandratshiamo2@gmail.com',
+    'To: applyflow@example.com',
     'Subject: Nova application',
     'Content-Type: text/plain; charset=utf-8',
     '',
@@ -604,6 +630,358 @@ test('the exact Nova assessment email is classified, matched, and updates the ap
   ]);
 });
 
+test('incoming mail updates normally while connected-account and send-as messages are excluded', async () => {
+  const application = {
+    id: 77,
+    company: 'Nova',
+    position: 'Graduate Trainee',
+    status: 'Applied',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const outgoingCases = [
+    {
+      messageId: 'self-sent',
+      from: 'ApplyFlow <applyflow@example.com>',
+      labels: [],
+    },
+    {
+      messageId: 'alias-sent',
+      from: 'ApplyFlow alias <applications-alias@example.test>',
+      labels: ['SENT'],
+    },
+  ];
+
+  for (const scenario of outgoingCases) {
+    const raw = Buffer.from([
+      `From: ${scenario.from}`,
+      'To: another-recipient@example.test',
+      'Subject: Nova job offer',
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      'We are pleased to offer you the Graduate Trainee position at Nova.',
+    ].join('\r\n')).toString('base64url');
+    const { calls, service, processedRows } = createTestService({
+      applications: [application],
+      historyList: async () => ({
+        data: {
+          historyId: `outgoing-${scenario.messageId}`,
+          history: [{
+            messagesAdded: [{ message: { id: scenario.messageId } }],
+          }],
+        },
+      }),
+      messageGet: async () => ({
+        data: {
+          labelIds: scenario.labels,
+          raw,
+          threadId: `thread-${scenario.messageId}`,
+          internalDate: String(Date.now()),
+        },
+      }),
+    });
+
+    const result = await service.syncConnection(7);
+
+    assert.deepEqual(result.outcomes, ['ignored'], scenario.messageId);
+    assert.equal(application.status, 'Applied', scenario.messageId);
+    assert.equal(calls.applicationUpdates, 0, scenario.messageId);
+    assert.equal(calls.notifications.length, 0, scenario.messageId);
+    assert.equal(processedRows.has(scenario.messageId), false, scenario.messageId);
+  }
+});
+
+test('conflicting current outcomes are stored for review without changing an application', async () => {
+  const application = {
+    id: 78,
+    company: 'Nova',
+    position: 'Graduate Trainee',
+    status: 'Applied',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const messageId = 'conflicting-current-outcomes';
+  const raw = Buffer.from([
+    'From: recruiter@nova.example',
+    'To: applyflow@example.com',
+    'Subject: Nova application update',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We invite you to interview for the Graduate Trainee role, and we are pleased to offer you the position.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-conflict',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: ['INBOX'],
+        raw,
+        threadId: 'thread-conflict',
+        internalDate: String(Date.now()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['review']);
+  assert.equal(application.status, 'Applied');
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(calls.notifications.length, 0);
+  assert.equal(processedRows.get(messageId).outcome, 'review');
+  assert.match(processedRows.get(messageId).reviewReason, /conflicting application outcomes/i);
+});
+
+test('a verified same-thread application association resolves a role-ambiguous interview safely', async () => {
+  const applications = [
+    {
+      id: 201,
+      company: 'Northwind Labs',
+      position: 'Platform Engineer',
+      status: 'Applied',
+      updated_at: new Date(Date.now() - 86400000),
+      interview_date: null,
+      interview_time: null,
+      interview_type: null,
+      notification_channels: [],
+    },
+    {
+      id: 202,
+      company: 'Northwind Labs',
+      position: 'Data Engineer',
+      status: 'Applied',
+      updated_at: new Date(Date.now() - 86400000),
+      interview_date: null,
+      interview_time: null,
+      interview_type: null,
+      notification_channels: [],
+    },
+  ];
+  const messageId = 'associated-thread-interview';
+  const threadId = 'associated-thread-201';
+  const raw = Buffer.from([
+    'From: recruiter@northwind.example',
+    'To: applyflow@example.com',
+    'Subject: Application update',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We would like to invite you to an interview for your application.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications,
+    threadAssociations: [{ threadId, applicationId: 201 }],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-associated-thread',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: ['INBOX'],
+        raw,
+        threadId,
+        internalDate: String(Date.now()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(applications[0].status, 'Interview');
+  assert.equal(applications[1].status, 'Applied');
+  assert.equal(processedRows.get(messageId).applicationId, 201);
+  assert.deepEqual(calls.threadAssociationQueries, [[7, 4, threadId]]);
+  assert.equal(calls.notifications.length, 1);
+  assert.equal(calls.notifications[0].application_id, '201');
+});
+
+test('a Gmail thread association from another connection cannot select an application', async () => {
+  const applications = [
+    {
+      id: 203,
+      company: 'Northwind Labs',
+      position: 'Platform Engineer',
+      status: 'Applied',
+      updated_at: new Date(Date.now() - 86400000),
+      interview_date: null,
+      interview_time: null,
+      interview_type: null,
+      notification_channels: [],
+    },
+  ];
+  const messageId = 'foreign-connection-thread';
+  const threadId = 'foreign-thread';
+  const raw = Buffer.from([
+    'From: recruiter@northwind.example',
+    'To: applyflow@example.com',
+    'Subject: Application update',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We would like to invite you to an interview for your application.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications,
+    threadAssociations: [{
+      threadId,
+      applicationId: 203,
+      connectionId: 99,
+    }],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-foreign-thread',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: ['INBOX'],
+        raw,
+        threadId,
+        internalDate: String(Date.now()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['review']);
+  assert.equal(applications[0].status, 'Applied');
+  assert.deepEqual(calls.threadAssociationQueries, [[7, 4, threadId]]);
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(calls.notifications.length, 0);
+  assert.equal(processedRows.get(messageId).applicationId, undefined);
+});
+
+test('conflicting application associations within one Gmail thread remain ambiguous', async () => {
+  const applications = [
+    {
+      id: 206,
+      company: 'Northwind Labs',
+      position: 'Platform Engineer',
+      status: 'Applied',
+      updated_at: new Date(Date.now() - 86400000),
+      notification_channels: [],
+    },
+    {
+      id: 207,
+      company: 'Northwind Labs',
+      position: 'Data Engineer',
+      status: 'Applied',
+      updated_at: new Date(Date.now() - 86400000),
+      notification_channels: [],
+    },
+  ];
+  const messageId = 'conflicting-thread-associations';
+  const threadId = 'thread-with-conflicting-associations';
+  const raw = Buffer.from([
+    'From: recruiter@northwind.example',
+    'To: applyflow@example.com',
+    'Subject: Application update',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We would like to invite you to an interview for your application.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications,
+    threadAssociations: [
+      { threadId, applicationId: 206 },
+      { threadId, applicationId: 207, outcome: 'reviewed' },
+    ],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-conflicting-thread',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: ['INBOX'],
+        raw,
+        threadId,
+        internalDate: String(Date.now()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['review']);
+  assert.deepEqual(applications.map((application) => application.status), ['Applied', 'Applied']);
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(calls.notifications.length, 0);
+  assert.deepEqual(processedRows.get(messageId).candidateApplicationIds, ['206', '207']);
+  assert.match(processedRows.get(messageId).reviewReason, /application 206;/);
+  assert.match(processedRows.get(messageId).reviewReason, /application 207;/);
+});
+
+test('ambiguous duplicate applications are reviewed with candidate company and position explanations', async () => {
+  const applications = ['204', '205'].map((id) => ({
+    id,
+    company: 'Northwind Labs',
+    position: 'Platform Engineer',
+    status: 'Applied',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+  }));
+  const messageId = 'duplicate-application-candidates';
+  const raw = Buffer.from([
+    'From: recruiter@northwind.example',
+    'To: applyflow@example.com',
+    'Subject: Northwind Labs application update',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Northwind Labs invites you to interview for your Platform Engineer application.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service, processedRows } = createTestService({
+    applications,
+    historyList: async () => ({
+      data: {
+        historyId: 'history-duplicate-applications',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: ['INBOX'],
+        raw,
+        threadId: 'duplicate-applications-thread',
+        internalDate: String(Date.now()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+  const row = processedRows.get(messageId);
+
+  assert.deepEqual(result.outcomes, ['review']);
+  assert.deepEqual(applications.map((application) => application.status), ['Applied', 'Applied']);
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(calls.notifications.length, 0);
+  assert.deepEqual(row.candidateApplicationIds, ['204', '205']);
+  assert.match(row.reviewReason, /Northwind Labs — Platform Engineer \(application 204;/);
+  assert.match(row.reviewReason, /Northwind Labs — Platform Engineer \(application 205;/);
+});
+
 test('a previously ignored Nova email can be explicitly retried in place without duplicate notifications', async () => {
   const application = {
     id: 74,
@@ -620,7 +998,7 @@ test('a previously ignored Nova email can be explicitly retried in place without
   };
   const raw = Buffer.from([
     'From: Tshiamo Malefo <tshiamomalefo0@gmail.com>',
-    'To: cassandratshiamo2@gmail.com',
+    'To: applyflow@example.com',
     'Subject: Nova application',
     'Content-Type: text/plain; charset=utf-8',
     '',
@@ -1526,28 +1904,235 @@ test('an unavailable message does not prevent a valid history message from being
 
 test('a fetch 404 without Gmail notFound reason is not treated as a missing message or cursor expiry', async () => {
   const messageId = 'gmail-message-with-unrelated-404';
+  const validMessageId = 'gmail-message-after-unrelated-404';
   const error = new Error('Requested entity was not found.');
   error.code = '404';
   error.response = {
     status: 404,
     data: { error: { errors: [{ reason: 'backendError' }] } },
   };
+  const application = {
+    id: 79,
+    company: 'Nova',
+    position: 'Graduate Trainee',
+    status: 'Applied',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: recruiter@nova.example',
+    'To: applyflow@example.com',
+    'Subject: Nova application update',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We are pleased to offer you the Graduate Trainee position at Nova.',
+  ].join('\r\n')).toString('base64url');
   const { service, calls, processedRows } = createTestService({
+    applications: [application],
     historyList: async () => ({
       data: {
         historyId: 'history-unchanged',
+        history: [{ messagesAdded: [
+          { message: { id: messageId } },
+          { message: { id: validMessageId } },
+        ] }],
+      },
+    }),
+    messageGet: async (requestedId) => {
+      if (requestedId === messageId) throw error;
+      return {
+        data: {
+          labelIds: ['INBOX'],
+          raw,
+          threadId: 'nova-offer-thread',
+          internalDate: String(Date.now()),
+        },
+      };
+    },
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['warning', 'updated']);
+  assert.equal(calls.get, 2);
+  assert.equal(calls.historyResets, 0);
+  assert.equal(processedRows.get(messageId).outcome, 'review');
+  assert.match(processedRows.get(messageId).reviewReason, /404 without confirming/i);
+  assert.equal(isRetryableProcessedMessage({
+    outcome: processedRows.get(messageId).outcome,
+    review_reason: processedRows.get(messageId).reviewReason,
+    reprocess_version: processedRows.get(messageId).reprocessVersion,
+  }), true);
+  assert.equal(processedRows.get(validMessageId).outcome, 'updated');
+  assert.equal(application.status, 'Offer');
+  assert.deepEqual(calls.historyCursorUpdates, ['history-unchanged']);
+});
+
+test('failure to persist a fetch warning retains the checkpoint but later messages still run', async () => {
+  const failedId = 'unpersisted-message-fetch-warning';
+  const validId = 'valid-message-after-unpersisted-warning';
+  const fetchError = new Error('Synthetic upstream failure');
+  fetchError.response = { status: 503 };
+  const application = {
+    id: 80,
+    company: 'Nova',
+    position: 'Graduate Trainee',
+    status: 'Applied',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: recruiter@nova.example',
+    'To: applyflow@example.com',
+    'Subject: Nova application update',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We are pleased to offer you the Graduate Trainee position at Nova.',
+  ].join('\r\n')).toString('base64url');
+  const { service, calls, processedRows } = createTestService({
+    applications: [application],
+    failWarningPersistenceForMessage: failedId,
+    historyList: async () => ({
+      data: {
+        historyId: 'history-with-unpersisted-warning',
+        history: [{ messagesAdded: [
+          { message: { id: failedId } },
+          { message: { id: validId } },
+        ] }],
+      },
+    }),
+    messageGet: async (messageId) => {
+      if (messageId === failedId) throw fetchError;
+      return {
+        data: {
+          labelIds: ['INBOX'],
+          raw,
+          threadId: 'nova-offer-after-warning',
+          internalDate: String(Date.now()),
+        },
+      };
+    },
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['warning', 'updated']);
+  assert.equal(result.cursorRetained, true);
+  assert.equal(calls.get, 5);
+  assert.equal(processedRows.has(failedId), false);
+  assert.equal(processedRows.get(validId).outcome, 'updated');
+  assert.equal(application.status, 'Offer');
+  assert.deepEqual(calls.historyCursorUpdates, []);
+});
+
+test('a transient fetch failure keeps an existing review retryable until a later retry succeeds in place', async () => {
+  const messageId = 'existing-review-transient-fetch-failure';
+  const fetchError = new Error('Synthetic temporary Gmail failure');
+  fetchError.response = { status: 503 };
+  const application = {
+    id: 81,
+    company: 'Nova',
+    position: 'Graduate Trainee',
+    status: 'Applied',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: recruiter@nova.example',
+    'To: applyflow@example.com',
+    'Subject: Nova application update',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'We are pleased to offer you the Graduate Trainee position at Nova.',
+  ].join('\r\n')).toString('base64url');
+  let firstSync = true;
+  const { calls, service, processedRows } = createTestService({
+    applications: [application],
+    existingMessages: [{
+      id: 821,
+      messageId,
+      outcome: 'review',
+      detectedStatus: 'Offer',
+      reviewReason: 'Application match was not sufficiently confident and unique.',
+      sender: 'Nova recruiting',
+      subject: 'Nova application update',
+      candidateApplicationIds: ['81'],
+      reprocessVersion: 2,
+    }],
+    failWarningPersistenceForMessage: messageId,
+    historyList: async () => ({
+      data: {
+        historyId: 'history-existing-review-retry',
         history: [{ messagesAdded: [{ message: { id: messageId } }] }],
       },
     }),
-    messageGet: async () => { throw error; },
+    messageGet: async () => {
+      if (firstSync) throw fetchError;
+      return {
+        data: {
+          labelIds: ['INBOX'],
+          raw,
+          threadId: 'nova-existing-review-thread',
+          internalDate: String(Date.now()),
+        },
+      };
+    },
   });
 
-  await assert.rejects(service.syncConnection(7), /Gmail sync failed/);
+  const firstResult = await service.syncConnection(7);
+  const rowAfterFetchFailure = processedRows.get(messageId);
 
-  assert.equal(calls.get, 1);
-  assert.equal(calls.historyResets, 0);
-  assert.equal(processedRows.has(messageId), false);
+  assert.deepEqual(firstResult.outcomes, ['warning']);
+  assert.equal(firstResult.cursorRetained, true);
+  assert.equal(calls.get, 4);
+  assert.equal(rowAfterFetchFailure.id, 821);
+  assert.equal(rowAfterFetchFailure.outcome, 'review');
+  assert.equal(
+    rowAfterFetchFailure.reviewReason,
+    'Application match was not sufficiently confident and unique.'
+  );
+  assert.equal(rowAfterFetchFailure.reprocessVersion, 2);
+  assert.equal(isRetryableProcessedMessage({
+    outcome: rowAfterFetchFailure.outcome,
+    review_reason: rowAfterFetchFailure.reviewReason,
+    reprocess_version: rowAfterFetchFailure.reprocessVersion,
+  }), true);
+  assert.equal(processedRows.size, 1);
   assert.deepEqual(calls.historyCursorUpdates, []);
+  assert.equal(application.status, 'Applied');
+  assert.equal(calls.notifications.length, 0);
+
+  firstSync = false;
+  const retryResult = await service.retryProcessedMessage(4, rowAfterFetchFailure.id);
+  const rowAfterRetry = processedRows.get(messageId);
+
+  assert.deepEqual(retryResult.outcomes, ['updated']);
+  assert.equal(rowAfterRetry.id, 821);
+  assert.equal(rowAfterRetry.outcome, 'updated');
+  assert.equal(rowAfterRetry.reprocessVersion, 3);
+  assert.equal(isRetryableProcessedMessage({
+    outcome: rowAfterRetry.outcome,
+    review_reason: rowAfterRetry.reviewReason,
+    reprocess_version: rowAfterRetry.reprocessVersion,
+  }), false);
+  assert.equal(processedRows.size, 1);
+  assert.equal(application.status, 'Offer');
+  assert.equal(calls.notifications.length, 1);
 });
 
 test('a 404 from Gmail history listing still resets only the expired history cursor', async () => {
@@ -1691,6 +2276,62 @@ test('Gmail matching ignores a matching application owned by another ApplyFlow u
   assert.equal(calls.notifications.length, 1);
   assert.equal(calls.notifications[0].user_id, 4);
   assert.equal(calls.notifications[0].application_id, '75');
+});
+
+test('an unsupported interview timezone does not overwrite confirmed interview details', async () => {
+  const application = {
+    id: 73,
+    company: 'Acme Technology',
+    position: 'Junior Software Engineer',
+    status: 'Interview',
+    updated_at: new Date(Date.now() - 86400000),
+    interview_date: '2026-10-14',
+    interview_time: '09:00:00',
+    interview_type: 'Panel',
+    interview_location: 'Existing office',
+    interview_meeting_url: 'https://meet.example.test/confirmed',
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const raw = Buffer.from([
+    'From: hiring@acme.example',
+    'To: applyflow@example.com',
+    'Subject: Interview invitation - Acme Technology - Junior Software Engineer',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Acme Technology invites you to interview for the Junior Software Engineer position.',
+    'Your interview has been rescheduled for 15 October 2026 at 10:00 IST.',
+  ].join('\r\n')).toString('base64url');
+  const { calls, service } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-unsupported-timezone',
+        history: [{ messagesAdded: [{ message: { id: 'unsupported-timezone-message' } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: ['INBOX'],
+        raw,
+        threadId: 'unsupported-timezone-thread',
+        internalDate: String(Date.now()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['already_up_to_date']);
+  assert.equal(application.status, 'Interview');
+  assert.equal(application.interview_date, '2026-10-14');
+  assert.equal(application.interview_time, '09:00:00');
+  assert.equal(application.interview_type, 'Panel');
+  assert.equal(application.interview_location, 'Existing office');
+  assert.equal(application.interview_meeting_url, 'https://meet.example.test/confirmed');
+  assert.equal(calls.applicationUpdates, 0);
+  assert.equal(calls.notifications.length, 0);
 });
 
 test('scenario 15: an interview date without a time preserves existing time and type', async () => {
@@ -2457,8 +3098,11 @@ test('scenario 14: Shoprite interview date/time updates an existing Interview wi
       if (sql.startsWith('SELECT * FROM gmail_connections')) return { rowCount: 1, rows: [connection] };
       if (sql.startsWith('SELECT CEIL(EXTRACT(EPOCH FROM (quota_backoff_until')) return { rowCount: 0, rows: [] };
       if (sql.startsWith('SELECT outcome, detected_status')) return { rowCount: 0, rows: [] };
-      if (sql.startsWith('SELECT id, company, position, status, updated_at FROM applications')) {
+      if (sql.startsWith('SELECT id, company, position, status, updated_at, notes, application_link FROM applications')) {
         return { rowCount: 1, rows: [application] };
+      }
+      if (sql.startsWith('SELECT MIN(message.application_id) AS application_id')) {
+        return { rowCount: 0, rows: [] };
       }
       if (sql.startsWith('UPDATE gmail_connections')) return { rowCount: 1, rows: [] };
       throw new Error(`Unexpected pool query: ${sql}`);

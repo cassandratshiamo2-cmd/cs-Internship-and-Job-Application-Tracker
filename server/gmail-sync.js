@@ -4,6 +4,7 @@ const { randomUUID } = require('node:crypto');
 const {
   classifyApplicationEmail,
   extractInterviewDetails,
+  extractCurrentMessageText,
   getInterviewDetailsToFill,
   getInterviewDetailsToUpdate,
 } = require('./gmail-parser');
@@ -96,6 +97,33 @@ function emailAddress(value) {
   return match ? match[0].toLowerCase() : '';
 }
 
+function emailAddresses(value) {
+  return [...String(value || '').matchAll(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi)]
+    .map((match) => match[0].toLowerCase());
+}
+
+function getParsedAddresses(value) {
+  const groups = Array.isArray(value) ? value : [value];
+  return groups.flatMap((group) => {
+    const entries = Array.isArray(group?.value)
+      ? group.value
+      : group?.address
+        ? [group]
+        : [];
+    return entries
+      .map((address) => String(address?.address || '').trim().toLowerCase())
+      .filter(Boolean);
+  });
+}
+
+function getHeaderText(headers, name) {
+  const value = headers?.get?.(name);
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item?.value || item?.text || item || '')).join(' ');
+  }
+  return String(value?.value || value?.text || value || '');
+}
+
 function getGmailErrorStatus(error) {
   return Number(
     error?.response?.status ||
@@ -126,6 +154,20 @@ function getSafeSyncErrorDetails(error) {
     ...(reasons.length ? { reasons } : {}),
     message,
   };
+}
+
+function getRetryableMessageFetchReviewReason(error) {
+  const status = getGmailErrorStatus(error);
+  if (status === 404) {
+    return 'Gmail returned a 404 without confirming this message is unavailable. The message was not processed and can be retried.';
+  }
+  if (status) {
+    return `Gmail could not retrieve this message after retries (HTTP ${status}). The message was not processed and can be retried.`;
+  }
+  const code = String(error?.code || '').toUpperCase();
+  return code
+    ? `Gmail could not retrieve this message after retries (${code}). The message was not processed and can be retried.`
+    : 'Gmail could not retrieve this message after retries. The message was not processed and can be retried.';
 }
 
 function getGmailErrorReasons(error) {
@@ -418,7 +460,7 @@ function createGmailSyncService({
     return gmailClientFactory(oauthClient);
   }
 
-  async function fetchMessage(gmail, messageId) {
+  async function fetchMessage(gmail, messageId, connection) {
     let result;
     try {
       result = await withGmailRequestRetry(() => withGmailRequestTimeout(
@@ -443,7 +485,26 @@ function createGmailSyncService({
       error.gmailApiFailure = true;
       throw error;
     }
-    if ((result.data.labelIds || []).includes('SENT')) return null;
+    const labels = [...new Set((result.data.labelIds || []).map(String))];
+    if (labels.includes('SENT')) {
+      return {
+        id: messageId,
+        threadId: result.data.threadId || null,
+        labels,
+        from: '',
+        senderAddress: '',
+        recipients: [],
+        direction: 'outgoing',
+        directionEvidence: 'gmail-sent-label',
+        subject: '',
+        text: '',
+        html: '',
+        receivedAt: result.data.internalDate
+          ? new Date(Number(result.data.internalDate))
+          : new Date(),
+      };
+    }
+
     const raw = result.data.raw;
     if (!raw) return null;
 
@@ -456,12 +517,51 @@ function createGmailSyncService({
       parseError.cause = error;
       throw parseError;
     }
+    const sender = asHeaderText(parsed.from);
+    const senderAddress = emailAddress(sender);
+    const connectedAddress = String(connection.gmail_address || '').trim().toLowerCase();
+    const recipients = [
+      ...new Set([
+        ...getParsedAddresses(parsed.to),
+        ...getParsedAddresses(parsed.cc),
+        ...emailAddresses(getHeaderText(parsed.headers, 'delivered-to')),
+        ...emailAddresses(getHeaderText(parsed.headers, 'x-original-to')),
+      ]),
+    ];
+    const sentByGmail = labels.includes('SENT');
+    const senderIsConnectedAccount =
+      Boolean(connectedAddress && senderAddress === connectedAddress);
+    const incomingEvidence =
+      labels.includes('INBOX') || recipients.includes(connectedAddress);
+    const direction = sentByGmail || senderIsConnectedAccount
+      ? 'outgoing'
+      : labels.some((label) => ['DRAFT', 'SPAM', 'TRASH'].includes(label))
+        ? 'excluded'
+        : incomingEvidence
+          ? 'incoming'
+          : 'unknown';
+
+    const parsedText = String(parsed.text || '').slice(0, MESSAGE_TEXT_LIMIT);
     return {
       id: messageId,
       threadId: result.data.threadId || null,
-      from: asHeaderText(parsed.from),
+      labels,
+      from: sender,
+      senderAddress,
+      recipients,
+      direction,
+      directionEvidence: sentByGmail
+        ? 'gmail-sent-label'
+        : senderIsConnectedAccount
+          ? 'connected-account-sender'
+          : labels.includes('INBOX')
+            ? 'gmail-inbox-label'
+            : recipients.includes(connectedAddress)
+              ? 'connected-account-recipient'
+              : 'insufficient-direction-evidence',
       subject: String(parsed.subject || '').slice(0, 998),
-      text: String(parsed.text || '').slice(0, MESSAGE_TEXT_LIMIT),
+      text: extractCurrentMessageText(parsedText),
+      matchingText: extractCurrentMessageText(parsedText, { includeSignature: true }),
       html: typeof parsed.html === 'string' ? parsed.html.slice(0, MESSAGE_TEXT_LIMIT) : '',
       receivedAt: result.data.internalDate
         ? new Date(Number(result.data.internalDate))
@@ -546,6 +646,19 @@ function createGmailSyncService({
         messageRowId = inserted.rows[0].id;
       }
 
+      if (classification.requiresReview) {
+        const reviewReason = [
+          classification.reason,
+          match.reviewReason,
+        ].filter(Boolean).join(' ');
+        await client.query(
+          "UPDATE gmail_processed_messages SET outcome = 'review', review_reason = $2, processed_at = NOW() WHERE id = $1",
+          [messageRowId, reviewReason || 'Email evidence requires manual review.']
+        );
+        await client.query('COMMIT');
+        return 'review';
+      }
+
       if (!classification.status) {
         await client.query(
           "UPDATE gmail_processed_messages SET outcome = 'ignored', review_reason = $2, processed_at = NOW() WHERE id = $1",
@@ -557,8 +670,8 @@ function createGmailSyncService({
 
       if (match.outcome !== 'matched') {
         await client.query(
-          "UPDATE gmail_processed_messages SET outcome = 'review', review_reason = 'Application match was not sufficiently confident and unique.', processed_at = NOW() WHERE id = $1",
-          [messageRowId]
+          "UPDATE gmail_processed_messages SET outcome = 'review', review_reason = $2, processed_at = NOW() WHERE id = $1",
+          [messageRowId, match.reviewReason || 'Application match was not sufficiently confident and unique.']
         );
         await client.query('COMMIT');
         return 'review';
@@ -601,7 +714,7 @@ function createGmailSyncService({
         receivedAt: email.receivedAt,
         interviewDetailsDetected: interviewDetailsWereDetected,
         interviewDetailsChanged,
-        allowEmailStatusCorrection: true,
+        allowNewerEmployerCorrection: true,
       });
       if (updateDecision.action === 'manual_review' || !application) {
         await client.query(
@@ -711,26 +824,36 @@ function createGmailSyncService({
       throw error;
     }
 
-    const email = await fetchMessage(gmail, messageId);
+    const email = await fetchMessage(gmail, messageId, connection);
     if (!email) return 'ignored';
     await assertLeaseOwned();
 
-    if (emailAddress(email.from) === String(connection.gmail_address).toLowerCase()) {
+    if (email.direction === 'outgoing' || email.direction === 'excluded') {
       return 'ignored';
     }
 
     let classification;
-    try {
-      classification = classifyApplicationEmail(email);
-    } catch (error) {
-      const classificationError = new Error('Gmail message classification failed.');
-      classificationError.code = 'GMAIL_MESSAGE_CLASSIFY';
-      classificationError.cause = error;
-      throw classificationError;
+    if (email.direction === 'unknown') {
+      classification = {
+        status: null,
+        confidence: 0,
+        matchedRule: null,
+        requiresReview: true,
+        reason: 'The message direction could not be verified from Gmail labels or headers.',
+      };
+    } else {
+      try {
+        classification = classifyApplicationEmail(email);
+      } catch (error) {
+        const classificationError = new Error('Gmail message classification failed.');
+        classificationError.code = 'GMAIL_MESSAGE_CLASSIFY';
+        classificationError.cause = error;
+        throw classificationError;
+      }
     }
-    const applications = classification.status || classification.ignored
+    const applications = classification.status || classification.ignored || classification.requiresReview
       ? (await pool.query(
-          'SELECT id, company, position, status, updated_at FROM applications ' +
+          'SELECT id, company, position, status, updated_at, notes, application_link FROM applications ' +
             'WHERE user_id = $1 AND EXISTS (' +
               'SELECT 1 FROM gmail_connections ' +
               'WHERE id = $2 AND user_id = $1 AND is_connected = TRUE' +
@@ -738,9 +861,40 @@ function createGmailSyncService({
           [connection.user_id, connection.id]
         )).rows
       : [];
+    let associatedApplicationId = null;
+    if (email.threadId && applications.length) {
+      const association = await pool.query(
+        'SELECT MIN(message.application_id) AS application_id, ' +
+          'COUNT(DISTINCT message.application_id) AS application_count ' +
+          'FROM gmail_processed_messages AS message ' +
+          'WHERE message.connection_id = $1 AND message.user_id = $2 ' +
+          'AND message.gmail_thread_id = $3 AND message.application_id IS NOT NULL ' +
+          "AND message.outcome IN ('updated', 'reviewed') " +
+          'AND EXISTS (SELECT 1 FROM applications AS application ' +
+            'WHERE application.id = message.application_id AND application.user_id = $2) ' +
+          'HAVING COUNT(DISTINCT message.application_id) = 1',
+        [connection.id, connection.user_id, email.threadId]
+      );
+      associatedApplicationId = Number(association.rows[0]?.application_count) === 1
+        ? association.rows[0].application_id
+        : null;
+    }
+    const matchingApplications = applications.map((application) => ({
+      ...application,
+      gmailThreadAssociated:
+        associatedApplicationId !== null &&
+        String(application.id) === String(associatedApplicationId),
+    }));
     let match = { outcome: 'ignored', candidateIds: [] };
-    if (classification.ignored && applications.length) {
-      const strongMatch = matchApplication(email, applications, {
+    if (classification.requiresReview && matchingApplications.length) {
+      match = matchApplication({
+        ...email,
+        text: email.matchingText || email.text,
+      }, matchingApplications);
+    }
+    if (classification.ignored && matchingApplications.length) {
+      const matchEmail = { ...email, text: email.matchingText || email.text };
+      const strongMatch = matchApplication(matchEmail, matchingApplications, {
         minimumConfidence: 0.95,
         requirePositionMatch: true,
         allowMultiCompanyAlert: true,
@@ -767,7 +921,10 @@ function createGmailSyncService({
       : null;
     if (classification.status) {
       try {
-        match = matchApplication(email, applications);
+        match = matchApplication({
+          ...email,
+          text: email.matchingText || email.text,
+        }, matchingApplications);
       } catch (error) {
         const matchingError = new Error('Gmail message application matching failed.');
         matchingError.code = 'GMAIL_MESSAGE_MATCH';
@@ -779,7 +936,7 @@ function createGmailSyncService({
     return recordMessage(connection, email, classification, match, interviewDetails, assertLeaseOwned);
   }
 
-  async function recordMessageProcessingWarning(connection, messageId) {
+  async function recordMessageProcessingWarning(connection, messageId, reviewReason) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -793,7 +950,7 @@ function createGmailSyncService({
           connection.id,
           connection.user_id,
           messageId,
-          'This email could not be processed automatically. Inspect the original email in Gmail.',
+          reviewReason,
         ]
       );
       await client.query('COMMIT');
@@ -913,17 +1070,20 @@ function createGmailSyncService({
         }
 
         if (
-          error.gmailApiFailure ||
           isGmailQuotaError(error) ||
           [401, 403].includes(getGmailErrorStatus(error)) ||
-          !['GMAIL_MESSAGE_PARSE', 'GMAIL_MESSAGE_CLASSIFY', 'GMAIL_MESSAGE_MATCH'].includes(error.code)
+          (!error.gmailApiFailure &&
+            !['GMAIL_MESSAGE_PARSE', 'GMAIL_MESSAGE_CLASSIFY', 'GMAIL_MESSAGE_MATCH'].includes(error.code))
         ) {
           throw error;
         }
 
         console.warn('Gmail message processing warning:', getSafeSyncErrorDetails(error));
+        const reviewReason = error.gmailApiFailure
+          ? getRetryableMessageFetchReviewReason(error)
+          : 'This email could not be processed automatically. Inspect the original email in Gmail.';
         try {
-          await recordMessageProcessingWarning(connection, messageId);
+          await recordMessageProcessingWarning(connection, messageId, reviewReason);
         } catch (warningError) {
           warningsPersisted = false;
           console.error('Gmail message warning could not be recorded:', getSafeSyncErrorDetails(warningError));

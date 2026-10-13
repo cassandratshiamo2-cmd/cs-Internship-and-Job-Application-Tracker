@@ -320,7 +320,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
     try {
       await client.query('BEGIN');
       const messageResult = await client.query(
-        "SELECT id, detected_status, detected_interview_date::text AS detected_interview_date, " +
+        "SELECT message.id, detected_status, detected_interview_date::text AS detected_interview_date, " +
           "detected_interview_time::text AS detected_interview_time, detected_interview_type, " +
           "detected_interview_location, detected_interview_meeting_url " +
         'FROM gmail_processed_messages AS message ' +

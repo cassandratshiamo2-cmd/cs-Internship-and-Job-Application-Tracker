@@ -51,6 +51,49 @@ test('matches company aliases with legal and holdings suffixes', () => {
   assert.equal(result.application.id, '18');
 });
 
+test('similar company names do not override the exact company and role evidence', () => {
+  const result = matchApplication({
+    from: 'careers@acme.com',
+    subject: 'Acme Analytics application update',
+    text: 'Acme Analytics invites you to interview for Data Analyst.',
+  }, [
+    { id: '181', company: 'Acme Analytics', position: 'Data Analyst', status: 'Applied' },
+    { id: '182', company: 'Acme Automation', position: 'Automation Technician', status: 'Applied' },
+  ]);
+
+  assert.equal(result.outcome, 'matched');
+  assert.equal(result.application.id, '181');
+});
+
+test('a similar but non-equivalent company name plus sender domain and title remains review-only', () => {
+  const result = matchApplication({
+    from: 'careers@acme.com',
+    subject: 'Acme Technology interview invitation: Data Analyst',
+    text: 'Acme Technology invites you to interview for Data Analyst.',
+  }, [
+    { id: '1811', company: 'Acme Tech', position: 'Data Analyst', status: 'Applied' },
+  ]);
+
+  assert.equal(result.outcome, 'review');
+  assert.equal(result.application, null);
+  assert.deepEqual(result.candidateIds, ['1811']);
+  assert.match(result.reviewReason, /Acme Tech — Data Analyst/);
+});
+
+test('similar job titles resolve only when the message identifies one exact title', () => {
+  const result = matchApplication({
+    subject: 'Interview invitation: Senior Data Analyst',
+    text: 'Acme Technology invites you to interview for Senior Data Analyst.',
+    from: 'recruiting@acme.example',
+  }, [
+    { id: '183', company: 'Acme Technology', position: 'Senior Data Analyst', status: 'Applied' },
+    { id: '184', company: 'Acme Technology', position: 'Junior Data Analyst', status: 'Applied' },
+  ]);
+
+  assert.equal(result.outcome, 'matched');
+  assert.equal(result.application.id, '183');
+});
+
 test('sender domain alone can propose an application but cannot trigger an automatic match', () => {
   const result = matchApplication({
     from: 'recruiting@acme.com',
@@ -63,7 +106,80 @@ test('sender domain alone can propose an application but cannot trigger an autom
   assert.equal(result.outcome, 'review');
   assert.equal(result.application, null);
   assert.deepEqual(result.candidateIds, ['19']);
-  assert.ok(result.confidence >= 0.72);
+  assert.ok(result.confidence > 0);
+  assert.ok(result.confidence < 0.72);
+  assert.match(result.reviewReason, /Acme Technology — Junior Software Engineer/);
+  assert.match(result.reviewReason, /sender domain \(supporting evidence only\)/);
+});
+
+test('an exact reference ID in application notes can identify a unique application', () => {
+  const result = matchApplication({
+    subject: 'Application reference ID: REQ-2048',
+    text: 'Your interview invitation is ready.',
+    from: 'recruiter@unknown.example',
+  }, [
+    {
+      id: '185',
+      company: 'Northwind Labs',
+      position: 'Platform Engineer',
+      notes: 'Requisition reference: REQ-2048',
+      status: 'Applied',
+    },
+    {
+      id: '186',
+      company: 'Northwind Labs',
+      position: 'Data Engineer',
+      notes: 'Requisition reference: REQ-2049',
+      status: 'Applied',
+    },
+  ]);
+
+  assert.equal(result.outcome, 'matched');
+  assert.equal(result.application.id, '185');
+});
+
+test('an exact reference ID in an existing application link is normalized across query parameter spelling', () => {
+  const result = matchApplication({
+    subject: 'Interview invitation',
+    text: 'Reference ID: REF-77-2026. We would like to interview you.',
+    from: 'recruiter@unknown.example',
+  }, [
+    {
+      id: '1871',
+      company: 'Harbor Labs',
+      position: 'Security Engineer',
+      application_link: 'https://jobs.example/apply?job_id=REF-77-2026',
+    },
+    {
+      id: '1872',
+      company: 'Harbor Labs',
+      position: 'Support Engineer',
+      application_link: 'https://jobs.example/apply?job_id=REF-78-2026',
+    },
+  ]);
+
+  assert.equal(result.outcome, 'matched');
+  assert.equal(result.application.id, '1871');
+});
+
+test('a previously matched Gmail thread is useful evidence when current text omits company details', () => {
+  const result = matchApplication({
+    subject: 'Application update',
+    text: 'We invite you to interview for your application.',
+    threadId: 'thread-187',
+    from: 'recruiter@unknown.example',
+  }, [
+    {
+      id: '187',
+      company: 'Northwind Labs',
+      position: 'Platform Engineer',
+      gmailThreadAssociated: true,
+    },
+    { id: '188', company: 'Northwind Labs', position: 'Data Engineer' },
+  ]);
+
+  assert.equal(result.outcome, 'matched');
+  assert.equal(result.application.id, '187');
 });
 
 test('queues an email when multiple applications at the same company are plausible', () => {
@@ -75,6 +191,40 @@ test('queues an email when multiple applications at the same company are plausib
 
   assert.equal(result.outcome, 'review');
   assert.equal(result.application, null);
+  assert.match(result.reviewReason, /Acme Technology — Junior Software Engineer/);
+  assert.match(result.reviewReason, /Acme Technology — Data Analyst Intern/);
+  assert.match(result.reviewReason, /company name in message/);
+});
+
+test('duplicate applications with the same company and title remain ambiguous and explain both candidates', () => {
+  const result = matchApplication({
+    subject: 'Application update for Acme Technology',
+    text: 'Acme Technology has an update about your Software Engineer application.',
+    from: 'recruiting@acme.example',
+  }, [
+    { id: '189', company: 'Acme Technology', position: 'Software Engineer' },
+    { id: '190', company: 'Acme Technology', position: 'Software Engineer' },
+  ]);
+
+  assert.equal(result.outcome, 'review');
+  assert.deepEqual(result.candidateIds, ['189', '190']);
+  assert.match(result.reviewReason, /application 189; company name in subject/);
+  assert.match(result.reviewReason, /application 190; company name in subject/);
+});
+
+test('unrelated email content produces no application candidates', () => {
+  const result = matchApplication({
+    subject: 'Weekly account newsletter',
+    text: 'Read the latest product news and account tips.',
+    from: 'newsletter@updates.example',
+  }, [
+    { id: '191', company: 'Acme Technology', position: 'Software Engineer' },
+    { id: '192', company: 'Northwind Labs', position: 'Data Engineer' },
+  ]);
+
+  assert.equal(result.outcome, 'review');
+  assert.deepEqual(result.candidateIds, []);
+  assert.match(result.reviewReason, /No application had enough matching evidence/);
 });
 
 test('does not match a different role just because the employer is the same', () => {
@@ -92,34 +242,132 @@ test('only permits forward status transitions', () => {
   assert.equal(canAdvanceStatus('Applied', 'Interview'), true);
   assert.equal(canAdvanceStatus('Interview', 'Assessment'), false);
   assert.equal(canAdvanceStatus('Offer', 'Rejected'), false);
+  assert.equal(canAdvanceStatus('Interview', 'Withdrawn'), true);
   assert.equal(canAdvanceStatus('Withdrawn', 'Applied'), false);
 });
 
-test('a newer matched application email can correct a previous terminal status', () => {
+test('a newer explicit employer outcome can correct a prior status when match evidence is trusted', () => {
   const decision = decideApplicationEmailUpdate({
-    currentStatus: 'Rejected',
-    detectedStatus: 'Interview',
+    currentStatus: 'Offer',
+    detectedStatus: 'Rejected',
     updatedAt: new Date('2026-10-07T08:00:00Z'),
     receivedAt: new Date('2026-10-08T08:00:00Z'),
-    allowEmailStatusCorrection: true,
+    allowNewerEmployerCorrection: true,
   });
 
   assert.equal(decision.action, 'apply');
   assert.equal(decision.applyStatus, true);
-  assert.equal(decision.isBackward, true);
+  assert.equal(decision.isBackward, false);
 });
 
-test('email status correction still requires a non-stale message', () => {
+test('a newer employer correction still requires a non-stale message', () => {
   const decision = decideApplicationEmailUpdate({
     currentStatus: 'Rejected',
     detectedStatus: 'Interview',
     updatedAt: new Date('2026-10-08T09:00:00Z'),
     receivedAt: new Date('2026-10-08T08:00:00Z'),
-    allowEmailStatusCorrection: true,
+    allowNewerEmployerCorrection: true,
   });
 
   assert.equal(decision.action, 'manual_review');
   assert.equal(decision.isStale, true);
+});
+
+test('a newer interview can correct a prior rejection only under the trusted email policy', () => {
+  const decision = decideApplicationEmailUpdate({
+    currentStatus: 'Rejected',
+    detectedStatus: 'Interview',
+    updatedAt: new Date('2026-10-07T08:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+    allowNewerEmployerCorrection: true,
+  });
+
+  assert.equal(decision.action, 'apply');
+  assert.equal(decision.applyStatus, true);
+  const untrustedDecision = decideApplicationEmailUpdate({
+    currentStatus: 'Rejected',
+    detectedStatus: 'Interview',
+    updatedAt: new Date('2026-10-07T08:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+  });
+  assert.equal(untrustedDecision.action, 'manual_review');
+});
+
+test('manual review cannot enable the email-only correction policy', () => {
+  const decision = decideApplicationEmailUpdate({
+    currentStatus: 'Rejected',
+    detectedStatus: 'Interview',
+    updatedAt: new Date('2026-10-07T08:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+    manual: true,
+    allowNewerEmployerCorrection: true,
+  });
+
+  assert.equal(decision.action, 'manual_review');
+  assert.equal(decision.applyStatus, false);
+  assert.equal(decision.isBackward, true);
+});
+
+test('automatic newer employer correction remains enabled while ordinary and stale policies hold', () => {
+  const correction = decideApplicationEmailUpdate({
+    currentStatus: 'Rejected',
+    detectedStatus: 'Interview',
+    updatedAt: new Date('2026-10-07T08:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+    allowNewerEmployerCorrection: true,
+  });
+  const ordinaryForward = decideApplicationEmailUpdate({
+    currentStatus: 'Applied',
+    detectedStatus: 'Interview',
+  });
+  const staleCorrection = decideApplicationEmailUpdate({
+    currentStatus: 'Rejected',
+    detectedStatus: 'Interview',
+    updatedAt: new Date('2026-10-08T09:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+    allowNewerEmployerCorrection: true,
+  });
+
+  assert.equal(correction.action, 'apply');
+  assert.equal(correction.applyStatus, true);
+  assert.equal(ordinaryForward.action, 'apply');
+  assert.equal(ordinaryForward.applyStatus, true);
+  assert.equal(staleCorrection.action, 'manual_review');
+  assert.equal(staleCorrection.applyStatus, false);
+  assert.equal(staleCorrection.isStale, true);
+});
+
+test('a withdrawal is allowed only from an active application state', () => {
+  const allowed = decideApplicationEmailUpdate({
+    currentStatus: 'Interview',
+    detectedStatus: 'Withdrawn',
+    updatedAt: new Date('2026-10-07T08:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+  });
+  const terminal = decideApplicationEmailUpdate({
+    currentStatus: 'Withdrawn',
+    detectedStatus: 'Rejected',
+    updatedAt: new Date('2026-10-07T08:00:00Z'),
+    receivedAt: new Date('2026-10-08T08:00:00Z'),
+  });
+
+  assert.equal(allowed.action, 'apply');
+  assert.equal(allowed.applyStatus, true);
+  assert.equal(terminal.action, 'manual_review');
+});
+
+test('a correction at an equal application/email timestamp requires review', () => {
+  const timestamp = new Date('2026-10-08T08:00:00Z');
+  const decision = decideApplicationEmailUpdate({
+    currentStatus: 'Offer',
+    detectedStatus: 'Rejected',
+    updatedAt: timestamp,
+    receivedAt: timestamp,
+    allowNewerEmployerCorrection: true,
+  });
+
+  assert.equal(decision.action, 'manual_review');
+  assert.equal(decision.applyStatus, false);
 });
 
 const transitionScenarios = [
