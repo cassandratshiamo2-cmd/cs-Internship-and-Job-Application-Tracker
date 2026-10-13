@@ -708,18 +708,22 @@ function collectInterviewDates(content) {
       const prefix = content.slice(Math.max(priorBoundary + 1, start - 180), start);
 
 
-const interviewDetailsDate =
-  /^\s*[-*•]?\s*(?:interview\s+)?date\s*[:\-]/i.test(currentLine) &&
-  /\binterview\s+details\s*:/i.test(
-    content.slice(Math.max(0, lineStart - 250), lineStart)
-  );
+      const nearbyText = content.slice(
+        Math.max(0, lineStart - 250),
+        Math.min(content.length, (lineEnd < 0 ? content.length : lineEnd) + 250)
+      );
 
-if (
-  !interviewDetailsDate &&
-  !interviewDateIsExplicitlyAssociated(prefix, currentLine)
-) {
-  continue;
-}
+      const labelledInterviewDate =
+        /^\s*[-*•]?\s*(?:interview\s+)?date\s*[:\-]/i.test(currentLine) &&
+        /\binterview\b/i.test(nearbyText);
+
+      if (
+        !labelledInterviewDate &&
+        !interviewDateIsExplicitlyAssociated(prefix, currentLine)
+      ) {
+        continue;
+      }
+
 
 
       dates.push({
