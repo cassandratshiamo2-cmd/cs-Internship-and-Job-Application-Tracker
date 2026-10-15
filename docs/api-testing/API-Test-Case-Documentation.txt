@@ -1,0 +1,279 @@
+APPLYFLOW API TEST CASE DOCUMENTATION
+
+PURPOSE AND SCOPE
+
+This guide documents manual API checks against the existing Express server. It does not define new API behavior or change the Sprint 1-4 frontend scope. Requests and expected outcomes below were derived from the current server routes and route-level tests.
+
+The Gmail parser is an internal module, not an HTTP route. Parser behavior is exercised through Gmail synchronization/review and by the existing server/test/gmail-parser.test.js unit tests using synthetic message content; Postman cannot submit an arbitrary email directly to the parser.
+
+TEST SETUP AND SAFETY
+
+1. Follow the API testing README in this folder to start a local backend and import the collection.
+2. Use a dedicated local test account and non-production database. The server requires a configured PostgreSQL database to start.
+3. Set baseUrl, testEmail, and testPassword in Postman collection variables. Choose a unique email for registration and a password of at least eight characters. The test password is intentionally not included in this collection.
+4. Run POST Register test user, then POST Login test user. A successful login stores the bearer token in the collection variable.
+5. Requests create, update, mark, dismiss, disconnect, or delete data. Run only the tests you intend to perform. The application delete operation is irreversible; Gmail disconnect revokes the linked refresh token when possible. Do not use production records or a personal Gmail account.
+6. For Gmail calls, first connect the dedicated test account through the normal OAuth flow and ensure it contains suitable synthetic/test messages. Never send real email content or credentials to an untrusted Postman workspace.
+
+Requests that take identifiers from earlier responses save those IDs to collection variables. The Gmail retry and review requests need a suitable processed-message ID; the review-apply request also needs a test-owned application ID in gmailApplicationId.
+
+ENDPOINT TEST CASES
+
+SYSTEM
+
+SYS-01
+Request: GET /
+Expected result: 200; JSON message indicates the backend is running.
+Notes: Public liveness response.
+
+SYS-02
+Request: GET /api/health
+Expected result: 200 with status: UP, database: connected, and timestamp when PostgreSQL is available; 503 with status: DOWN and database state when unavailable or unconfigured.
+Notes: Database health, not merely process liveness.
+
+AUTHENTICATION
+
+AUTH-01
+Request: POST /api/register with fullName, valid email, and password >= 8 characters
+Expected result: 201; user contains id, fullName, normalized email, but no password.
+Notes: Use a unique email. Password is hashed by the backend.
+
+AUTH-02
+Request: POST /api/register with required fields missing
+Expected result: 400; required-fields message.
+Notes: Negative validation.
+
+AUTH-03
+Request: POST /api/register with malformed email
+Expected result: 400; invalid-email message.
+Notes: Negative validation.
+
+AUTH-04
+Request: POST /api/register with short password
+Expected result: 400; minimum-length message.
+Notes: Password must contain at least eight characters.
+
+AUTH-05
+Request: POST /api/register with an existing email
+Expected result: 409; duplicate-user message.
+Notes: Registration normalizes email to lowercase and trims whitespace.
+
+AUTH-06
+Request: POST /api/login with correct credentials
+Expected result: 200; response contains a signed token and user id/name/email.
+Notes: Token is valid for one hour; collection saves it for protected requests.
+
+AUTH-07
+Request: POST /api/login with incorrect email or password
+Expected result: 401; generic invalid-credentials message.
+Notes: Both failure cases intentionally share a response.
+
+AUTH-08
+Request: Any protected endpoint without a bearer token
+Expected result: 401; authentication-required response.
+Notes: Use GET /api/applications to exercise the guard without mutation.
+
+AUTH-09
+Request: Any protected endpoint with an expired or invalid token
+Expected result: 401; expired-session response.
+Notes: Can be tested with a deliberately invalid token.
+
+The implemented API login has no server-side failed-attempt lockout endpoint behavior. The prototype UI lockout is not part of this Postman collection.
+
+APPLICATIONS
+
+Required fields are company, position, date (YYYY-MM-DD), type, status, arrangement, and notes. Types accepted by the current validator are Internship, WIL, Graduate Job, Full-Time Job, and legacy Job. Status values are Saved, Applied, Assessment, Shortlisted, Interview, Offer, Rejected, and Withdrawn; arrangements are Remote, Hybrid, and Onsite. A status of Interview also requires a valid interviewDate, interviewTime, and interviewType. Optional URLs and interview email are validated when supplied.
+
+APP-01
+Request: GET /api/applications with bearer token
+Expected result: 200; { "applications": [...] } contains only the authenticated user's records.
+Notes: Check empty and populated accounts.
+
+APP-02
+Request: POST /api/applications with valid required fields
+Expected result: 201; response contains the saved application and string id.
+Notes: The collection saves applicationId.
+
+APP-03
+Request: POST /api/applications with missing required fields, invalid date/enums, or invalid link
+Expected result: 400; JSON message explains validation failure.
+Notes: Includes impossible dates such as 2026-02-30.
+
+APP-04
+Request: GET /api/applications/:id for an owned record
+Expected result: 200; { "application": {...} }.
+Notes: Compare returned id and fields.
+
+APP-05
+Request: GET /api/applications/:id with non-positive/non-numeric id
+Expected result: 400; valid-id message.
+
+APP-06
+Request: GET /api/applications/:id for a missing or another user's record
+Expected result: 404; application-not-found response.
+Notes: Confirms owner scoping.
+
+APP-07
+Request: PUT /api/applications/:id with a complete valid payload
+Expected result: 200; updated application is returned.
+Notes: PUT validates the complete payload; do not send a partial update.
+
+APP-08
+Request: PUT /api/applications/:id with invalid values or invalid ID
+Expected result: 400; validation or valid-id message.
+Notes: An Interview status requires valid interview details.
+
+APP-09
+Request: DELETE /api/applications/:id for an owned record
+Expected result: 200; deleted: true; related notification jobs are removed in the same transaction.
+Notes: Irreversible.
+
+APP-10
+Request: DELETE /api/applications/:id for another user's or missing record
+Expected result: 404; no other user's record or jobs are deleted.
+
+APP-11
+Request: DELETE /api/applications/:id without bearer token
+Expected result: 401; no database work should be performed.
+
+INTERVIEW REMINDERS AND NOTIFICATIONS
+
+NOT-01
+Request: POST /api/notifications/interview with applicationId, company, position, valid interviewDate/interviewTime, and notificationChannels: ["In-app"]
+Expected result: 200; response indicates whether scheduled, with results array. A past interview returns scheduled: false and no results.
+Notes: Other channel values are not supported by this endpoint. Date/time interpretation follows the server's interview schedule logic.
+
+NOT-02
+Request: POST /api/notifications/interview with required details omitted, no In-app channel, unsupported channel, invalid date/time, or invalid applicationLink
+Expected result: 400; validation message.
+
+NOT-03
+Request: DELETE /api/notifications/interview/:applicationId
+Expected result: 200; { "cancelled": <number> }.
+Notes: Cancels pending/processing reminder jobs for the signed-in user.
+
+NOT-04
+Request: GET /api/notifications
+Expected result: 200; { "notifications": [...] }, Cache-Control: no-store; records are limited to the signed-in user and linked applications.
+Notes: Expired interview reminders may be pruned during this read.
+
+NOT-05
+Request: PATCH /api/notifications/:notificationId/read without a body
+Expected result: 200; notification is marked read.
+
+NOT-06
+Request: PATCH /api/notifications/:notificationId/read with { "read": false }
+Expected result: 200; response notification has read: false.
+Notes: true can mark as read explicitly.
+
+NOT-07
+Request: PATCH with non-boolean read, or for a missing/other user's notification
+Expected result: 400 for non-boolean; 404 for an unavailable/other user's record.
+
+GMAIL CONNECTION, SYNC, AND REVIEW
+
+All Gmail routes except OAuth callback require a bearer token. API results depend on Google OAuth configuration, a connected Gmail account, and available Gmail data. Do not automate a real OAuth consent or real mailbox without a dedicated account.
+
+GML-01
+Request: GET /api/gmail/status
+Expected result: 200; connected boolean and sync timestamps/error; Cache-Control: no-store.
+Notes: Email is null when disconnected.
+
+GML-02
+Request: POST /api/gmail/connect
+Expected result: 200 with an authorizationUrl when OAuth settings are configured; 503 with a clear configuration message otherwise.
+Notes: Starting OAuth creates expiring state. Complete consent in a browser, not by fabricating a successful callback.
+
+GML-03
+Request: GET /api/gmail/oauth/callback?error=access_denied
+Expected result: 302 redirect to the configured client Gmail page with gmail=denied.
+Notes: Safe denial-path check included in Postman. Successful callback requires a real one-time state and provider code.
+
+GML-04
+Request: GET /api/gmail/oauth/callback without valid state/code
+Expected result: Redirect to the client Gmail page with gmail=invalid; expired/unknown state redirects with gmail=expired.
+Notes: Callback status is a redirect, not a JSON API response.
+
+GML-05
+Request: POST /api/gmail/sync while connected
+Expected result: 200; sync message, processed count/outcomes, and initial-sync completion state.
+Notes: A concurrent sync can return 200 with inProgress: true.
+
+GML-06
+Request: POST /api/gmail/sync during provider quota cooldown
+Expected result: 429; Retry-After header and retryAfterSeconds.
+Notes: Retry only after the supplied delay.
+
+GML-07
+Request: POST /api/gmail/sync while disconnected/auth expired or provider unavailable
+Expected result: 502; safe error message.
+Notes: Error text can distinguish not-connected/auth-expired conditions.
+
+GML-08
+Request: GET /api/gmail/review
+Expected result: 200; messages array of review-queue items with boolean retryable.
+Notes: Queue is limited to 100 items. Use a returned message id for review actions.
+
+GML-09
+Request: GET /api/gmail/history
+Expected result: 200; messages array containing completed updated, reviewed, or dismissed outcomes and retryable.
+Notes: Limited to 100; ignored/review queue rows are not normal history entries.
+
+GML-10
+Request: POST /api/gmail/messages/:messageId/retry for a retryable message
+Expected result: 200; processed count/outcomes.
+Notes: Requires a message owned by the current account and still available in Gmail.
+
+GML-11
+Request: Retry invalid ID, already non-retryable item, busy sync, or quota-limited mailbox
+Expected result: 400 for invalid ID; 409 for retry conflict/non-retryable; 429 with Retry-After for quota.
+Notes: 500/502 represent server/provider failures.
+
+GML-12
+Request: POST /api/gmail/review/:messageId with { "action": "dismiss" }
+Expected result: 200; email dismissed and moves to history.
+Notes: Mutates the review item.
+
+GML-13
+Request: Review with { "action": "apply", "applicationId": <owned id> }
+Expected result: 200 when applied or already up to date; 400 for invalid action/application input; 404 for unavailable review/application; 409 when the status would not advance and needs review.
+Notes: Choose an application owned by the current account. This can update status/interview details and schedule reminders.
+
+GML-14
+Request: DELETE /api/gmail/connection
+Expected result: 200; { "disconnected": true }.
+Notes: Destructive to the local link and attempts to revoke Google's refresh token.
+
+PARSER-FOCUSED REGRESSION SCENARIOS
+
+These tests exercise server/gmail-parser.js with synthetic fixtures through node --test; they are not Postman requests. Verify them using the existing unit tests and do not put personal messages into test fixtures.
+
+PAR-01
+Synthetic input scenario: Current authored body clearly says an application was received/submitted.
+Expected parser behavior: Classify Applied with confidence; quoted/forwarded text alone must not override current text.
+
+PAR-02
+Synthetic input scenario: Subject signals an assessment invitation and current body relates to the candidate/application.
+Expected parser behavior: Classify Assessment where the parser's assessment-invitation rules match.
+
+PAR-03
+Synthetic input scenario: Interview invitation includes date, time, type, location, or meeting link.
+Expected parser behavior: Classify Interview and extract only unambiguous details; time-zone cases use the parser's configured zone handling.
+
+PAR-04
+Synthetic input scenario: Current email contains conflicting application outcomes, or subject contradicts authored body.
+Expected parser behavior: Return no automatic status and require review rather than choosing one silently.
+
+PAR-05
+Synthetic input scenario: Generic job alert, security notice, or quoted old status without a current personalized result.
+Expected parser behavior: Do not treat it as a new application-status change.
+
+Run the parser's focused tests with:
+node --test server/test/gmail-parser.test.js
+
+Run the full server unit suite with:
+npm --prefix server test
+
+EVIDENCE AND EXPECTED VARIATION
+
+The Postman collection includes response assertions for its representative positive/negative requests. Assertions allow explicitly documented operational outcomes for health, Gmail OAuth configuration, synchronization, and retry because those depend on local configuration and provider state. A passing Postman assertion does not prove Gmail-provider delivery or database isolation; use a dedicated local account and review state changes directly.

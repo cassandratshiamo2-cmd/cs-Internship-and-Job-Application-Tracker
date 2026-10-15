@@ -1,0 +1,943 @@
+{
+  "info": {
+    "_postman_id": "8e09d2e5-0a9d-4c46-91c3-5e322831bb17",
+    "name": "ApplyFlow API Testing",
+    "description": "Manual, environment-driven requests for the existing ApplyFlow Express API. Start with README.md and API-Test-Case-Documentation.md; several requests create, update, or delete test data.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "testEmail",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "testPassword",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "testFullName",
+      "value": "ApplyFlow API Test",
+      "type": "string"
+    },
+    {
+      "key": "applicationId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "notificationId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "gmailReviewMessageId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "gmailRetryMessageId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "gmailApplicationId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "GET API health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "health"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Health reports its database state', function () {",
+                  "  pm.expect([200, 503]).to.include(pm.response.code);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(['UP', 'DOWN']).to.include(body.status);",
+                  "  pm.expect(body).to.have.property('timestamp');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET API root",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": ["{{baseUrl}}"],
+              "path": [""]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('API root is available', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().message).to.include('ApplyFlow backend is running');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "POST Register test user",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fullName\": \"{{testFullName}}\",\n  \"email\": \"{{testEmail}}\",\n  \"password\": \"{{testPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/register",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "register"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Registration creates a user', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.user).to.have.property('id');",
+                  "  pm.expect(body.user.email).to.eql(pm.collectionVariables.get('testEmail').trim().toLowerCase());",
+                  "  pm.expect(body.user).not.to.have.property('password');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Login test user",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{testEmail}}\",\n  \"password\": \"{{testPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "login"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Login returns a bearer token', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.token).to.be.a('string').and.not.empty;",
+                  "  pm.collectionVariables.set('token', body.token);",
+                  "  pm.expect(body.user).to.have.property('id');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Login rejects an incorrect password",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{testEmail}}\",\n  \"password\": \"DefinitelyNotTheTestPassword-123!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "login"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Incorrect credentials are rejected uniformly', function () {",
+                  "  pm.response.to.have.status(401);",
+                  "  pm.expect(pm.response.json().message).to.eql('Invalid email or password.');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Applications",
+      "item": [
+        {
+          "name": "GET List applications",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/applications",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "applications"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Applications response is an array', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().applications).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Create application",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"company\": \"ApplyFlow API Test Company\",\n  \"position\": \"Graduate Software Developer\",\n  \"date\": \"2026-10-13\",\n  \"type\": \"Graduate Job\",\n  \"status\": \"Applied\",\n  \"arrangement\": \"Hybrid\",\n  \"notes\": \"Created by the ApplyFlow Postman test collection\",\n  \"applicationLink\": \"https://example.test/jobs/graduate-developer\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/applications",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "applications"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Application is created', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.application).to.have.property('id');",
+                  "  pm.expect(body.application.status).to.eql('Applied');",
+                  "  pm.collectionVariables.set('applicationId', body.application.id);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Get application by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "applications", "{{applicationId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Application details match the created record', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.application.id).to.eql(pm.collectionVariables.get('applicationId'));",
+                  "  pm.expect(body.application.company).to.eql('ApplyFlow API Test Company');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PUT Update application",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"company\": \"ApplyFlow API Test Company\",\n  \"position\": \"Graduate Software Developer\",\n  \"date\": \"2026-10-13\",\n  \"type\": \"Graduate Job\",\n  \"status\": \"Shortlisted\",\n  \"arrangement\": \"Hybrid\",\n  \"notes\": \"Updated by the ApplyFlow Postman test collection\",\n  \"applicationLink\": \"https://example.test/jobs/graduate-developer\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "applications", "{{applicationId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Application status is updated', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().application.status).to.eql('Shortlisted');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Reject invalid application",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"company\": \"\",\n  \"position\": \"Graduate Software Developer\",\n  \"date\": \"2026-02-30\",\n  \"type\": \"Unknown\",\n  \"status\": \"Applied\",\n  \"arrangement\": \"Hybrid\",\n  \"notes\": \"Invalid test payload\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/applications",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "applications"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Invalid application is rejected', function () {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE Delete test application",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "applications", "{{applicationId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Application is deleted', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().deleted).to.eql(true);",
+                  "  pm.collectionVariables.unset('applicationId');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Interview reminders and notifications",
+      "item": [
+        {
+          "name": "POST Schedule in-app interview reminder",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"applicationId\": \"{{applicationId}}\",\n  \"company\": \"ApplyFlow API Test Company\",\n  \"position\": \"Graduate Software Developer\",\n  \"interviewDate\": \"2026-11-02\",\n  \"interviewTime\": \"10:00\",\n  \"notificationChannels\": [\"In-app\"]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/notifications/interview",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "notifications", "interview"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Interview reminder is scheduled or the interview is already past', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body).to.have.property('scheduled');",
+                  "  pm.expect(body.results).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET List in-app notifications",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/notifications",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "notifications"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Notifications are returned without cache', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.headers.get('Cache-Control')).to.include('no-store');",
+                  "  pm.expect(pm.response.json().notifications).to.be.an('array');",
+                  "});",
+                  "const notifications = pm.response.json().notifications;",
+                  "if (notifications.length) pm.collectionVariables.set('notificationId', notifications[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PATCH Mark notification unread",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"read\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/notifications/{{notificationId}}/read",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "notifications", "{{notificationId}}", "read"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Notification read state is updated', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().notification.read).to.eql(false);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE Cancel interview reminders",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/notifications/interview/{{applicationId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "notifications", "interview", "{{applicationId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Pending interview reminders are cancelled', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().cancelled).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Gmail integration",
+      "item": [
+        {
+          "name": "GET Gmail connection status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "status"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Gmail status describes connection state', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.connected).to.be.a('boolean');",
+                  "  pm.expect(pm.response.headers.get('Cache-Control')).to.include('no-store');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Start Gmail OAuth",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/connect",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "connect"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('OAuth start returns a URL or an explicit configuration error', function () {",
+                  "  pm.expect([200, 503]).to.include(pm.response.code);",
+                  "  const body = pm.response.json();",
+                  "  if (pm.response.code === 200) pm.expect(body.authorizationUrl).to.match(/^https:\\/\\//);",
+                  "  else pm.expect(body.message).to.include('not configured');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Run Gmail sync",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/sync",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "sync"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Sync returns a documented outcome', function () {",
+                  "  pm.expect([200, 429, 502]).to.include(pm.response.code);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.message).to.be.a('string');",
+                  "  if (pm.response.code === 429) pm.expect(pm.response.headers.get('Retry-After')).to.exist;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Gmail review queue",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/review",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "review"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Review queue returns review messages', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const messages = pm.response.json().messages;",
+                  "  pm.expect(messages).to.be.an('array');",
+                  "  messages.forEach(function (message) { pm.expect(message.retryable).to.be.a('boolean'); });",
+                  "});",
+                  "const messages = pm.response.json().messages;",
+                  "if (messages.length) pm.collectionVariables.set('gmailReviewMessageId', messages[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Gmail processing history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/history",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "history"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('History returns completed review outcomes', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const messages = pm.response.json().messages;",
+                  "  pm.expect(messages).to.be.an('array');",
+                  "  messages.forEach(function (message) {",
+                  "    pm.expect(['updated', 'reviewed', 'dismissed']).to.include(message.outcome);",
+                  "    pm.expect(message.retryable).to.be.a('boolean');",
+                  "  });",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Retry Gmail message",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/messages/{{gmailRetryMessageId}}/retry",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "messages", "{{gmailRetryMessageId}}", "retry"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Retry returns its outcome or a documented retry condition', function () {",
+                  "  pm.expect([200, 400, 409, 429, 500, 502]).to.include(pm.response.code);",
+                  "  pm.expect(pm.response.json().message).to.be.a('string');",
+                  "  if (pm.response.code === 429) pm.expect(pm.response.headers.get('Retry-After')).to.exist;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Apply Gmail review to application",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"apply\",\n  \"applicationId\": \"{{gmailApplicationId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/review/{{gmailReviewMessageId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "review", "{{gmailReviewMessageId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Gmail review decision succeeds or reports its documented conflict', function () {",
+                  "  pm.expect([200, 400, 404, 409]).to.include(pm.response.code);",
+                  "  pm.expect(pm.response.json().message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST Dismiss Gmail review item",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"dismiss\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/review/{{gmailReviewMessageId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "review", "{{gmailReviewMessageId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Review item is dismissed', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().message).to.eql('Email dismissed.');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE Disconnect Gmail",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/connection",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "connection"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Gmail connection is disconnected', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().disconnected).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET Simulate OAuth denial callback",
+          "protocolProfileBehavior": {
+            "followRedirects": false
+          },
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/gmail/oauth/callback?error=access_denied",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "gmail", "oauth", "callback"],
+              "query": [
+                {
+                  "key": "error",
+                  "value": "access_denied"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('OAuth denial redirects to the Gmail page with a denied result', function () {",
+                  "  pm.response.to.have.status(302);",
+                  "  pm.expect(pm.response.headers.get('Location')).to.include('gmail=denied');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
