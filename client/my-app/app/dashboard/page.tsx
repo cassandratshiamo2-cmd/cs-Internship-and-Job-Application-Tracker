@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AppShell, SectionTitle, StatCard, StatusBadge } from "@/components/app-shell";
+import { getActionRecommendations } from "@/lib/action-centre";
 import { getCurrentUser, getStoredApplications } from "@/lib/mock-data";
 import type { Application } from "@/lib/types";
 
@@ -89,6 +90,7 @@ export default function DashboardPage() {
   const offersCount = applications.filter(
     (item) => item.status === "Offer"
   ).length;
+  const actionRecommendations = getActionRecommendations(applications);
 
   const progressItems = [
     {
@@ -171,6 +173,75 @@ export default function DashboardPage() {
                 accent="bg-[#7fe2d4]"
               />
             </div>
+
+            <section
+              aria-labelledby="action-centre-title"
+              className="rounded-[28px] border border-white/60 bg-white/80 p-5 shadow-[0_10px_30px_rgba(203,213,225,0.26)]"
+            >
+              <div className="mb-4">
+                <h3
+                  id="action-centre-title"
+                  className="text-xl font-semibold text-slate-800"
+                >
+                  Action Centre
+                </h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  A few helpful next steps based on your saved application
+                  details.
+                </p>
+              </div>
+
+              {actionRecommendations.length > 0 ? (
+                <ul className="space-y-3">
+                  {actionRecommendations.map((action) => {
+                    const priorityStyle = {
+                      Urgent: "bg-[#fff0f3] text-[#b3506e]",
+                      High: "bg-[#fff4e8] text-[#a85d24]",
+                      Medium: "bg-[#f2efff] text-[#6e58a7]",
+                      Low: "bg-[#e9f9f6] text-[#167c75]",
+                    }[action.priority];
+
+                    return (
+                      <li
+                        key={action.key}
+                        className="flex flex-col gap-3 rounded-2xl border border-[#f0e7ef] bg-[#fffafc] p-4 sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="font-semibold text-slate-800">
+                              {action.company}
+                            </p>
+                            <span
+                              className={`rounded-full px-2.5 py-1 text-xs font-semibold ${priorityStyle}`}
+                            >
+                              {action.priority} priority
+                            </span>
+                          </div>
+                          <p className="text-sm text-slate-600">
+                            {action.position}
+                          </p>
+                          <p className="mt-1 text-sm text-slate-500">
+                            {action.reason}
+                          </p>
+                        </div>
+
+                        <Link
+                          href={action.href}
+                          className="inline-flex shrink-0 items-center justify-center rounded-full border border-[#bce9e5] bg-white px-4 py-2 text-sm font-semibold text-[#167c75] transition hover:bg-[#e9f9f6]"
+                        >
+                          View application
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-[#fffafc] p-6 text-center text-sm text-slate-500">
+                  Everything is up to date. New reminders will appear here
+                  when there is a helpful next step.
+                </div>
+              )}
+            </section>
 
             <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
               <section className="rounded-[28px] border border-white/60 bg-white/80 p-5 shadow-[0_10px_30px_rgba(203,213,225,0.26)]">
