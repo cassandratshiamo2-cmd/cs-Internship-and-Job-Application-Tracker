@@ -898,6 +898,8 @@ function extractInterviewType({ subject = '', text = '' }) {
       telephone: 'Phone',
       video: 'Video',
       videointerview: 'Video',
+      online: 'Video',
+      onlineinterview: 'Video',
       virtual: 'Video',
       virtualinterview: 'Video',
       inperson: 'In-person',
@@ -1013,10 +1015,10 @@ function extractInterviewLocation({ text = '' }) {
 
   const detailsIndex = content.search(/\binterview\s+details\s*:/i);
   const labels = [
-    ...content.matchAll(/\b(interview\s+)?(location|venue|address)\s*[:\-]\s*([^\r\n;]{3,240})/gi),
+    ...content.matchAll(/\b(interview\s+)?(company\s+address|location|venue|address)\s*[:\-]\s*([^\r\n;]{3,240})/gi),
   ];
   const explicitLocation = labels.find((match) => {
-    if (match[1]) return true;
+    if (match[1] || /^company\s+address$/i.test(match[2])) return true;
     const prefix = content.slice(Math.max(0, match.index - 200), match.index);
     const sameBlock = detailsIndex >= 0 &&
       match.index >= detailsIndex &&

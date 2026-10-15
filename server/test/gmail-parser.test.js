@@ -694,10 +694,18 @@ test('extracts only explicitly stated supported interview types', () => {
     ['We would like to invite you to a phone interview.', 'Phone'],
     ['Your video interview is scheduled for tomorrow.', 'Video'],
     ['Your interview will take place on Zoom.', 'Video'],
+    ['Interview Type: Online interview', 'Video'],
+    ['Interview Type: Virtual interview', 'Video'],
     ['Interview Type: Video', 'Video'],
+    ['Interview type: Phone', 'Phone'],
+    ['Interview Type: In-person', 'In-person'],
+    ['Interview Type: Technical', 'Technical'],
+    ['Interview Type: Panel', 'Panel'],
+    ['Interview Type: Other', 'Other'],
     ['The in-person interview will take place at our office.', 'In-person'],
     ['You are invited to a technical interview.', 'Technical'],
     ['The panel interview will include three managers.', 'Panel'],
+    ['Interview Type: Holographic', null],
     ['We would like to interview you.', null],
   ];
 
@@ -740,7 +748,17 @@ test('extracts explicit interview location, street addresses, and one meeting UR
     null
   );
   assert.equal(
-    extractInterviewLocation({ text: 'Company address: 123 Main Street, Johannesburg.' }),
+    extractInterviewLocation({
+      text: 'Company Address: Test Office, 123 Example Avenue, Hatfield, Pretoria, 0083',
+    }),
+    'Test Office, 123 Example Avenue, Hatfield, Pretoria, 0083',
+  );
+  assert.equal(
+    extractInterviewLocation({ text: '123 Main Street, Johannesburg.' }),
+    null,
+  );
+  assert.equal(
+    extractInterviewLocation({ text: 'Interview invitation with no address details.' }),
     null,
   );
   assert.equal(
@@ -754,6 +772,19 @@ test('extracts explicit interview location, street addresses, and one meeting UR
   assert.equal(
     extractInterviewMeetingUrl({ text: 'This unrelated message mentions Zoom: https://zoom.us/j/123456789' }),
     null,
+  );
+});
+
+test('extracts a company address from HTML interview email content', () => {
+  const details = extractInterviewDetails({
+    subject: 'Interview invitation - NovaBridge Software',
+    text: 'You are invited to an interview.',
+    html: '<p>You are invited to an interview.</p><p>Company Address: Test Office, 123 Example Avenue, Hatfield, Pretoria, 0083</p>',
+  });
+
+  assert.equal(
+    details.interviewLocation,
+    'Test Office, 123 Example Avenue, Hatfield, Pretoria, 0083',
   );
 });
 
