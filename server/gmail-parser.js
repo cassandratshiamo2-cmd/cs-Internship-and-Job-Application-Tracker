@@ -708,18 +708,22 @@ function collectInterviewDates(content) {
       const prefix = content.slice(Math.max(priorBoundary + 1, start - 180), start);
 
 
-const interviewDetailsDate =
-  /^\s*[-*•]?\s*(?:interview\s+)?date\s*[:\-]/i.test(currentLine) &&
-  /\binterview\s+details\s*:/i.test(
-    content.slice(Math.max(0, lineStart - 250), lineStart)
-  );
+      const nearbyText = content.slice(
+        Math.max(0, lineStart - 250),
+        Math.min(content.length, (lineEnd < 0 ? content.length : lineEnd) + 250)
+      );
 
-if (
-  !interviewDetailsDate &&
-  !interviewDateIsExplicitlyAssociated(prefix, currentLine)
-) {
-  continue;
-}
+      const labelledInterviewDate =
+        /^\s*[-*•]?\s*(?:interview\s+)?date\s*[:\-]/i.test(currentLine) &&
+        /\binterview\b/i.test(nearbyText);
+
+      if (
+        !labelledInterviewDate &&
+        !interviewDateIsExplicitlyAssociated(prefix, currentLine)
+      ) {
+        continue;
+      }
+
 
 
       dates.push({
@@ -893,7 +897,11 @@ function extractInterviewType({ subject = '', text = '' }) {
       phone: 'Phone',
       telephone: 'Phone',
       video: 'Video',
+      videointerview: 'Video',
+      online: 'Video',
+      onlineinterview: 'Video',
       virtual: 'Video',
+      virtualinterview: 'Video',
       inperson: 'In-person',
       facetoface: 'In-person',
       onsite: 'In-person',
@@ -1007,10 +1015,10 @@ function extractInterviewLocation({ text = '' }) {
 
   const detailsIndex = content.search(/\binterview\s+details\s*:/i);
   const labels = [
-    ...content.matchAll(/\b(interview\s+)?(location|venue|address)\s*[:\-]\s*([^\r\n;]{3,240})/gi),
+    ...content.matchAll(/\b(interview\s+)?(company\s+address|location|venue|address)\s*[:\-]\s*([^\r\n;]{3,240})/gi),
   ];
   const explicitLocation = labels.find((match) => {
-    if (match[1]) return true;
+    if (match[1] || /^company\s+address$/i.test(match[2])) return true;
     const prefix = content.slice(Math.max(0, match.index - 200), match.index);
     const sameBlock = detailsIndex >= 0 &&
       match.index >= detailsIndex &&
@@ -1040,11 +1048,67 @@ function extractInterviewLocation({ text = '' }) {
   return uniqueAddresses.length === 1 ? uniqueAddresses[0] : null;
 }
 
+function htmlToText(html) {
+  if (typeof html !== 'string' || !html) return '';
+
+  return html
+    .replace(/<blockquote\b[^>]*>[\s\S]*?<\/blockquote\s*>/gi, '')
+    .replace(/<(?:div|section)\b[^>]*(?:class=["'][^"']*(?:gmail_quote|yahoo_quoted|protonmail_quote)[^"']*["']|id=["']divRplyFwdMsg["'])[^>]*>[\s\S]*?<\/(?:div|section)\s*>/gi, '')
+    .replace(/<(?:div|span)\b[^>]*class=["'][^"']*moz-cite-prefix[^"']*["'][^>]*>[\s\S]*?<\/(?:div|span)\s*>/gi, '')
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<br\b[^>]*\/?>/gi, '\n')
+    .replace(/<li\b[^>]*>/gi, '\n- ')
+    .replace(/<\/(?:address|article|dd|div|dl|dt|h[1-6]|header|li|ol|p|section|table|tr|ul)\s*>/gi, '\n')
+    .replace(/<\/(?:td|th)\s*>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;|&#39;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(?:x([0-9a-f]+)|(\d+));?/gi, (_match, hex, decimal) => {
+      const codePoint = Number.parseInt(hex || decimal, hex ? 16 : 10);
+      return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+        ? String.fromCodePoint(codePoint)
+        : '';
+    })
+    .replace(/[\t\f\v ]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function extractInterviewDetails(email) {
+  const subject = email.subject || '';
+  const text = extractCurrentMessageText(email.text || '');
+  const htmlText = htmlToText(email.html);
+  const textSchedule = extractInterviewDateTime({ subject, text });
+  const htmlSchedule = htmlText
+    ? extractInterviewDateTime({ subject, text: htmlText })
+    : null;
+  let schedule = textSchedule;
+
+  if (!textSchedule.interviewDate && !textSchedule.ambiguous &&
+      !textSchedule.hasUnsupportedTimezone && htmlSchedule) {
+    schedule = htmlSchedule;
+  } else if (
+    textSchedule.interviewDate &&
+    !textSchedule.interviewTime &&
+    !textSchedule.ambiguous &&
+    !textSchedule.hasUnsupportedTimezone &&
+    htmlSchedule?.interviewDate === textSchedule.interviewDate &&
+    htmlSchedule.interviewTime
+  ) {
+    schedule = { ...textSchedule, interviewTime: htmlSchedule.interviewTime };
+  }
+
   return {
-    ...extractInterviewDateTime(email),
-    interviewType: extractInterviewType(email),
-    interviewLocation: extractInterviewLocation(email),
+    ...schedule,
+    interviewType: extractInterviewType({ subject, text }) ||
+      (htmlText ? extractInterviewType({ subject, text: htmlText }) : null),
+    interviewLocation: extractInterviewLocation({ text }) ||
+      (htmlText ? extractInterviewLocation({ text: htmlText }) : null),
     interviewMeetingUrl: extractInterviewMeetingUrl(email),
   };
 }

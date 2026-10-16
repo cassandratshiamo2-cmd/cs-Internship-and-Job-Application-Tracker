@@ -3354,6 +3354,133 @@ test('the exact Spar interview email persists date and time without inventing mi
   assert.equal(reminderCount, 1);
 });
 
+test('an online interview type is saved to the matched application without changing its schedule', async () => {
+  const application = {
+    id: 371,
+    company: 'Gmail Integration Test Ltd',
+    position: 'Graduate Software Developer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-14T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    interview_location: null,
+    interview_meeting_url: null,
+    notification_channels: ['In-app'],
+    application_link: null,
+    interview_email: null,
+  };
+  const otherApplication = {
+    id: 372,
+    company: 'Different Company',
+    position: 'Different Position',
+    status: 'Applied',
+    updated_at: new Date('2026-10-14T06:00:00Z'),
+  };
+  const messageId = 'gmail-online-interview-type';
+  const raw = Buffer.from([
+    'From: recruitment@example.test',
+    'To: applyflow@example.com',
+    'Subject: Interview Invitation – Graduate Software Developer – Gmail Integration Test Ltd',
+    'Date: Thu, 15 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Gmail Integration Test Ltd invites you to interview for Graduate Software Developer.',
+    'Position: Graduate Software Developer',
+    'Interview Date: 16 October 2026',
+    'Interview Time: 10:00 AM',
+    'Interview Type: Online interview',
+  ].join('\r\n')).toString('base64url');
+  const { service, processedRows } = createTestService({
+    applications: [application, otherApplication],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-gmail-online-interview-type',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'gmail-online-interview-type-thread',
+        internalDate: String(new Date('2026-10-15T08:00:00+02:00').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(processedRows.get(messageId).applicationId, application.id);
+  assert.equal(processedRows.get(messageId).detectedInterviewType, 'Video');
+  assert.deepEqual(
+    [
+      application.status,
+      application.interview_date,
+      application.interview_time,
+      application.interview_type,
+    ],
+    ['Interview', '2026-10-16', '10:00', 'Video']
+  );
+  assert.equal(otherApplication.status, 'Applied');
+});
+
+test('an unrecognized interview type does not replace an existing valid type', async () => {
+  const application = {
+    id: 373,
+    company: 'Gmail Integration Test Ltd',
+    position: 'Graduate Software Developer',
+    status: 'Interview',
+    updated_at: new Date('2026-10-14T06:00:00Z'),
+    interview_date: '2026-10-16',
+    interview_time: '10:00:00',
+    interview_type: 'Panel',
+    interview_location: null,
+    interview_meeting_url: 'https://meet.example.test/old',
+    notification_channels: ['In-app'],
+    application_link: null,
+    interview_email: null,
+  };
+  const messageId = 'gmail-unrecognized-interview-type';
+  const raw = Buffer.from([
+    'From: recruitment@example.test',
+    'To: applyflow@example.com',
+    'Subject: Interview Invitation - Graduate Software Developer - Gmail Integration Test Ltd',
+    'Date: Thu, 15 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Gmail Integration Test Ltd invites you to an interview for Graduate Software Developer.',
+    'Interview Type: Holographic',
+    'Updated meeting link: https://meet.example.test/new',
+  ].join('\r\n')).toString('base64url');
+  const { service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-gmail-unrecognized-interview-type',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'gmail-unrecognized-interview-type-thread',
+        internalDate: String(new Date('2026-10-15T08:00:00+02:00').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(processedRows.get(messageId).detectedInterviewType, null);
+  assert.equal(application.interview_type, 'Panel');
+  assert.equal(application.interview_date, '2026-10-16');
+  assert.equal(application.interview_time, '10:00:00');
+});
+
 test('a newer reschedule email updates the existing interview without creating a duplicate', async () => {
   const application = {
     id: 96,
@@ -3669,4 +3796,108 @@ test('scenarios 1-7: status transitions run through matching, persistence, and a
       assert.equal(row.outcome, 'review', `scenario ${index + 1} processed outcome`);
     }
   }
+});
+
+test('sync persists DataWave interview details when only the HTML MIME part contains the schedule', async () => {
+  const application = {
+    id: 121,
+    company: 'DataWave Technologies',
+    position: 'Graduate Data Analyst',
+    status: 'Applied',
+    updated_at: new Date('2026-10-08T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    interview_location: null,
+    interview_meeting_url: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const subject = 'Interview Invitation – Graduate Data Analyst – DataWave Technologies';
+  const html = [
+    '<p>You are invited to an interview.</p>',
+    '<p>Company: DataWave Technologies</p>',
+    '<p>Position: Graduate Data Analyst</p>',
+    '<p>Date: 22 October 2026</p>',
+    '<p>Time: 11:00 AM</p>',
+    '<p>Interview Type: Video Interview</p>',
+    '<p>Meeting Link: <a href="https://meet.google.com/xyz-abcd-efg">Join meeting</a></p>',
+  ].join('');
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
+  const raw = Buffer.from([
+    'From: DataWave Recruiting <recruiter@example.test>',
+    'To: applyflow@example.com',
+    `Subject: ${encodedSubject}`,
+    'Date: Mon, 12 Oct 2026 08:00:00 +0200',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/alternative; boundary="datawave-sync"',
+    '',
+    '--datawave-sync',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'You are invited to an interview at DataWave Technologies for the Graduate Data Analyst position.',
+    '--datawave-sync',
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from(html, 'utf8').toString('base64'),
+    '--datawave-sync--',
+    '',
+  ].join('\r\n')).toString('base64url');
+  const messageId = 'datawave-html-schedule';
+  const { service, processedRows, calls } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'datawave-html-schedule-history',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'datawave-html-schedule-thread',
+        internalDate: String(new Date('2026-10-12T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.deepEqual(
+    [
+      application.status,
+      application.interview_date,
+      application.interview_time,
+      application.interview_type,
+      application.interview_meeting_url,
+    ],
+    [
+      'Interview',
+      '2026-10-22',
+      '11:00',
+      'Video',
+      'https://meet.google.com/xyz-abcd-efg',
+    ],
+  );
+  assert.deepEqual(
+    [
+      processedRows.get(messageId).detectedStatus,
+      processedRows.get(messageId).detectedInterviewDate,
+      processedRows.get(messageId).detectedInterviewTime,
+      processedRows.get(messageId).detectedInterviewType,
+      processedRows.get(messageId).detectedInterviewMeetingUrl,
+    ],
+    [
+      'Interview',
+      '2026-10-22',
+      '11:00',
+      'Video',
+      'https://meet.google.com/xyz-abcd-efg',
+    ],
+  );
+  assert.equal(calls.applicationUpdates, 1);
 });
