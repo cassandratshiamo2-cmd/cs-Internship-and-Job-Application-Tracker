@@ -282,6 +282,59 @@ test('manual sync preserves a safe reconnect message for expired Gmail authoriza
   assert.match(payload.message, /reconnect Gmail/i);
 });
 
+test('oauth callback blocks same-account reconnect that omits a fresh refresh token', async (t) => {
+  const { google } = require('googleapis');
+  const originalGetToken = google.auth.OAuth2.prototype.getToken;
+  const originalGmail = google.gmail;
+  google.auth.OAuth2.prototype.getToken = async () => ({
+    tokens: {
+      access_token: 'access-token',
+      refresh_token: undefined,
+      expiry_date: Date.now() + 60000,
+    },
+  });
+  google.gmail = () => ({
+    users: {
+      getProfile: async () => ({ data: { emailAddress: 'connected@example.test' } }),
+    },
+  });
+  t.after(() => {
+    google.auth.OAuth2.prototype.getToken = originalGetToken;
+    google.gmail = originalGmail;
+  });
+
+  const app = express();
+  app.use(express.json());
+  app.use('/api/gmail', createGmailRouter({
+    pool: {
+      async query(sql, params = []) {
+        if (sql.includes('DELETE FROM gmail_oauth_states')) return { rowCount: 1, rows: [{ user_id: 7 }] };
+        if (sql.includes('SELECT id, gmail_address')) return { rowCount: 1, rows: [{ id: 11, gmail_address: 'connected@example.test' }] };
+        throw new Error(`Unexpected query: ${sql}`);
+      },
+    },
+    syncService: { async syncUser() {} },
+    authenticateRequest(req, res, next) { req.user = { id: 7 }; next(); },
+    scheduleInterviewReminder: async () => {},
+    env: {
+      CLIENT_URL: 'http://localhost:3000',
+      GOOGLE_CLIENT_ID: 'client-id',
+      GOOGLE_CLIENT_SECRET: 'secret',
+      GOOGLE_REDIRECT_URI: 'http://localhost:5000/api/gmail/oauth/callback',
+      GMAIL_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
+    },
+  }));
+
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  const response = await fetch(`${baseUrl}/api/gmail/oauth/callback?state=valid-state&code=code-123`, { redirect: 'manual' });
+  assert.equal(response.status, 302);
+  assert.match(response.headers.get('location'), /reconnect_failed/);
+});
+
 test('review endpoint fills an already-Interview application and schedules its complete in-app reminder', async (t) => {
   const application = {
     id: 13,

@@ -50,13 +50,19 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       if (!gmailAddress) throw new Error('Google did not return the Gmail account address.');
 
       const existing = await pool.query(
-        'SELECT refresh_token_ciphertext FROM gmail_connections WHERE user_id = $1',
+        'SELECT id, gmail_address, history_id, initial_sync_history_id, initial_sync_page_token FROM gmail_connections WHERE user_id = $1',
         [userId]
       );
-      const refreshToken = tokens.refresh_token
-        ? encryptToken(tokens.refresh_token, env.GMAIL_TOKEN_ENCRYPTION_KEY)
-        : existing.rows[0]?.refresh_token_ciphertext;
-      if (!refreshToken) throw new Error('Google did not provide a refresh token. Disconnect and reconnect Gmail.');
+      const existingConnection = existing.rows[0];
+      const existingAddress = String(existingConnection?.gmail_address || '').trim().toLowerCase();
+      if (existingAddress && existingAddress !== gmailAddress) {
+        return redirectWithResult('account_mismatch');
+      }
+      if (!tokens.refresh_token) {
+        throw new Error('Google did not issue a fresh refresh token. Please reconnect Gmail and approve the consent screen again.');
+      }
+
+      const refreshToken = encryptToken(tokens.refresh_token, env.GMAIL_TOKEN_ENCRYPTION_KEY);
 
       await pool.query(
         'INSERT INTO gmail_connections (' +
@@ -68,9 +74,11 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, ' +
           'access_token_ciphertext = EXCLUDED.access_token_ciphertext, ' +
           'token_expires_at = EXCLUDED.token_expires_at, ' +
-          'history_id = NULL, initial_sync_history_id = NULL, initial_sync_page_token = NULL, ' +
+          'history_id = COALESCE(gmail_connections.history_id, EXCLUDED.history_id), ' +
+          'initial_sync_history_id = COALESCE(gmail_connections.initial_sync_history_id, EXCLUDED.initial_sync_history_id), ' +
+          'initial_sync_page_token = COALESCE(gmail_connections.initial_sync_page_token, EXCLUDED.initial_sync_page_token), ' +
           'quota_backoff_until = NULL, quota_failure_count = 0, ' +
-          'is_connected = TRUE, last_sync_at = NULL, last_sync_error = NULL, updated_at = NOW()',
+          'is_connected = TRUE, last_sync_error = NULL, updated_at = NOW()',
         [
           userId,
           gmailAddress,
@@ -85,7 +93,13 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       });
       return redirectWithResult('connected');
     } catch (error) {
-      console.error('Gmail OAuth callback failed.');
+      console.error('Gmail OAuth callback failed:', error.message);
+      if (String(error.message || '').includes('refresh token')) {
+        return redirectWithResult('reconnect_failed');
+      }
+      if (String(error.message || '').includes('does not match')) {
+        return redirectWithResult('account_mismatch');
+      }
       return redirectWithResult('error');
     }
   });

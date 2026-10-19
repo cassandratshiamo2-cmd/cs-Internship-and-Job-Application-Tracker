@@ -180,6 +180,20 @@ function getGmailErrorReasons(error) {
   return errors.map((item) => String(item?.reason || '').toLowerCase());
 }
 
+function isInvalidGrantError(error) {
+  const reasonText = [
+    String(error?.code || ''),
+    String(error?.cause?.code || ''),
+    ...getGmailErrorReasons(error),
+    String(error?.response?.data?.error || ''),
+    String(error?.cause?.response?.data?.error || ''),
+    String(error?.message || ''),
+    String(error?.cause?.message || ''),
+  ].join(' ').toLowerCase();
+
+  return reasonText.includes('invalid_grant');
+}
+
 function isExpiredHistoryCursorError(error) {
   if (getGmailErrorStatus(error) !== 404) return false;
 
@@ -1385,8 +1399,9 @@ function createGmailSyncService({
         }
 
         const errorStatus = getGmailErrorStatus(error);
-        const safeMessage = errorStatus === 401 || errorStatus === 403
-          ? 'Gmail access was denied or expired. Reconnect Gmail and try again.'
+        const hasExpiredAuthorization = errorStatus === 401 || errorStatus === 403 || isInvalidGrantError(error);
+        const safeMessage = hasExpiredAuthorization
+          ? 'Gmail access was denied, revoked, or expired. Reconnect Gmail and try again.'
           : 'Gmail sync failed. Please try again later.';
         await pool.query(
           'UPDATE gmail_connections SET last_sync_at = NOW(), last_sync_attempt_at = NOW(), ' +
@@ -1395,7 +1410,7 @@ function createGmailSyncService({
         );
         const syncError = new Error(safeMessage);
         syncError.cause = error;
-        if (errorStatus === 401 || errorStatus === 403) {
+        if (hasExpiredAuthorization) {
           syncError.code = 'GMAIL_AUTH_EXPIRED';
         }
         throw syncError;
@@ -1511,6 +1526,7 @@ module.exports = {
   getSafeSyncErrorDetails,
   getRetryAfterMs,
   isGmailQuotaError,
+  isInvalidGrantError,
   isRetryableProcessedMessage,
   MAX_REPROCESS_ATTEMPTS,
   startGmailSyncWorker,
