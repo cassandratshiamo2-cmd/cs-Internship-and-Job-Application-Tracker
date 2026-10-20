@@ -22,14 +22,16 @@ const APPLICATION_UPDATE_SQL = [
   'ELSE interview_meeting_url END, ',
   'notification_channels = $14::text[], ',
   'interview_email = $15, ',
-  'updated_at = NOW() ',
+  'updated_at = NOW(), ',
+  'recruitment_activity_at = CASE WHEN $20::boolean THEN NOW() ELSE recruitment_activity_at END ',
   'WHERE id = $1 AND user_id = $2 ',
   'RETURNING ',
   'id, company, position, application_date::text AS date, type, status, arrangement, notes, ',
   'application_link AS "applicationLink", interview_date::text AS "interviewDate", ',
   'interview_time AS "interviewTime", interview_type AS "interviewType", ',
   'interview_location AS "interviewLocation", interview_meeting_url AS "interviewMeetingUrl", ',
-  'notification_channels AS "notificationChannels", interview_email AS "interviewEmail"',
+  'notification_channels AS "notificationChannels", interview_email AS "interviewEmail", ',
+  'recruitment_activity_at AS "recruitmentActivityAt"',
 ].join('');
 
 function buildApplicationUpdateQuery({
@@ -52,6 +54,7 @@ function buildApplicationUpdateQuery({
   interviewLocation,
   hasInterviewMeetingUrl,
   interviewMeetingUrl,
+  recruitmentActivityChanged,
 }) {
   return {
     text: APPLICATION_UPDATE_SQL,
@@ -75,6 +78,7 @@ function buildApplicationUpdateQuery({
       interviewLocation,
       hasInterviewMeetingUrl,
       interviewMeetingUrl,
+      Boolean(recruitmentActivityChanged),
     ],
   };
 }

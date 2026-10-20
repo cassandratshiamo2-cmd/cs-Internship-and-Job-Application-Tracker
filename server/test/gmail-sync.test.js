@@ -5,6 +5,7 @@ const {
   createGmailSyncService,
   getRetryAfterMs,
   isGmailQuotaError,
+  isInvalidGrantError,
   isRetryableProcessedMessage,
   startGmailSyncWorker,
 } = require('../gmail-sync');
@@ -2910,6 +2911,25 @@ test('a Gmail API authentication failure remains fatal and releases the connecti
   ));
 });
 
+test('invalid_grant is recognized as expired authorization and returns a safe reconnect message', async () => {
+  const { calls, service } = createTestService({
+    historyList: async () => {
+      const error = new Error('invalid_grant: sensitive provider details should not be returned');
+      error.response = { data: { error: 'invalid_grant' } };
+      throw error;
+    },
+  });
+
+  assert.equal(isInvalidGrantError({
+    cause: { response: { data: { error: 'invalid_grant' } } },
+  }), true);
+  await assert.rejects(
+    service.syncConnection(7),
+    /Gmail access was denied, revoked, or expired\. Reconnect Gmail and try again\./
+  );
+  assert.ok(calls.connectionUpdates.some((sql) => sql.includes('last_sync_error = $2')));
+});
+
 test('successful sync persists distinct last-attempt and last-success timestamps', async () => {
   const { calls, service } = createTestService({
     historyList: async () => ({
@@ -3426,6 +3446,82 @@ test('an online interview type is saved to the matched application without chang
   assert.equal(otherApplication.status, 'Applied');
 });
 
+test('an in-person interview type is saved with the date, time, and location', async () => {
+  const application = {
+    id: 374,
+    company: 'NovaBridge Solutions',
+    position: 'Junior Web Developer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-19T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    interview_location: null,
+    interview_meeting_url: null,
+    notification_channels: ['In-app'],
+    application_link: null,
+    interview_email: null,
+  };
+  const messageId = 'novabridge-in-person-interview-type';
+  const location = 'NovaBridge Solutions, 45 Innovation Avenue, Hatfield, Pretoria, Gauteng, 0028';
+  const raw = Buffer.from([
+    'From: NovaBridge Recruiting <recruitment@example.test>',
+    'To: applyflow@example.com',
+    'Subject: Interview Invitation – Junior Web Developer – NovaBridge Solutions',
+    'Date: Mon, 19 Oct 2026 08:00:00 +0200',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'NovaBridge Solutions invites you to an interview for the Junior Web Developer position.',
+    'Interview Date: 23 October 2026',
+    'Interview Time: 11:00 AM – 11:45 AM SAST',
+    'Interview Type: In-person interview',
+    `Location: ${location}`,
+  ].join('\r\n')).toString('base64url');
+  const { service, processedRows } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'history-novabridge-in-person-interview-type',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'novabridge-in-person-interview-type-thread',
+        internalDate: String(new Date('2026-10-19T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+  const processed = processedRows.get(messageId);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.equal(processed.applicationId, application.id);
+  assert.deepEqual(
+    [
+      processed.detectedStatus,
+      processed.detectedInterviewDate,
+      processed.detectedInterviewTime,
+      processed.detectedInterviewType,
+      processed.detectedInterviewLocation,
+    ],
+    ['Interview', '2026-10-23', '11:00', 'In-person', location],
+  );
+  assert.deepEqual(
+    [
+      application.status,
+      application.interview_date,
+      application.interview_time,
+      application.interview_type,
+      application.interview_location,
+    ],
+    ['Interview', '2026-10-23', '11:00', 'In-person', location],
+  );
+});
+
 test('an unrecognized interview type does not replace an existing valid type', async () => {
   const application = {
     id: 373,
@@ -3897,6 +3993,116 @@ test('sync persists DataWave interview details when only the HTML MIME part cont
       '11:00',
       'Video',
       'https://meet.google.com/xyz-abcd-efg',
+    ],
+  );
+  assert.equal(calls.applicationUpdates, 1);
+});
+
+test('sync persists BrightPath interview location without changing other extracted details', async () => {
+  const application = {
+    id: 121,
+    company: 'BrightPath Technologies',
+    position: 'Junior Software Developer',
+    status: 'Applied',
+    updated_at: new Date('2026-10-08T06:00:00Z'),
+    interview_date: null,
+    interview_time: null,
+    interview_type: null,
+    interview_location: null,
+    interview_meeting_url: null,
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const location = 'BrightPath Technologies, 123 Innovation Drive, Hatfield, Pretoria, Gauteng, 0083';
+  const subject = 'Interview Invitation – Junior Software Developer – BrightPath Technologies';
+  const html = [
+    '<p>You are invited to an interview.</p>',
+    '<p>Company: BrightPath Technologies</p>',
+    '<p>Position: Junior Software Developer</p>',
+    '<p>Date: 21 October 2026</p>',
+    '<p>Time: 10:30 AM</p>',
+    '<p>Interview Type: Video Interview</p>',
+    `<p>Location: ${location}</p>`,
+    '<p>Meeting Link: <a href="https://example.com/brightpath-interview">Join meeting</a></p>',
+  ].join('');
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
+  const raw = Buffer.from([
+    'From: BrightPath Recruiting <recruiter@example.test>',
+    'To: applyflow@example.com',
+    `Subject: ${encodedSubject}`,
+    'Date: Mon, 12 Oct 2026 08:00:00 +0200',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/alternative; boundary="brightpath-sync"',
+    '',
+    '--brightpath-sync',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'You are invited to an interview at BrightPath Technologies for the Junior Software Developer position.',
+    '--brightpath-sync',
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from(html, 'utf8').toString('base64'),
+    '--brightpath-sync--',
+    '',
+  ].join('\r\n')).toString('base64url');
+  const messageId = 'brightpath-interview-location';
+  const { service, processedRows, calls } = createTestService({
+    applications: [application],
+    historyList: async () => ({
+      data: {
+        historyId: 'brightpath-interview-location-history',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'brightpath-interview-location-thread',
+        internalDate: String(new Date('2026-10-19T06:00:00Z').getTime()),
+      },
+    }),
+  });
+
+  const result = await service.syncConnection(7);
+
+  assert.deepEqual(result.outcomes, ['updated']);
+  assert.deepEqual(
+    [
+      application.status,
+      application.interview_date,
+      application.interview_time,
+      application.interview_type,
+      application.interview_location,
+      application.interview_meeting_url,
+    ],
+    [
+      'Interview',
+      '2026-10-21',
+      '10:30',
+      'Video',
+      location,
+      'https://example.com/brightpath-interview',
+    ],
+  );
+  assert.deepEqual(
+    [
+      processedRows.get(messageId).detectedStatus,
+      processedRows.get(messageId).detectedInterviewDate,
+      processedRows.get(messageId).detectedInterviewTime,
+      processedRows.get(messageId).detectedInterviewType,
+      processedRows.get(messageId).detectedInterviewLocation,
+      processedRows.get(messageId).detectedInterviewMeetingUrl,
+    ],
+    [
+      'Interview',
+      '2026-10-21',
+      '10:30',
+      'Video',
+      location,
+      'https://example.com/brightpath-interview',
     ],
   );
   assert.equal(calls.applicationUpdates, 1);

@@ -60,6 +60,21 @@ Required fields are `company`, `position`, `date` (`YYYY-MM-DD`), `type`, `statu
 | APP-10 | `DELETE /api/applications/:id` for another user's or missing record | `404`; no other user's record or jobs are deleted. | |
 | APP-11 | `DELETE /api/applications/:id` without bearer token | `401`; no database work should be performed. | |
 
+### Dashboard Action Centre
+
+Action states are persisted separately from notification delivery. Use a current
+action identity returned by the dashboard's application data; follow-up
+identities include the recruitment-activity timestamp, and interview identities
+include the scheduled instant. Snooze presets expire at the same Africa/
+Johannesburg wall-clock time tomorrow or one week later.
+
+| ID | Request | Expected result | Notes |
+| --- | --- | --- | --- |
+| ACT-01 | `GET /api/action-centre/states` with bearer token | `200`; returns only action states for applications owned by the signed-in user; `Cache-Control: no-store`. | |
+| ACT-02 | `PUT /api/action-centre/states` with an owned current action and `{ "state": "completed" }` | `200`; action is completed and remains suppressed for that action cycle. | A later activity or rescheduled interview creates a different action identity. |
+| ACT-03 | `PUT /api/action-centre/states` with an owned current action, `{ "state": "snoozed", "snoozePreset": "tomorrow" }` or `"one-week"` | `200`; action is snoozed until the corresponding Johannesburg calendar date and wall-clock time. | Only the two named presets are accepted. |
+| ACT-04 | State write without authentication, for another user's application, for a stale action identity, or with an invalid snooze preset | `401`, `404`, `409`, or `400`, respectively; no cross-user state is changed. | |
+
 ### Interview reminders and notifications
 
 | ID | Request | Expected result | Notes |

@@ -903,6 +903,7 @@ function extractInterviewType({ subject = '', text = '' }) {
       virtual: 'Video',
       virtualinterview: 'Video',
       inperson: 'In-person',
+      inpersoninterview: 'In-person',
       facetoface: 'In-person',
       onsite: 'In-person',
       technical: 'Technical',
@@ -1010,7 +1011,7 @@ function extractInterviewMeetingUrl({ text = '', html = '' }) {
   return uniqueCandidates.length === 1 ? uniqueCandidates[0] : null;
 }
 
-function extractInterviewLocation({ text = '' }) {
+function extractInterviewLocation({ text = '', subject = '' }) {
   const content = extractCurrentMessageText(text).slice(0, 100000);
 
   const detailsIndex = content.search(/\binterview\s+details\s*:/i);
@@ -1023,7 +1024,9 @@ function extractInterviewLocation({ text = '' }) {
     const sameBlock = detailsIndex >= 0 &&
       match.index >= detailsIndex &&
       match.index - detailsIndex <= 1200;
-    return sameBlock || /\binterview\b[^\r\n.!?;]{0,180}[.!?]?\s*$/i.test(prefix);
+    return sameBlock ||
+      /\binterview\b[^\r\n.!?;]{0,180}[.!?]?\s*$/i.test(prefix) ||
+      (/^location$/i.test(match[2]) && /\binterview\b/i.test(subject));
   });
 
   if (explicitLocation) {
@@ -1107,8 +1110,8 @@ function extractInterviewDetails(email) {
     ...schedule,
     interviewType: extractInterviewType({ subject, text }) ||
       (htmlText ? extractInterviewType({ subject, text: htmlText }) : null),
-    interviewLocation: extractInterviewLocation({ text }) ||
-      (htmlText ? extractInterviewLocation({ text: htmlText }) : null),
+    interviewLocation: extractInterviewLocation({ text, subject }) ||
+      (htmlText ? extractInterviewLocation({ text: htmlText, subject }) : null),
     interviewMeetingUrl: extractInterviewMeetingUrl(email),
   };
 }

@@ -136,6 +136,28 @@ APP-11
 Request: DELETE /api/applications/:id without bearer token
 Expected result: 401; no database work should be performed.
 
+DASHBOARD ACTION CENTRE
+
+Action states are persisted separately from notification delivery. Use a current action identity from the dashboard's application data. Follow-up identities include the recruitment-activity timestamp; interview identities include the scheduled instant. Snooze presets expire at the same Africa/Johannesburg wall-clock time tomorrow or one week later.
+
+ACT-01
+Request: GET /api/action-centre/states with bearer token
+Expected result: 200; returns only action states for applications owned by the signed-in user; Cache-Control: no-store.
+
+ACT-02
+Request: PUT /api/action-centre/states with an owned current action and { "state": "completed" }
+Expected result: 200; action is completed and remains suppressed for that action cycle.
+Notes: A later activity or rescheduled interview creates a different action identity.
+
+ACT-03
+Request: PUT /api/action-centre/states with an owned current action and { "state": "snoozed", "snoozePreset": "tomorrow" } or "one-week"
+Expected result: 200; action is snoozed until the corresponding Johannesburg calendar date and wall-clock time.
+Notes: Only the two named presets are accepted.
+
+ACT-04
+Request: State write without authentication, for another user's application, for a stale action identity, or with an invalid snooze preset
+Expected result: 401, 404, 409, or 400, respectively; no cross-user state is changed.
+
 INTERVIEW REMINDERS AND NOTIFICATIONS
 
 NOT-01

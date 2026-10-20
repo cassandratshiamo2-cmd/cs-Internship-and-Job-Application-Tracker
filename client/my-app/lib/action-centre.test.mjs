@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { getActionRecommendations } from "./action-centre.ts";
 
-const today = new Date(2026, 9, 22, 12);
+const today = new Date("2026-10-22T10:00:00.000Z");
 
 function application(overrides = {}) {
   return {
@@ -68,32 +68,37 @@ describe("getActionRecommendations", () => {
           id: "today",
           status: "Interview",
           interviewDate: "2026-10-22",
-          interviewTime: "11:00",
+          interviewTime: "14:00",
         }),
         application({
           id: "day-three",
           status: "Interview",
           interviewDate: "2026-10-25",
+          interviewTime: "10:00",
         }),
         application({
           id: "day-four",
           status: "Interview",
           interviewDate: "2026-10-26",
+          interviewTime: "10:00",
         }),
         application({
           id: "day-fourteen",
           status: "Interview",
           interviewDate: "2026-11-05",
+          interviewTime: "10:00",
         }),
         application({
           id: "day-fifteen",
           status: "Interview",
           interviewDate: "2026-11-06",
+          interviewTime: "10:00",
         }),
         application({
           id: "past",
           status: "Interview",
           interviewDate: "2026-10-21",
+          interviewTime: "10:00",
         }),
       ],
       today
@@ -109,10 +114,10 @@ describe("getActionRecommendations", () => {
         "past-past-interview",
       ]
     );
-    assert.match(result[0].reason, /Interview today.*11:00/);
-    assert.match(result[1].reason, /Interview in 3 days/);
-    assert.match(result[2].reason, /Interview in 4 days/);
-    assert.match(result[3].reason, /Interview in 14 days/);
+    assert.match(result.find(({ key }) => key === "today-upcoming-interview").reason, /Interview today.*2:00 PM/);
+    assert.match(result.find(({ key }) => key === "day-three-upcoming-interview").reason, /Interview in 3 days/);
+    assert.match(result.find(({ key }) => key === "day-four-upcoming-interview").reason, /Interview in 4 days/);
+    assert.match(result.find(({ key }) => key === "day-fourteen-upcoming-interview").reason, /Interview in 14 days/);
     assert.doesNotMatch(
       result.filter(({ kind }) => kind === "upcoming-interview").map(({ key }) => key).join(" "),
       /day-fifteen|past/
@@ -147,13 +152,14 @@ describe("getActionRecommendations", () => {
     );
   });
 
-  it("recommends reviewing past interviews and confirming missing or invalid dates", () => {
+  it("recommends reviewing past interviews and confirming missing or invalid details", () => {
     const result = getActionRecommendations(
       [
         application({
           id: "past",
           status: "Interview",
           interviewDate: "2026-10-21",
+          interviewTime: "10:00",
         }),
         application({
           id: "missing",
@@ -163,6 +169,7 @@ describe("getActionRecommendations", () => {
           id: "invalid",
           status: "Interview",
           interviewDate: "2026-02-30",
+          interviewTime: "10:00",
         }),
       ],
       today
@@ -192,6 +199,7 @@ describe("getActionRecommendations", () => {
           id: "interview",
           status: "Interview",
           interviewDate: "2026-10-23",
+          interviewTime: "10:00",
         }),
       ],
       today
@@ -210,5 +218,87 @@ describe("getActionRecommendations", () => {
 
   it("returns no recommendations for an empty application list", () => {
     assert.deepEqual(getActionRecommendations([], today), []);
+  });
+
+  it("uses recruitment activity rather than unrelated application edits as the follow-up clock", () => {
+    const result = getActionRecommendations(
+      [
+        application({
+          id: "recent-activity",
+          date: "2026-09-01",
+          recruitmentActivityAt: "2026-10-16T12:00:00.000Z",
+        }),
+        application({
+          id: "old-activity",
+          date: "2026-10-20",
+          recruitmentActivityAt: "2026-10-08T12:00:00.000Z",
+        }),
+      ],
+      today
+    );
+
+    assert.deepEqual(result.map(({ key }) => key), ["old-activity-follow-up"]);
+  });
+
+  it("compares interview time and date in Africa/Johannesburg", () => {
+    const result = getActionRecommendations(
+      [
+        application({
+          id: "passed-this-morning",
+          status: "Interview",
+          interviewDate: "2026-10-22",
+          interviewTime: "11:59",
+        }),
+        application({
+          id: "later-today",
+          status: "Interview",
+          interviewDate: "2026-10-22",
+          interviewTime: "12:01",
+        }),
+        application({
+          id: "missing-time",
+          status: "Interview",
+          interviewDate: "2026-10-22",
+        }),
+      ],
+      today
+    );
+
+    assert.deepEqual(
+      result.map(({ key, kind }) => [key, kind]),
+      [
+        ["later-today-upcoming-interview", "upcoming-interview"],
+        ["passed-this-morning-past-interview", "past-interview"],
+        ["missing-time-interview-details", "interview-details"],
+      ]
+    );
+  });
+
+  it("suppresses completed actions and snoozes only before their deadline", () => {
+    const followUp = application({
+      id: "snoozed",
+      recruitmentActivityAt: "2026-10-01T10:00:00.000Z",
+    });
+    const [action] = getActionRecommendations([followUp], today);
+    assert.ok(action);
+
+    assert.deepEqual(
+      getActionRecommendations([followUp], today, {
+        [action.cycleKey]: { state: "completed" },
+      }),
+      []
+    );
+    assert.deepEqual(
+      getActionRecommendations([followUp], today, {
+        [action.cycleKey]: { state: "snoozed", snoozedUntil: "2026-10-23T00:00:00.000Z" },
+      }),
+      []
+    );
+    assert.equal(
+      getActionRecommendations([followUp], today, {
+        [action.cycleKey]: { state: "snoozed", snoozedUntil: "2026-10-21T00:00:00.000Z" },
+      }).length,
+      1
+    );
   });
 });

@@ -24,6 +24,7 @@ export interface Application {
   status: ApplicationStatus;
   arrangement: WorkArrangement;
   notes: string;
+  recruitmentActivityAt?: string;
   applicationLink?: string;
   interviewDate?: string;
   interviewTime?: string;

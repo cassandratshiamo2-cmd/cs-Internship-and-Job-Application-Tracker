@@ -93,8 +93,16 @@ export default function GmailIntegrationPage() {
     const activeToken = token;
     const params = new URLSearchParams(window.location.search);
     queueMicrotask(() => {
-      if (params.get('gmail') === 'connected') setNotice('Gmail connected. Syncing recent messages now.');
-      if (params.get('gmail') && params.get('gmail') !== 'connected') {
+      const result = params.get('gmail');
+      if (result === 'connected') {
+        setNotice('Gmail connected. Recent messages are syncing.');
+      } else if (result === 'account_mismatch') {
+        setError('That Google account does not match the Gmail account already connected. Reconnect using the same Gmail address; your existing connection was not changed.');
+      } else if (result === 'reconnect_failed') {
+        setError('Google did not issue a fresh refresh token. Your existing Gmail connection was not changed. Try reconnecting and approve Gmail access again.');
+      } else if (result === 'authorization_expired') {
+        setError('Google authorization expired or was revoked. Reconnect Gmail using the same account and approve access again.');
+      } else if (result) {
         setError('Gmail connection did not complete. Check the OAuth setup and try again.');
       }
     });
@@ -341,6 +349,9 @@ export default function GmailIntegrationPage() {
                 <>
                   <button type="button" disabled={isWorking} onClick={handleSync} className="rounded-full bg-[#1b9aa1] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60">
                     Check for New Emails
+                  </button>
+                  <button type="button" disabled={isWorking || isLoading || !token} onClick={handleConnect} className="rounded-full border border-[#b9e7e4] bg-[#f0fbfa] px-4 py-2.5 text-sm font-semibold text-[#0f766e] disabled:opacity-60">
+                    Reconnect Gmail
                   </button>
                   <button type="button" disabled={isWorking} onClick={handleDisconnect} className="rounded-full border border-[#e7d6dd] bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-60">
                     Disconnect Gmail

@@ -2,6 +2,7 @@ const express = require('express');
 const { google } = require('googleapis');
 const {
   getSafeSyncErrorDetails,
+  isInvalidGrantError,
   isRetryableProcessedMessage,
 } = require('./gmail-sync');
 const { decideApplicationEmailUpdate } = require('./gmail-matcher');
@@ -50,27 +51,31 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       if (!gmailAddress) throw new Error('Google did not return the Gmail account address.');
 
       const existing = await pool.query(
-        'SELECT refresh_token_ciphertext FROM gmail_connections WHERE user_id = $1',
+        'SELECT id, gmail_address FROM gmail_connections WHERE user_id = $1',
         [userId]
       );
-      const refreshToken = tokens.refresh_token
-        ? encryptToken(tokens.refresh_token, env.GMAIL_TOKEN_ENCRYPTION_KEY)
-        : existing.rows[0]?.refresh_token_ciphertext;
-      if (!refreshToken) throw new Error('Google did not provide a refresh token. Disconnect and reconnect Gmail.');
+      const existingConnection = existing.rows[0];
+      const existingAddress = String(existingConnection?.gmail_address || '').trim().toLowerCase();
+      if (existingAddress && existingAddress !== gmailAddress) {
+        return redirectWithResult('account_mismatch');
+      }
+      if (!tokens.refresh_token) {
+        return redirectWithResult('reconnect_failed');
+      }
+
+      const refreshToken = encryptToken(tokens.refresh_token, env.GMAIL_TOKEN_ENCRYPTION_KEY);
 
       await pool.query(
         'INSERT INTO gmail_connections (' +
           'user_id, gmail_address, refresh_token_ciphertext, access_token_ciphertext, ' +
-          'token_expires_at, history_id, is_connected, last_sync_error' +
-        ') VALUES ($1, $2, $3, $4, $5, NULL, TRUE, NULL) ' +
+          'token_expires_at, is_connected, last_sync_error' +
+        ') VALUES ($1, $2, $3, $4, $5, TRUE, NULL) ' +
         'ON CONFLICT (user_id) DO UPDATE SET ' +
           'gmail_address = EXCLUDED.gmail_address, ' +
           'refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, ' +
-          'access_token_ciphertext = EXCLUDED.access_token_ciphertext, ' +
-          'token_expires_at = EXCLUDED.token_expires_at, ' +
-          'history_id = NULL, initial_sync_history_id = NULL, initial_sync_page_token = NULL, ' +
-          'quota_backoff_until = NULL, quota_failure_count = 0, ' +
-          'is_connected = TRUE, last_sync_at = NULL, last_sync_error = NULL, updated_at = NOW()',
+          'access_token_ciphertext = COALESCE(EXCLUDED.access_token_ciphertext, gmail_connections.access_token_ciphertext), ' +
+          'token_expires_at = COALESCE(EXCLUDED.token_expires_at, gmail_connections.token_expires_at), ' +
+          'is_connected = TRUE, last_sync_error = NULL, updated_at = NOW()',
         [
           userId,
           gmailAddress,
@@ -85,6 +90,10 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       });
       return redirectWithResult('connected');
     } catch (error) {
+      if (isInvalidGrantError(error)) {
+        console.error('Gmail OAuth callback failed: Google authorization is expired or revoked.');
+        return redirectWithResult('authorization_expired');
+      }
       console.error('Gmail OAuth callback failed.');
       return redirectWithResult('error');
     }
@@ -415,6 +424,8 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'interview_type = CASE WHEN $8::boolean THEN COALESCE($7, interview_type) ELSE COALESCE(interview_type, $7) END, ' +
           'interview_location = CASE WHEN $11::boolean THEN COALESCE($9, interview_location) ELSE COALESCE(interview_location, $9) END, ' +
           'interview_meeting_url = CASE WHEN $11::boolean THEN COALESCE($10, interview_meeting_url) ELSE COALESCE(interview_meeting_url, $10) END, ' +
+          'recruitment_activity_at = CASE WHEN ($5::boolean OR $8::boolean OR $11::boolean) ' +
+            'THEN NOW() ELSE recruitment_activity_at END, ' +
           'updated_at = NOW() ' +
           'WHERE id = $1 AND user_id = $2 ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +
