@@ -699,6 +699,7 @@ test('extracts only explicitly stated supported interview types', () => {
     ['Interview Type: Video', 'Video'],
     ['Interview type: Phone', 'Phone'],
     ['Interview Type: In-person', 'In-person'],
+    ['Interview Type: In-person interview', 'In-person'],
     ['Interview Type: Technical', 'Technical'],
     ['Interview Type: Panel', 'Panel'],
     ['Interview Type: Other', 'Other'],
@@ -785,6 +786,23 @@ test('extracts a company address from HTML interview email content', () => {
   assert.equal(
     details.interviewLocation,
     'Test Office, 123 Example Avenue, Hatfield, Pretoria, 0083',
+  );
+});
+
+test('uses an interview subject to qualify a generic location label only for interview emails', () => {
+  const location = 'BrightPath Technologies, 123 Innovation Drive, Hatfield, Pretoria, Gauteng, 0083';
+  const details = extractInterviewDetails({
+    subject: 'Interview Invitation – Junior Software Developer – BrightPath Technologies',
+    text: `Location: ${location}`,
+  });
+
+  assert.equal(details.interviewLocation, location);
+  assert.equal(
+    extractInterviewDetails({
+      subject: 'BrightPath Technologies office update',
+      text: `Location: ${location}`,
+    }).interviewLocation,
+    null,
   );
 });
 
