@@ -117,7 +117,10 @@ test('completed action remains completed and action states remain idempotent', a
   const completed = await completedResponse.json();
   assert.equal(completedResponse.status, 200);
   assert.equal(completed.action.state, 'completed');
-  assert.equal(pool.queries.at(-1).sql.includes('ON CONFLICT (user_id, action_id)'), true);
+  const completedWrite = pool.queries.at(-1);
+  assert.match(completedWrite.sql, /CASE WHEN \$5::VARCHAR\(16\) = 'completed'/);
+  assert.match(completedWrite.sql, /ON CONFLICT \(user_id, action_id\)/);
+  assert.equal(completedWrite.params[4], 'completed');
 
   const snoozedResponse = await fetch(`${baseUrl}/api/action-centre/states`, {
     method: 'PUT',
@@ -142,6 +145,40 @@ test('completed action remains completed and action states remain idempotent', a
   assert.equal(statesResponse.status, 200);
   assert.equal(states.states.length, 1);
   assert.equal(states.states[0].state, 'completed');
+});
+
+test('new action states save Tomorrow and In one week snooze deadlines', async (t) => {
+  const cases = [
+    ['tomorrow', '2026-10-23T10:00:00.000Z'],
+    ['one-week', '2026-10-29T10:00:00.000Z'],
+  ];
+
+  for (const [snoozePreset, expectedDeadline] of cases) {
+    await t.test(snoozePreset, async (subtest) => {
+      const pool = createPool();
+      const baseUrl = await withServer(subtest, pool);
+      const response = await fetch(`${baseUrl}/api/action-centre/states`, {
+        method: 'PUT',
+        headers: { Authorization: '******', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          applicationId: '17',
+          actionId: followUpId,
+          kind: 'follow-up',
+          state: 'snoozed',
+          snoozePreset,
+        }),
+      });
+      const payload = await response.json();
+      const write = pool.queries.at(-1);
+
+      assert.equal(response.status, 200);
+      assert.equal(payload.action.state, 'snoozed');
+      assert.equal(new Date(payload.action.snoozedUntil).toISOString(), expectedDeadline);
+      assert.match(write.sql, /CASE WHEN \$5::VARCHAR\(16\) = 'completed'/);
+      assert.equal(write.params[4], 'snoozed');
+      assert.equal(new Date(write.params[5]).toISOString(), expectedDeadline);
+    });
+  }
 });
 
 test('action state writes reject unauthenticated, cross-user, stale, and invalid snooze requests', async (t) => {
