@@ -76,7 +76,7 @@ function createActionCentreRouter({ pool, authenticateRequest, now = () => new D
       const result = await pool.query(
         'INSERT INTO dashboard_action_states ' +
           '(user_id, application_id, action_id, action_kind, state, snoozed_until, completed_at) ' +
-          'VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $5 = \'completed\' THEN NOW() ELSE NULL END) ' +
+          'VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $5::VARCHAR(16) = \'completed\' THEN NOW() ELSE NULL END) ' +
           'ON CONFLICT (user_id, action_id) DO UPDATE SET ' +
           'application_id = EXCLUDED.application_id, action_kind = EXCLUDED.action_kind, ' +
           "state = CASE WHEN dashboard_action_states.state = 'completed' THEN 'completed' ELSE EXCLUDED.state END, " +
