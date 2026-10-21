@@ -4107,3 +4107,102 @@ test('sync persists BrightPath interview location without changing other extract
   );
   assert.equal(calls.applicationUpdates, 1);
 });
+test('sync fills a missing BrightPath location on an existing Interview and preserves its details', async () => {
+  const application = {
+    id: 122,
+    company: 'BrightPath Technologies',
+    position: 'Junior Software Developer',
+    type: 'WIL',
+    status: 'Interview',
+    updated_at: new Date('2026-10-19T12:00:00Z'),
+    interview_date: '2026-10-21',
+    interview_time: '10:30:00',
+    interview_type: 'Video',
+    interview_location: null,
+    interview_meeting_url: 'https://example.com/brightpath-interview',
+    notification_channels: [],
+    application_link: null,
+    interview_email: null,
+  };
+  const location = 'BrightPath Technologies, 123 Innovation Drive, Hatfield, Pretoria, Gauteng, 0083';
+  const subject = 'Interview Invitation - Junior Software Developer - BrightPath Technologies';
+  const html = [
+    '<p>You are invited to an interview.</p>',
+    '<p>Company: BrightPath Technologies</p>',
+    '<p>Position: Junior Software Developer</p>',
+    '<p>Date: Wednesday, 21 October 2026</p>',
+    '<p>Time: 10:30 AM - 11:15 AM SAST</p>',
+    '<p>Interview Type: Video Interview</p>',
+    `<p>Location: ${location}</p>`,
+    '<p>Meeting Link: <a href="https://example.com/brightpath-interview">Join meeting</a></p>',
+  ].join('');
+  const raw = Buffer.from([
+    'From: BrightPath Recruiting <recruiter@example.test>',
+    'To: applyflow@example.com',
+    `Subject: ${subject}`,
+    'Date: Mon, 19 Oct 2026 14:17:39 +0200',
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/alternative; boundary="brightpath-existing-interview"',
+    '',
+    '--brightpath-existing-interview',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'You are invited to an interview at BrightPath Technologies for the Junior Software Developer position.',
+    '--brightpath-existing-interview',
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from(html, 'utf8').toString('base64'),
+    '--brightpath-existing-interview--',
+    '',
+  ].join('\r\n')).toString('base64url');
+  const messageId = 'brightpath-existing-interview-location';
+  const applications = [application];
+  const { service, processedRows, calls } = createTestService({
+    applications,
+    historyList: async () => ({
+      data: {
+        historyId: 'brightpath-existing-interview-location-history',
+        history: [{ messagesAdded: [{ message: { id: messageId } }] }],
+      },
+    }),
+    messageGet: async () => ({
+      data: {
+        labelIds: [],
+        raw,
+        threadId: 'brightpath-existing-interview-location-thread',
+        internalDate: String(new Date('2026-10-19T12:17:39Z').getTime()),
+      },
+    }),
+  });
+
+  const first = await service.syncConnection(7);
+  const duplicate = await service.syncConnection(7);
+
+  assert.deepEqual(first.outcomes, ['updated']);
+  assert.deepEqual(duplicate.outcomes, ['duplicate']);
+  assert.deepEqual(
+    [
+      application.status,
+      application.interview_date,
+      application.interview_time,
+      application.interview_type,
+      application.interview_location,
+      application.interview_meeting_url,
+    ],
+    [
+      'Interview',
+      '2026-10-21',
+      '10:30:00',
+      'Video',
+      location,
+      'https://example.com/brightpath-interview',
+    ],
+  );
+  assert.equal(applications.length, 1);
+  assert.equal(processedRows.size, 1);
+  assert.equal(processedRows.get(messageId).outcome, 'updated');
+  assert.equal(processedRows.get(messageId).detectedInterviewLocation, location);
+  assert.equal(calls.applicationUpdates, 1);
+  assert.equal(calls.notifications.length, 0);
+});
