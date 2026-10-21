@@ -9,7 +9,6 @@ import {
   type SnoozePreset,
 } from "@/lib/action-centre-api";
 import { getActionRecommendations } from "@/lib/action-centre";
-import { getGmailReviewQueue, type GmailReviewMessage } from "@/lib/gmail-api";
 import { getCurrentUser, getStoredApplications } from "@/lib/mock-data";
 import type { Application } from "@/lib/types";
 
@@ -27,9 +26,6 @@ export default function DashboardPage() {
   }>>({});
   const [actionStatesLoaded, setActionStatesLoaded] = useState(false);
   const [actionStateError, setActionStateError] = useState("");
-  const [gmailReviews, setGmailReviews] = useState<GmailReviewMessage[]>([]);
-  const [reviewLoaded, setReviewLoaded] = useState(false);
-  const [reviewError, setReviewError] = useState("");
   const [workingActionId, setWorkingActionId] = useState("");
   const [actionUpdateError, setActionUpdateError] = useState("");
   const [currentTime, setCurrentTime] = useState(() => new Date());
@@ -108,23 +104,7 @@ export default function DashboardPage() {
     }
 
     let isMounted = true;
-    void getGmailReviewQueue(authToken)
-      .then((messages) => {
-        if (isMounted) {
-          setGmailReviews(messages);
-          setReviewError("");
-        }
-      })
-      .catch((error) => {
-        if (isMounted) {
-          setReviewError(error instanceof Error ? error.message : "Unable to load Gmail review items.");
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setReviewLoaded(true);
-        }
-      });
+
 
     void getActionStates(authToken)
       .then((states) => {
@@ -210,14 +190,7 @@ export default function DashboardPage() {
   ).length;
   const actionRecommendations = getActionRecommendations(applications, currentTime, actionStates);
   const actionStatesLoading = Boolean(authToken && !actionStatesLoaded);
-  const isReviewLoading = Boolean(authToken && !reviewLoaded);
-  const reviewPriorityStatuses = new Set(["Interview", "Offer", "Assessment", "Rejected"]);
-  const orderedGmailReviews = [...gmailReviews].sort((first, second) => {
-    const firstPriority = first.detected_status && reviewPriorityStatuses.has(first.detected_status) ? 0 : 1;
-    const secondPriority = second.detected_status && reviewPriorityStatuses.has(second.detected_status) ? 0 : 1;
-    return firstPriority - secondPriority ||
-      Date.parse(second.received_at) - Date.parse(first.received_at);
-  });
+
 
   const progressItems = [
     {
@@ -318,53 +291,7 @@ export default function DashboardPage() {
                 </p>
               </div>
 
-              {isReviewLoading ? (
-                <p className="mb-3 rounded-xl bg-[#fffafc] p-3 text-sm text-slate-500">
-                  Checking for Gmail messages that need your review...
-                </p>
-              ) : reviewError ? (
-                <p role="alert" className="mb-3 rounded-xl border border-[#f8c8d5] bg-[#fff4f7] p-3 text-sm text-[#b3506e]">
-                  Gmail review items could not be loaded: {reviewError}{" "}
-                  <Link href="/gmail" className="font-semibold underline">Open Gmail review</Link>
-                </p>
-              ) : gmailReviews.length ? (
-                <div className="mb-4 rounded-2xl border border-[#f4d4df] bg-[#fff7fa] p-4">
-                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                    <p className="font-semibold text-slate-800">
-                      {gmailReviews.length} Gmail {gmailReviews.length === 1 ? "message needs" : "messages need"} your review
-                    </p>
-                    <Link href="/gmail" className="text-sm font-semibold text-[#167c75] underline">
-                      Review emails
-                    </Link>
-                  </div>
-                  <ul className="space-y-2">
-                    {orderedGmailReviews.slice(0, 3).map((message) => {
-                      const highPriority = Boolean(
-                        message.detected_status && reviewPriorityStatuses.has(message.detected_status)
-                      );
-                      return (
-                        <li key={message.id} className="flex flex-col gap-2 rounded-xl border border-[#f0e7ef] bg-white/80 p-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold text-slate-800">
-                              {message.subject || "(No subject)"}
-                            </p>
-                            <p className="mt-1 text-xs text-slate-500">
-                              {message.detected_status
-                                ? `Possible ${message.detected_status} update · confirm in Gmail review`
-                                : "Recruitment email needs your confirmation"}
-                            </p>
-                          </div>
-                          <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${
-                            highPriority ? "bg-[#fff0f3] text-[#b3506e]" : "bg-[#f2efff] text-[#6e58a7]"
-                          }`}>
-                            {highPriority ? "High priority" : "Needs review"}
-                          </span>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              ) : null}
+
 
               {actionStateError ? (
                 <p role="alert" className="mb-3 rounded-xl border border-[#f8c8d5] bg-[#fff4f7] p-3 text-sm text-[#b3506e]">
@@ -456,13 +383,9 @@ export default function DashboardPage() {
                   Checking for actions...
                 </div>
               ) : (
-                <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-[#fffafc] p-6 text-center text-sm text-slate-500">
-                  {gmailReviews.length > 0
-                    ? "Review the Gmail message above. No application reminders need action right now."
-                    : reviewError
-                      ? "No application reminders need action right now. Gmail review status could not be confirmed."
-                      : "No actions need your attention right now. New reminders will appear here when there is a helpful next step."}
-                </div>
+               <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-[#fffafc] p-6 text-center text-sm text-slate-500">
+               No actions need your attention right now. New reminders will appear here when there is a helpful next step.
+              </div>
               )}
             </section>
 
