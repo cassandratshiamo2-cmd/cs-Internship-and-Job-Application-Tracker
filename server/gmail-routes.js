@@ -2,6 +2,7 @@ const express = require('express');
 const { google } = require('googleapis');
 const {
   getSafeSyncErrorDetails,
+  isInvalidGrantError,
   isRetryableProcessedMessage,
 } = require('./gmail-sync');
 const { decideApplicationEmailUpdate } = require('./gmail-matcher');
@@ -59,7 +60,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         return redirectWithResult('account_mismatch');
       }
       if (!tokens.refresh_token) {
-        throw new Error('Google did not issue a fresh refresh token. Please reconnect Gmail and approve the consent screen again.');
+        return redirectWithResult('reconnect_failed');
       }
 
       const refreshToken = encryptToken(tokens.refresh_token, env.GMAIL_TOKEN_ENCRYPTION_KEY);
@@ -67,13 +68,13 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       await pool.query(
         'INSERT INTO gmail_connections (' +
           'user_id, gmail_address, refresh_token_ciphertext, access_token_ciphertext, ' +
-          'token_expires_at, history_id, is_connected, last_sync_error' +
-        ') VALUES ($1, $2, $3, $4, $5, NULL, TRUE, NULL) ' +
+          'token_expires_at, is_connected, last_sync_error' +
+        ') VALUES ($1, $2, $3, $4, $5, TRUE, NULL) ' +
         'ON CONFLICT (user_id) DO UPDATE SET ' +
           'gmail_address = EXCLUDED.gmail_address, ' +
           'refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, ' +
-          'access_token_ciphertext = EXCLUDED.access_token_ciphertext, ' +
-          'token_expires_at = EXCLUDED.token_expires_at, ' +
+          'access_token_ciphertext = COALESCE(EXCLUDED.access_token_ciphertext, gmail_connections.access_token_ciphertext), ' +
+          'token_expires_at = COALESCE(EXCLUDED.token_expires_at, gmail_connections.token_expires_at), ' +
           'history_id = COALESCE(gmail_connections.history_id, EXCLUDED.history_id), ' +
           'initial_sync_history_id = COALESCE(gmail_connections.initial_sync_history_id, EXCLUDED.initial_sync_history_id), ' +
           'initial_sync_page_token = COALESCE(gmail_connections.initial_sync_page_token, EXCLUDED.initial_sync_page_token), ' +
@@ -93,6 +94,10 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       });
       return redirectWithResult('connected');
     } catch (error) {
+      if (isInvalidGrantError(error)) {
+        console.error('Gmail OAuth callback failed: Google authorization is expired or revoked.');
+        return redirectWithResult('authorization_expired');
+      }
       console.error('Gmail OAuth callback failed:', error.message);
       if (String(error.message || '').includes('refresh token')) {
         return redirectWithResult('reconnect_failed');
@@ -429,6 +434,8 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'interview_type = CASE WHEN $8::boolean THEN COALESCE($7, interview_type) ELSE COALESCE(interview_type, $7) END, ' +
           'interview_location = CASE WHEN $11::boolean THEN COALESCE($9, interview_location) ELSE COALESCE(interview_location, $9) END, ' +
           'interview_meeting_url = CASE WHEN $11::boolean THEN COALESCE($10, interview_meeting_url) ELSE COALESCE(interview_meeting_url, $10) END, ' +
+          'recruitment_activity_at = CASE WHEN ($5::boolean OR $8::boolean OR $11::boolean) ' +
+            'THEN NOW() ELSE recruitment_activity_at END, ' +
           'updated_at = NOW() ' +
           'WHERE id = $1 AND user_id = $2 ' +
           'RETURNING id, company, position, status, interview_date::text AS interview_date, ' +

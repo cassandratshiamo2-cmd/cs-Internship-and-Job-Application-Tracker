@@ -6,6 +6,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const { createApplicationRouter } = require('./application-routes');
+const { createActionCentreRouter } = require('./action-centre-routes');
 const { createGmailRouter } = require('./gmail-routes');
 const { createNotificationRouter } = require('./notification-routes');
 const { createGmailSyncService, startGmailSyncWorker } = require('./gmail-sync');
@@ -18,6 +19,7 @@ const { validateApplicationInput } = require('./application-validation');
 const { checkDatabaseHealth } = require('./health-check');
 const { createStatusChangeNotification } = require('./gmail-notifications');
 const { buildApplicationUpdateQuery } = require('./application-update-query');
+const { hasRecruitmentActivityChanged } = require('./recruitment-activity');
 const { ensureGmailSyncTimestamps } = require('./gmail-connection-schema');
 
 const app = express();
@@ -110,8 +112,29 @@ async function ensureDatabase() {
       'notification_channels TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[], ' +
       'interview_email VARCHAR(255), ' +
       'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
+      'recruitment_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
       'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()' +
       ')'
+  );
+
+  await pool.query(
+    'ALTER TABLE applications ' +
+      'ADD COLUMN IF NOT EXISTS recruitment_activity_at TIMESTAMPTZ'
+  );
+
+  await pool.query(
+    'UPDATE applications SET recruitment_activity_at = created_at ' +
+      'WHERE recruitment_activity_at IS NULL'
+  );
+
+  await pool.query(
+    'ALTER TABLE applications ' +
+      'ALTER COLUMN recruitment_activity_at SET DEFAULT NOW()'
+  );
+
+  await pool.query(
+    'ALTER TABLE applications ' +
+      'ALTER COLUMN recruitment_activity_at SET NOT NULL'
   );
 
   await pool.query(
@@ -132,6 +155,27 @@ async function ensureDatabase() {
   await pool.query(
     'CREATE INDEX IF NOT EXISTS applications_user_idx ' +
       'ON applications (user_id, application_date DESC, created_at DESC)'
+  );
+
+  await pool.query(
+    'CREATE TABLE IF NOT EXISTS dashboard_action_states (' +
+      'id BIGSERIAL PRIMARY KEY, ' +
+      'user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, ' +
+      'application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE, ' +
+      'action_id VARCHAR(255) NOT NULL, ' +
+      "action_kind VARCHAR(32) NOT NULL CHECK (action_kind IN ('follow-up', 'urgent-follow-up', 'upcoming-interview', 'past-interview', 'interview-details', 'saved-opportunity')), " +
+      "state VARCHAR(16) NOT NULL CHECK (state IN ('completed', 'snoozed')), " +
+      'snoozed_until TIMESTAMPTZ, ' +
+      'completed_at TIMESTAMPTZ, ' +
+      'created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
+      'updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ' +
+      'UNIQUE (user_id, action_id)' +
+      ')'
+  );
+
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS dashboard_action_states_user_idx ' +
+      'ON dashboard_action_states (user_id, application_id)'
   );
 
   await pool.query(
@@ -468,6 +512,11 @@ const gmailSyncService = createGmailSyncService({
   pool,
   scheduleInterviewReminder: replaceInterviewNotificationJobs,
 });
+app.use(
+  '/api/action-centre',
+  createActionCentreRouter({ pool, authenticateRequest })
+);
+
 app.use(
   '/api/gmail',
   createGmailRouter({
@@ -1247,7 +1296,8 @@ app.get(
           'interview_location AS "interviewLocation", ' +
           'interview_meeting_url AS "interviewMeetingUrl", ' +
           'notification_channels AS "notificationChannels", ' +
-          'interview_email AS "interviewEmail" ' +
+          'interview_email AS "interviewEmail", ' +
+          'recruitment_activity_at AS "recruitmentActivityAt" ' +
         'FROM applications ' +
         'WHERE user_id = $1 ' +
         'ORDER BY application_date DESC, created_at DESC',
@@ -1272,6 +1322,7 @@ app.get(
           interviewMeetingUrl: application.interviewMeetingUrl || undefined,
           notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
           interviewEmail: application.interviewEmail || undefined,
+          recruitmentActivityAt: application.recruitmentActivityAt,
         };
       });
 
@@ -1311,6 +1362,7 @@ function serializeApplication(application) {
     interviewMeetingUrl: application.interviewMeetingUrl || undefined,
     notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
     interviewEmail: application.interviewEmail || undefined,
+    recruitmentActivityAt: application.recruitmentActivityAt,
   };
 }
 
@@ -1344,7 +1396,8 @@ app.get(
           'interview_location AS "interviewLocation", ' +
           'interview_meeting_url AS "interviewMeetingUrl", ' +
           'notification_channels AS "notificationChannels", ' +
-          'interview_email AS "interviewEmail" ' +
+          'interview_email AS "interviewEmail", ' +
+          'recruitment_activity_at AS "recruitmentActivityAt" ' +
         'FROM applications ' +
         'WHERE id = $1 AND user_id = $2',
         [applicationId, req.user.id]
@@ -1423,7 +1476,9 @@ app.put(
       try {
         await client.query('BEGIN');
         const currentApplicationResult = await client.query(
-          'SELECT status, company, position FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
+          'SELECT status, interview_date::text AS interview_date, ' +
+            'interview_time::text AS interview_time, interview_type, interview_location, ' +
+            'interview_meeting_url FROM applications WHERE id = $1 AND user_id = $2 FOR UPDATE',
           [applicationId, req.user.id]
         );
         const currentApplication = currentApplicationResult.rows[0];
@@ -1451,6 +1506,17 @@ app.put(
           interviewLocation,
           hasInterviewMeetingUrl,
           interviewMeetingUrl,
+          recruitmentActivityChanged: hasRecruitmentActivityChanged(
+            currentApplication,
+            {
+              status,
+              interviewDate: status === 'Interview' ? interviewDate : null,
+              interviewTime: status === 'Interview' ? interviewTime : null,
+              interviewType: status === 'Interview' ? interviewType || null : null,
+              interviewLocation: status === 'Interview' ? interviewLocation || null : null,
+              interviewMeetingUrl: status === 'Interview' ? interviewMeetingUrl || null : null,
+            }
+          ),
         });
         const result = await client.query(updateQuery.text, updateQuery.values);
 
@@ -1598,7 +1664,8 @@ app.post(
           'interview_location AS "interviewLocation", ' +
           'interview_meeting_url AS "interviewMeetingUrl", ' +
           'notification_channels AS "notificationChannels", ' +
-          'interview_email AS "interviewEmail"',
+          'interview_email AS "interviewEmail", ' +
+          'recruitment_activity_at AS "recruitmentActivityAt"',
           [
             req.user.id,
             company,
@@ -1659,6 +1726,7 @@ app.post(
             interviewMeetingUrl: application.interviewMeetingUrl || undefined,
             notificationChannels: Array.isArray(application.notificationChannels) ? application.notificationChannels : [],
             interviewEmail: application.interviewEmail || undefined,
+            recruitmentActivityAt: application.recruitmentActivityAt,
           },
           notificationSchedule: notificationSchedule,
         });

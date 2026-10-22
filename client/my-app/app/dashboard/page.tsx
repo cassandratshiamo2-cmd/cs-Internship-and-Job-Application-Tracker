@@ -3,6 +3,11 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AppShell, SectionTitle, StatCard, StatusBadge } from "@/components/app-shell";
+import {
+  getActionStates,
+  updateActionState,
+  type SnoozePreset,
+} from "@/lib/action-centre-api";
 import { getActionRecommendations } from "@/lib/action-centre";
 import { getCurrentUser, getStoredApplications } from "@/lib/mock-data";
 import type { Application } from "@/lib/types";
@@ -14,6 +19,16 @@ export default function DashboardPage() {
   const [userName, setUserName] = useState("Your profile");
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [actionStates, setActionStates] = useState<Record<string, {
+    state: "completed" | "snoozed";
+    snoozedUntil?: string;
+  }>>({});
+  const [actionStatesLoaded, setActionStatesLoaded] = useState(false);
+  const [actionStateError, setActionStateError] = useState("");
+  const [workingActionId, setWorkingActionId] = useState("");
+  const [actionUpdateError, setActionUpdateError] = useState("");
+  const [currentTime, setCurrentTime] = useState(() => new Date());
 
   useEffect(() => {
     let isMounted = true;
@@ -26,6 +41,9 @@ export default function DashboardPage() {
       }
 
       const token = window.localStorage.getItem("applyflow_token");
+      if (isMounted) {
+        setAuthToken(token || "");
+      }
 
       // Guest/demo mode keeps the existing mock data.
       if (!token) {
@@ -77,6 +95,84 @@ export default function DashboardPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (authToken === null) {
+      return;
+    }
+    if (!authToken) {
+      return;
+    }
+
+    let isMounted = true;
+    void getActionStates(authToken)
+      .then((states) => {
+        if (!isMounted) {
+          return;
+        }
+        setActionStates(Object.fromEntries(
+          states.map((state) => [
+            state.actionId,
+            {
+              state: state.state,
+              snoozedUntil: state.snoozedUntil || undefined,
+            },
+          ])
+        ));
+        setActionStateError("");
+      })
+      .catch((error) => {
+        if (isMounted) {
+          setActionStateError(error instanceof Error ? error.message : "Unable to load action states.");
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setActionStatesLoaded(true);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [authToken]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setCurrentTime(new Date()), 30_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  async function handleActionState(
+    action: ReturnType<typeof getActionRecommendations>[number],
+    state: "completed" | "snoozed",
+    snoozePreset?: SnoozePreset
+  ) {
+    if (!authToken || workingActionId) {
+      return;
+    }
+    setWorkingActionId(action.cycleKey);
+    setActionUpdateError("");
+    try {
+      const result = await updateActionState(authToken, {
+        applicationId: action.applicationId,
+        actionId: action.cycleKey,
+        kind: action.kind,
+        state,
+        snoozePreset,
+      });
+      setActionStates((current) => ({
+        ...current,
+        [result.action.actionId]: {
+          state: result.action.state,
+          snoozedUntil: result.action.snoozedUntil || undefined,
+        },
+      }));
+    } catch (error) {
+      setActionUpdateError(error instanceof Error ? error.message : "Unable to update this action.");
+    } finally {
+      setWorkingActionId("");
+    }
+  }
+
   const totalApplications = applications.length;
 
   const appliedCount = applications.filter(
@@ -90,7 +186,8 @@ export default function DashboardPage() {
   const offersCount = applications.filter(
     (item) => item.status === "Offer"
   ).length;
-  const actionRecommendations = getActionRecommendations(applications);
+  const actionRecommendations = getActionRecommendations(applications, currentTime, actionStates);
+  const actionStatesLoading = Boolean(authToken && !actionStatesLoaded);
 
   const progressItems = [
     {
@@ -191,6 +288,17 @@ export default function DashboardPage() {
                 </p>
               </div>
 
+              {actionStateError ? (
+                <p role="alert" className="mb-3 rounded-xl border border-[#f8c8d5] bg-[#fff4f7] p-3 text-sm text-[#b3506e]">
+                  Action completion and snoozing are temporarily unavailable: {actionStateError}
+                </p>
+              ) : null}
+              {actionUpdateError ? (
+                <p role="alert" className="mb-3 rounded-xl border border-[#f8c8d5] bg-[#fff4f7] p-3 text-sm text-[#b3506e]">
+                  {actionUpdateError}
+                </p>
+              ) : null}
+
               {actionRecommendations.length > 0 ? (
                 <ul className="space-y-3">
                   {actionRecommendations.map((action) => {
@@ -225,20 +333,53 @@ export default function DashboardPage() {
                           </p>
                         </div>
 
-                        <Link
-                          href={action.href}
-                          className="inline-flex shrink-0 items-center justify-center rounded-full border border-[#bce9e5] bg-white px-4 py-2 text-sm font-semibold text-[#167c75] transition hover:bg-[#e9f9f6]"
-                        >
-                          View application
-                        </Link>
+                        <div className="flex shrink-0 flex-wrap gap-2">
+                          <Link
+                            href={action.href}
+                            className="inline-flex items-center justify-center rounded-full border border-[#bce9e5] bg-white px-4 py-2 text-sm font-semibold text-[#167c75] transition hover:bg-[#e9f9f6]"
+                          >
+                            View application
+                          </Link>
+                          {authToken ? (
+                            <>
+                              <button
+                                type="button"
+                                disabled={actionStatesLoading || Boolean(workingActionId)}
+                                onClick={() => void handleActionState(action, "completed")}
+                                className="rounded-full border border-[#d9e9e5] bg-white px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50"
+                              >
+                                {workingActionId === action.cycleKey ? "Saving..." : "Done"}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={actionStatesLoading || Boolean(workingActionId)}
+                                onClick={() => void handleActionState(action, "snoozed", "tomorrow")}
+                                className="rounded-full border border-[#e7d6dd] bg-white px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50"
+                              >
+                                Tomorrow
+                              </button>
+                              <button
+                                type="button"
+                                disabled={actionStatesLoading || Boolean(workingActionId)}
+                                onClick={() => void handleActionState(action, "snoozed", "one-week")}
+                                className="rounded-full border border-[#e7d6dd] bg-white px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50"
+                              >
+                                In one week
+                              </button>
+                            </>
+                          ) : null}
+                        </div>
                       </li>
                     );
                   })}
                 </ul>
+              ) : isLoading || actionStatesLoading ? (
+                <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-[#fffafc] p-6 text-center text-sm text-slate-500">
+                  Checking for actions...
+                </div>
               ) : (
                 <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-[#fffafc] p-6 text-center text-sm text-slate-500">
-                  Everything is up to date. New reminders will appear here
-                  when there is a helpful next step.
+                  No actions need your attention right now. New reminders will appear here when there is a helpful next step.
                 </div>
               )}
             </section>

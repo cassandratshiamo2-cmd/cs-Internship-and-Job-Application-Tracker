@@ -22,6 +22,7 @@ const baseApplicationUpdate = {
   interviewLocation: 'Spar Sandton',
   hasInterviewMeetingUrl: true,
   interviewMeetingUrl: 'https://meet.example.test/interview',
+  recruitmentActivityChanged: true,
 };
 
 test('Interview application update binds schedule, optional details, and existing application fields', () => {
@@ -53,7 +54,9 @@ test('Interview application update binds schedule, optional details, and existin
     'Spar Sandton',
     true,
     'https://meet.example.test/interview',
+    true,
   ]);
+  assert.match(text, /recruitment_activity_at = CASE WHEN \$20::boolean THEN NOW\(\) ELSE recruitment_activity_at END/);
   assert.match(text, /ELSE interview_location END/);
   assert.match(text, /ELSE interview_meeting_url END/);
   assert.match(text, /WHERE id = \$1 AND user_id = \$2/);
@@ -69,7 +72,16 @@ test('omitted location and meeting link preserve existing optional details', () 
     interviewMeetingUrl: '',
   });
 
-  assert.deepEqual(values.slice(15), [false, '', false, '']);
+  assert.deepEqual(values.slice(15), [false, '', false, '', true]);
   assert.match(text, /WHEN \$16::boolean THEN NULLIF\(\$17, ''\) ELSE interview_location END/);
   assert.match(text, /WHEN \$18::boolean THEN NULLIF\(\$19, ''\) ELSE interview_meeting_url END/);
+});
+
+test('application edits can leave recruitment activity timestamp unchanged', () => {
+  const { values, text } = buildApplicationUpdateQuery({
+    ...baseApplicationUpdate,
+    recruitmentActivityChanged: false,
+  });
+  assert.equal(values[19], false);
+  assert.match(text, /recruitment_activity_at = CASE WHEN \$20::boolean THEN NOW\(\) ELSE recruitment_activity_at END/);
 });

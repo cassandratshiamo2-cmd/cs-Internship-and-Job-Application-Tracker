@@ -107,6 +107,125 @@ async function withGmailReviewServer(t, options) {
   return `http://127.0.0.1:${server.address().port}`;
 }
 
+async function withOAuthCallbackServer(t, { connection, gmailAddress, tokens, tokenError }) {
+  const { google } = require('googleapis');
+  const originalGetToken = google.auth.OAuth2.prototype.getToken;
+  const originalGmail = google.gmail;
+  google.auth.OAuth2.prototype.getToken = async () => {
+    if (tokenError) throw tokenError;
+    return { tokens };
+  };
+  google.gmail = () => ({
+    users: {
+      getProfile: async () => ({ data: { emailAddress: gmailAddress } }),
+    },
+  });
+  t.after(() => {
+    google.auth.OAuth2.prototype.getToken = originalGetToken;
+    google.gmail = originalGmail;
+  });
+
+  const originalConnection = connection ? structuredClone(connection) : null;
+  const calls = { writes: 0, syncs: 0, connectionSelectSql: '', upsertSql: '' };
+  const pool = {
+    async query(sql, params = []) {
+      if (sql.startsWith('DELETE FROM gmail_oauth_states')) {
+        return { rowCount: 1, rows: [{ user_id: 7 }] };
+      }
+      if (sql.startsWith(
+        'SELECT id, gmail_address, history_id, initial_sync_history_id, initial_sync_page_token FROM gmail_connections'
+      )) {
+        calls.connectionSelectSql = sql;
+        return {
+          rowCount: connection ? 1 : 0,
+          rows: connection ? [{
+            id: connection.id,
+            gmail_address: connection.gmail_address,
+            history_id: connection.history_id,
+            initial_sync_history_id: connection.initial_sync_history_id,
+            initial_sync_page_token: connection.initial_sync_page_token,
+          }] : [],
+        };
+      }
+      if (sql.startsWith('INSERT INTO gmail_connections')) {
+        calls.writes += 1;
+        calls.upsertSql = sql;
+        if (connection) {
+          connection.gmail_address = params[1];
+          connection.refresh_token_ciphertext = params[2];
+          connection.access_token_ciphertext = params[3] ?? connection.access_token_ciphertext;
+          connection.token_expires_at = params[4] ?? connection.token_expires_at;
+          connection.quota_backoff_until = null;
+          connection.quota_failure_count = 0;
+          connection.is_connected = true;
+          connection.last_sync_error = null;
+          connection.updated_at = 'updated-by-test';
+        }
+        return { rowCount: 1, rows: [] };
+      }
+      throw new Error(`Unexpected OAuth test query: ${sql}`);
+    },
+  };
+
+  const app = express();
+  app.use(express.json());
+  app.use('/api/gmail', createGmailRouter({
+    pool,
+    syncService: {
+      async syncUser(userId) {
+        assert.equal(userId, 7);
+        calls.syncs += 1;
+      },
+    },
+    authenticateRequest(req, res, next) { req.user = { id: 7 }; next(); },
+    scheduleInterviewReminder: async () => {},
+    env: {
+      CLIENT_URL: 'http://localhost:3000',
+      GOOGLE_CLIENT_ID: 'test-client-id',
+      GOOGLE_CLIENT_SECRET: 'test-client-secret',
+      GOOGLE_REDIRECT_URI: 'http://localhost:5000/api/gmail/oauth/callback',
+      GMAIL_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
+    },
+  }));
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+
+  return {
+    async callback() {
+      return fetch(
+        `http://127.0.0.1:${server.address().port}/api/gmail/oauth/callback?state=valid-state&code=test-code`,
+        { redirect: 'manual' }
+      );
+    },
+    connection,
+    originalConnection,
+    calls,
+  };
+}
+
+function existingGmailConnection() {
+  return {
+    id: 44,
+    user_id: 7,
+    gmail_address: 'connected@example.test',
+    refresh_token_ciphertext: 'existing-refresh-ciphertext',
+    access_token_ciphertext: 'existing-access-ciphertext',
+    token_expires_at: '2026-10-19T08:00:00.000Z',
+    history_id: 'history-cursor-44',
+    initial_sync_history_id: 'initial-history-44',
+    initial_sync_page_token: 'page-cursor-44',
+    last_sync_at: '2026-10-18T10:00:00.000Z',
+    last_sync_attempt_at: '2026-10-18T10:01:00.000Z',
+    last_successful_sync_at: '2026-10-18T09:59:00.000Z',
+    last_sync_error: 'Previous safe sync error.',
+    quota_backoff_until: '2026-10-19T14:00:00.000Z',
+    quota_failure_count: 2,
+    is_connected: false,
+    updated_at: '2026-10-18T10:01:00.000Z',
+  };
+}
+
 test('Gmail status exposes last attempt and last successful sync separately', async (t) => {
   const lastSyncAttemptAt = '2026-10-12T09:10:00.000Z';
   const lastSuccessfulSyncAt = '2026-10-12T08:00:00.000Z';
@@ -283,56 +402,107 @@ test('manual sync preserves a safe reconnect message for expired Gmail authoriza
 });
 
 test('oauth callback blocks same-account reconnect that omits a fresh refresh token', async (t) => {
-  const { google } = require('googleapis');
-  const originalGetToken = google.auth.OAuth2.prototype.getToken;
-  const originalGmail = google.gmail;
-  google.auth.OAuth2.prototype.getToken = async () => ({
+  const connection = existingGmailConnection();
+  const fixture = await withOAuthCallbackServer(t, {
+    connection,
+    gmailAddress: 'connected@example.test',
+    tokens: { access_token: 'new-access-token', expiry_date: Date.now() + 60000 },
+  });
+
+  const response = await fixture.callback();
+
+  assert.equal(response.status, 302);
+  assert.match(response.headers.get('location'), /gmail=reconnect_failed/);
+  assert.match(fixture.calls.connectionSelectSql, /history_id, initial_sync_history_id, initial_sync_page_token/);
+  assert.deepEqual(fixture.connection, fixture.originalConnection);
+  assert.equal(fixture.calls.writes, 0);
+  assert.equal(fixture.calls.syncs, 0);
+});
+
+test('OAuth reconnect with a different Gmail account leaves the saved connection unchanged', async (t) => {
+  const connection = existingGmailConnection();
+  const fixture = await withOAuthCallbackServer(t, {
+    connection,
+    gmailAddress: 'different@example.test',
     tokens: {
-      access_token: 'access-token',
-      refresh_token: undefined,
+      access_token: 'new-access-token',
+      refresh_token: 'new-refresh-token',
       expiry_date: Date.now() + 60000,
     },
   });
-  google.gmail = () => ({
-    users: {
-      getProfile: async () => ({ data: { emailAddress: 'connected@example.test' } }),
-    },
-  });
-  t.after(() => {
-    google.auth.OAuth2.prototype.getToken = originalGetToken;
-    google.gmail = originalGmail;
-  });
 
-  const app = express();
-  app.use(express.json());
-  app.use('/api/gmail', createGmailRouter({
-    pool: {
-      async query(sql, params = []) {
-        if (sql.includes('DELETE FROM gmail_oauth_states')) return { rowCount: 1, rows: [{ user_id: 7 }] };
-        if (sql.includes('SELECT id, gmail_address')) return { rowCount: 1, rows: [{ id: 11, gmail_address: 'connected@example.test' }] };
-        throw new Error(`Unexpected query: ${sql}`);
-      },
-    },
-    syncService: { async syncUser() {} },
-    authenticateRequest(req, res, next) { req.user = { id: 7 }; next(); },
-    scheduleInterviewReminder: async () => {},
-    env: {
-      CLIENT_URL: 'http://localhost:3000',
-      GOOGLE_CLIENT_ID: 'client-id',
-      GOOGLE_CLIENT_SECRET: 'secret',
-      GOOGLE_REDIRECT_URI: 'http://localhost:5000/api/gmail/oauth/callback',
-      GMAIL_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
-    },
-  }));
+  const response = await fixture.callback();
 
-  const server = http.createServer(app);
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
-  const baseUrl = `http://127.0.0.1:${server.address().port}`;
-
-  const response = await fetch(`${baseUrl}/api/gmail/oauth/callback?state=valid-state&code=code-123`, { redirect: 'manual' });
   assert.equal(response.status, 302);
-  assert.match(response.headers.get('location'), /reconnect_failed/);
+  assert.match(response.headers.get('location'), /gmail=account_mismatch/);
+  assert.deepEqual(fixture.connection, fixture.originalConnection);
+  assert.equal(fixture.calls.writes, 0);
+  assert.equal(fixture.calls.syncs, 0);
+});
+
+test('same-account OAuth reconnect updates credentials and preserves Gmail sync history', async (t) => {
+  const connection = existingGmailConnection();
+  const expiryDate = Date.now() + 60000;
+  const fixture = await withOAuthCallbackServer(t, {
+    connection,
+    gmailAddress: 'CONNECTED@example.test',
+    tokens: {
+      access_token: 'new-access-token',
+      refresh_token: 'new-refresh-token',
+      expiry_date: expiryDate,
+    },
+  });
+
+  const response = await fixture.callback();
+
+  assert.equal(response.status, 302);
+  assert.match(response.headers.get('location'), /gmail=connected/);
+  assert.match(fixture.calls.connectionSelectSql, /history_id, initial_sync_history_id, initial_sync_page_token/);
+  assert.equal(fixture.calls.writes, 1);
+  assert.equal(fixture.connection.refresh_token_ciphertext === fixture.originalConnection.refresh_token_ciphertext, false);
+  assert.equal(fixture.connection.access_token_ciphertext === fixture.originalConnection.access_token_ciphertext, false);
+  assert.equal(new Date(fixture.connection.token_expires_at).getTime(), expiryDate);
+  assert.equal(fixture.connection.gmail_address, fixture.originalConnection.gmail_address);
+  for (const key of [
+    'history_id',
+    'initial_sync_history_id',
+    'initial_sync_page_token',
+    'last_sync_at',
+    'last_sync_attempt_at',
+    'last_successful_sync_at',
+  ]) {
+    assert.equal(fixture.connection[key], fixture.originalConnection[key], `${key} should be preserved`);
+  }
+  assert.equal(fixture.connection.quota_backoff_until, null);
+  assert.equal(fixture.connection.quota_failure_count, 0);
+  assert.match(fixture.calls.upsertSql, /access_token_ciphertext = COALESCE\(EXCLUDED\.access_token_ciphertext, gmail_connections\.access_token_ciphertext\)/);
+  assert.match(fixture.calls.upsertSql, /token_expires_at = COALESCE\(EXCLUDED\.token_expires_at, gmail_connections\.token_expires_at\)/);
+  assert.match(fixture.calls.upsertSql, /history_id = COALESCE\(gmail_connections\.history_id, EXCLUDED\.history_id\)/);
+  assert.match(fixture.calls.upsertSql, /initial_sync_history_id = COALESCE\(gmail_connections\.initial_sync_history_id, EXCLUDED\.initial_sync_history_id\)/);
+  assert.match(fixture.calls.upsertSql, /initial_sync_page_token = COALESCE\(gmail_connections\.initial_sync_page_token, EXCLUDED\.initial_sync_page_token\)/);
+  assert.match(fixture.calls.upsertSql, /quota_backoff_until = NULL, quota_failure_count = 0/);
+  assert.equal(fixture.calls.syncs, 1);
+});
+
+test('OAuth callback reports invalid_grant safely and leaves the saved connection unchanged', async (t) => {
+  const connection = existingGmailConnection();
+  const fixture = await withOAuthCallbackServer(t, {
+    connection,
+    gmailAddress: 'connected@example.test',
+    tokenError: Object.assign(new Error('provider detail invalid_grant secret-token-value'), {
+      response: { data: { error: 'invalid_grant' } },
+    }),
+  });
+
+  const response = await fixture.callback();
+  const location = response.headers.get('location');
+
+  assert.equal(response.status, 302);
+  assert.match(location, /gmail=authorization_expired/);
+  assert.doesNotMatch(location, /secret-token-value|invalid_grant/i);
+  assert.deepEqual(fixture.connection, fixture.originalConnection);
+  assert.equal(fixture.calls.writes, 0);
+  assert.equal(fixture.calls.syncs, 0);
 });
 
 test('review endpoint fills an already-Interview application and schedules its complete in-app reminder', async (t) => {

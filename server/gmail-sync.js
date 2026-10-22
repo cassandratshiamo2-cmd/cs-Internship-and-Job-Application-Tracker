@@ -749,7 +749,9 @@ function createGmailSyncService({
       }
 
       const updated = await client.query(
-        'UPDATE applications SET status = CASE WHEN $8::boolean THEN $3 ELSE status END, updated_at = NOW() ' +
+        'UPDATE applications SET status = CASE WHEN $8::boolean THEN $3 ELSE status END, ' +
+          'recruitment_activity_at = CASE WHEN ($8::boolean OR $10::boolean) ' +
+            'THEN NOW() ELSE recruitment_activity_at END, updated_at = NOW() ' +
           ', interview_date = CASE WHEN $10::boolean THEN COALESCE($6::date, interview_date) ELSE COALESCE(interview_date, $6::date) END, ' +
           'interview_time = CASE WHEN $10::boolean THEN COALESCE($7::time, interview_time) ELSE COALESCE(interview_time, $7::time) END, ' +
           'interview_type = CASE WHEN $10::boolean THEN COALESCE($9, interview_type) ELSE COALESCE(interview_type, $9) END, ' +
@@ -1399,7 +1401,8 @@ function createGmailSyncService({
         }
 
         const errorStatus = getGmailErrorStatus(error);
-        const hasExpiredAuthorization = errorStatus === 401 || errorStatus === 403 || isInvalidGrantError(error);
+        const hasExpiredAuthorization =
+          errorStatus === 401 || errorStatus === 403 || isInvalidGrantError(error);
         const safeMessage = hasExpiredAuthorization
           ? 'Gmail access was denied, revoked, or expired. Reconnect Gmail and try again.'
           : 'Gmail sync failed. Please try again later.';
