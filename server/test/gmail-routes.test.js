@@ -126,16 +126,25 @@ async function withOAuthCallbackServer(t, { connection, gmailAddress, tokens, to
   });
 
   const originalConnection = connection ? structuredClone(connection) : null;
-  const calls = { writes: 0, syncs: 0, upsertSql: '' };
+  const calls = { writes: 0, syncs: 0, connectionSelectSql: '', upsertSql: '' };
   const pool = {
     async query(sql, params = []) {
       if (sql.startsWith('DELETE FROM gmail_oauth_states')) {
         return { rowCount: 1, rows: [{ user_id: 7 }] };
       }
-      if (sql.startsWith('SELECT id, gmail_address FROM gmail_connections')) {
+      if (sql.startsWith(
+        'SELECT id, gmail_address, history_id, initial_sync_history_id, initial_sync_page_token FROM gmail_connections'
+      )) {
+        calls.connectionSelectSql = sql;
         return {
           rowCount: connection ? 1 : 0,
-          rows: connection ? [{ id: connection.id, gmail_address: connection.gmail_address }] : [],
+          rows: connection ? [{
+            id: connection.id,
+            gmail_address: connection.gmail_address,
+            history_id: connection.history_id,
+            initial_sync_history_id: connection.initial_sync_history_id,
+            initial_sync_page_token: connection.initial_sync_page_token,
+          }] : [],
         };
       }
       if (sql.startsWith('INSERT INTO gmail_connections')) {
@@ -144,8 +153,10 @@ async function withOAuthCallbackServer(t, { connection, gmailAddress, tokens, to
         if (connection) {
           connection.gmail_address = params[1];
           connection.refresh_token_ciphertext = params[2];
-          connection.access_token_ciphertext = params[3] || connection.access_token_ciphertext;
-          connection.token_expires_at = params[4] || connection.token_expires_at;
+          connection.access_token_ciphertext = params[3] ?? connection.access_token_ciphertext;
+          connection.token_expires_at = params[4] ?? connection.token_expires_at;
+          connection.quota_backoff_until = null;
+          connection.quota_failure_count = 0;
           connection.is_connected = true;
           connection.last_sync_error = null;
           connection.updated_at = 'updated-by-test';
@@ -390,7 +401,7 @@ test('manual sync preserves a safe reconnect message for expired Gmail authoriza
   assert.match(payload.message, /reconnect Gmail/i);
 });
 
-test('OAuth reconnect without a fresh refresh token leaves the saved connection unchanged', async (t) => {
+test('oauth callback blocks same-account reconnect that omits a fresh refresh token', async (t) => {
   const connection = existingGmailConnection();
   const fixture = await withOAuthCallbackServer(t, {
     connection,
@@ -402,6 +413,7 @@ test('OAuth reconnect without a fresh refresh token leaves the saved connection 
 
   assert.equal(response.status, 302);
   assert.match(response.headers.get('location'), /gmail=reconnect_failed/);
+  assert.match(fixture.calls.connectionSelectSql, /history_id, initial_sync_history_id, initial_sync_page_token/);
   assert.deepEqual(fixture.connection, fixture.originalConnection);
   assert.equal(fixture.calls.writes, 0);
   assert.equal(fixture.calls.syncs, 0);
@@ -430,13 +442,14 @@ test('OAuth reconnect with a different Gmail account leaves the saved connection
 
 test('same-account OAuth reconnect updates credentials and preserves Gmail sync history', async (t) => {
   const connection = existingGmailConnection();
+  const expiryDate = Date.now() + 60000;
   const fixture = await withOAuthCallbackServer(t, {
     connection,
     gmailAddress: 'CONNECTED@example.test',
     tokens: {
       access_token: 'new-access-token',
       refresh_token: 'new-refresh-token',
-      expiry_date: Date.now() + 60000,
+      expiry_date: expiryDate,
     },
   });
 
@@ -444,8 +457,11 @@ test('same-account OAuth reconnect updates credentials and preserves Gmail sync 
 
   assert.equal(response.status, 302);
   assert.match(response.headers.get('location'), /gmail=connected/);
+  assert.match(fixture.calls.connectionSelectSql, /history_id, initial_sync_history_id, initial_sync_page_token/);
   assert.equal(fixture.calls.writes, 1);
   assert.equal(fixture.connection.refresh_token_ciphertext === fixture.originalConnection.refresh_token_ciphertext, false);
+  assert.equal(fixture.connection.access_token_ciphertext === fixture.originalConnection.access_token_ciphertext, false);
+  assert.equal(new Date(fixture.connection.token_expires_at).getTime(), expiryDate);
   assert.equal(fixture.connection.gmail_address, fixture.originalConnection.gmail_address);
   for (const key of [
     'history_id',
@@ -454,14 +470,18 @@ test('same-account OAuth reconnect updates credentials and preserves Gmail sync 
     'last_sync_at',
     'last_sync_attempt_at',
     'last_successful_sync_at',
-    'quota_backoff_until',
-    'quota_failure_count',
   ]) {
     assert.equal(fixture.connection[key], fixture.originalConnection[key], `${key} should be preserved`);
   }
-  assert.doesNotMatch(fixture.calls.upsertSql, /history_id\s*=/i);
-  assert.doesNotMatch(fixture.calls.upsertSql, /initial_sync_history_id\s*=/i);
-  assert.doesNotMatch(fixture.calls.upsertSql, /initial_sync_page_token\s*=/i);
+  assert.equal(fixture.connection.quota_backoff_until, null);
+  assert.equal(fixture.connection.quota_failure_count, 0);
+  assert.match(fixture.calls.upsertSql, /access_token_ciphertext = COALESCE\(EXCLUDED\.access_token_ciphertext, gmail_connections\.access_token_ciphertext\)/);
+  assert.match(fixture.calls.upsertSql, /token_expires_at = COALESCE\(EXCLUDED\.token_expires_at, gmail_connections\.token_expires_at\)/);
+  assert.match(fixture.calls.upsertSql, /history_id = COALESCE\(gmail_connections\.history_id, EXCLUDED\.history_id\)/);
+  assert.match(fixture.calls.upsertSql, /initial_sync_history_id = COALESCE\(gmail_connections\.initial_sync_history_id, EXCLUDED\.initial_sync_history_id\)/);
+  assert.match(fixture.calls.upsertSql, /initial_sync_page_token = COALESCE\(gmail_connections\.initial_sync_page_token, EXCLUDED\.initial_sync_page_token\)/);
+  assert.match(fixture.calls.upsertSql, /quota_backoff_until = NULL, quota_failure_count = 0/);
+  assert.equal(fixture.calls.syncs, 1);
 });
 
 test('OAuth callback reports invalid_grant safely and leaves the saved connection unchanged', async (t) => {
@@ -482,6 +502,7 @@ test('OAuth callback reports invalid_grant safely and leaves the saved connectio
   assert.doesNotMatch(location, /secret-token-value|invalid_grant/i);
   assert.deepEqual(fixture.connection, fixture.originalConnection);
   assert.equal(fixture.calls.writes, 0);
+  assert.equal(fixture.calls.syncs, 0);
 });
 
 test('review endpoint fills an already-Interview application and schedules its complete in-app reminder', async (t) => {

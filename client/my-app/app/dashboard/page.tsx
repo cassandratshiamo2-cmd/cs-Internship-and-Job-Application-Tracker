@@ -104,8 +104,6 @@ export default function DashboardPage() {
     }
 
     let isMounted = true;
-
-
     void getActionStates(authToken)
       .then((states) => {
         if (!isMounted) {
@@ -190,7 +188,6 @@ export default function DashboardPage() {
   ).length;
   const actionRecommendations = getActionRecommendations(applications, currentTime, actionStates);
   const actionStatesLoading = Boolean(authToken && !actionStatesLoaded);
-
 
   const progressItems = [
     {
@@ -291,8 +288,6 @@ export default function DashboardPage() {
                 </p>
               </div>
 
-
-
               {actionStateError ? (
                 <p role="alert" className="mb-3 rounded-xl border border-[#f8c8d5] bg-[#fff4f7] p-3 text-sm text-[#b3506e]">
                   Action completion and snoozing are temporarily unavailable: {actionStateError}
@@ -383,9 +378,9 @@ export default function DashboardPage() {
                   Checking for actions...
                 </div>
               ) : (
-               <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-[#fffafc] p-6 text-center text-sm text-slate-500">
-               No actions need your attention right now. New reminders will appear here when there is a helpful next step.
-              </div>
+                <div className="rounded-2xl border border-dashed border-[#e7d6dd] bg-[#fffafc] p-6 text-center text-sm text-slate-500">
+                  No actions need your attention right now. New reminders will appear here when there is a helpful next step.
+                </div>
               )}
             </section>
 

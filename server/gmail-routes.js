@@ -51,7 +51,7 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
       if (!gmailAddress) throw new Error('Google did not return the Gmail account address.');
 
       const existing = await pool.query(
-        'SELECT id, gmail_address FROM gmail_connections WHERE user_id = $1',
+        'SELECT id, gmail_address, history_id, initial_sync_history_id, initial_sync_page_token FROM gmail_connections WHERE user_id = $1',
         [userId]
       );
       const existingConnection = existing.rows[0];
@@ -75,6 +75,10 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
           'refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, ' +
           'access_token_ciphertext = COALESCE(EXCLUDED.access_token_ciphertext, gmail_connections.access_token_ciphertext), ' +
           'token_expires_at = COALESCE(EXCLUDED.token_expires_at, gmail_connections.token_expires_at), ' +
+          'history_id = COALESCE(gmail_connections.history_id, EXCLUDED.history_id), ' +
+          'initial_sync_history_id = COALESCE(gmail_connections.initial_sync_history_id, EXCLUDED.initial_sync_history_id), ' +
+          'initial_sync_page_token = COALESCE(gmail_connections.initial_sync_page_token, EXCLUDED.initial_sync_page_token), ' +
+          'quota_backoff_until = NULL, quota_failure_count = 0, ' +
           'is_connected = TRUE, last_sync_error = NULL, updated_at = NOW()',
         [
           userId,
@@ -94,7 +98,13 @@ function createGmailRouter({ pool, syncService, authenticateRequest, scheduleInt
         console.error('Gmail OAuth callback failed: Google authorization is expired or revoked.');
         return redirectWithResult('authorization_expired');
       }
-      console.error('Gmail OAuth callback failed.');
+      console.error('Gmail OAuth callback failed:', error.message);
+      if (String(error.message || '').includes('refresh token')) {
+        return redirectWithResult('reconnect_failed');
+      }
+      if (String(error.message || '').includes('does not match')) {
+        return redirectWithResult('account_mismatch');
+      }
       return redirectWithResult('error');
     }
   });
